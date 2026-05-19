@@ -17,6 +17,9 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
     if F.shape[0] != m:
         return None, None
 
+    # whiten the space by cholesky-factoring the covariance matrix M.
+    # in the whitened coordinates the covariance is identity, which means
+    # hamiltonian dynamics become simple circular motion (no coupling between dims)
     if cov:
         mu = mu_r
         g  = g + F @ mu
@@ -33,6 +36,7 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
 
     d            = initial_X.shape[0]
     bounce_count = 0
+    # nearzero is used to avoid re-hitting the same constraint boundary on the very next step
     nearzero     = 10000 * np.finfo(np.float64).eps
 
     F = np.ascontiguousarray(F)
@@ -58,7 +62,9 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
     outer_iter = 0
     while i < L:
         outer_iter += 1
-        
+
+        # if we're stuck bouncing around and never accepting new samples,
+        # just repeat the last valid sample for the remaning slots and bail out
         if outer_iter > L * 100:
             for k in range(i, L):
                 Xs[:, k] = last_X.flatten()
@@ -95,9 +101,13 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
                     val += F[r, c] * b[c, 0]
                 fb[r, 0] = val
 
+            # for each constraint F[r]*x >= -g[r], the trajectory x(t) = a*sin(t) + b*cos(t)
+            # means the constraint value traces a sinusoid with amplitude U and phase phi.
+            # need to find the t values where this sinusoid crosses zero (hits the boundary)
             U   = np.sqrt(fa ** 2 + fb ** 2)
             phi = np.arctan2(-fa, fb)
 
+            # constraints where |g/U| > 1 are never active along this arc (never hit the wall)
             g_over_U = g / U
             pn       = (np.abs(g_over_U) <= 1).flatten()
 
@@ -157,11 +167,14 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
             if stop:
                 break
 
+            # reflect the velocity off the j-th constraint wall.
+            # subtract the component of velocity
+            # normal to the wall (qj is the projection onto the normal direction)
             dot_val = 0.0
             for k in range(d):
                 dot_val += F[j, k] * V[k, 0]
             qj = dot_val / F2[j]
-            
+
             for k in range(d):
                 V0[k, 0] = V[k, 0] - 2 * qj * Ft[k, j]
             bounce_count += 1
@@ -180,6 +193,7 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
             last_X = X
             i += 1
 
+    # transform samples back from whitened coordinates to the original space
     if cov:
         Xs = R.T @ Xs + mu
     else:

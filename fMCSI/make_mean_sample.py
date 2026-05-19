@@ -9,6 +9,8 @@ import numpy as np
 import numba as nb
 
 
+# simple recursive filter: y[n] = x[n] + alpha*y[n-1]
+# this is equivalent to convolution with a decaying exponential, but way faster
 @nb.njit(cache=True, fastmath=True)
 def _iir_filter(x, alpha):
 
@@ -46,11 +48,15 @@ def _compute_single_trace(ss_arr, T, tau0, tau1, am_val, cb_val, cin_val, dt):
         elif idx >= T:
             idx = T - 1
 
+        # offset is the sub-frame time within the bin; use it to scale the starting amplitude
+        # of each exponential component so spike timing is precise below the frame resolution
         offset = st - dt * ceil_st
         if gr0 > 0.0:
             s_1[idx] += np.float32(np.exp(offset / tau0))
         s_2[idx] += np.float32(np.exp(offset / tau1))
 
+    # apply the iir filter to get the two exponential components of the calcium transient,
+    # then combine them to get the net double-exponential shape
     G1sp = _iir_filter(s_1, gr0) if gr0 > 0.0 else np.zeros(T, dtype=np.float32)
     G2sp = _iir_filter(s_2, gr1)
     Gs   = (-G1sp + G2sp) / diff_gr   # float32
@@ -66,6 +72,8 @@ def _compute_single_trace(ss_arr, T, tau0, tau1, am_val, cb_val, cin_val, dt):
     return trace
 
 
+# reconstruct the mean calcium trace by averaging over all posterior spike train samples.
+# each sample gives a slightly different calcium trace, so the mean is a smoother estimate
 def make_mean_sample(SAMPLES, Y):
 
     T = len(Y)
@@ -79,6 +87,8 @@ def make_mean_sample(SAMPLES, Y):
     if 'g' not in SAMPLES:
         SAMPLES['g'] = np.tile(g_val, (N, 1))
 
+    # if Cb has exactly 2 elements it's stored as [mean, std] (marginalized mode),
+    # otherwise it's a full array of per-sample values
     marg = 1 if len(np.atleast_1d(SAMPLES['Cb'])) == 2 else 0
 
     C_sum    = np.zeros(T, dtype=np.float32)

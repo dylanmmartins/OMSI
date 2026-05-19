@@ -13,6 +13,7 @@ import os
 _REPO_ROOT   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONFIG_FILE = os.path.join(_REPO_ROOT, 'internals.yaml')
 
+# hand-rolled yaml parser just for "key: value" lines, keeps the dependency count low
 def _load() -> dict:
     if not os.path.exists(_CONFIG_FILE):
         return {}
@@ -30,12 +31,14 @@ def _load() -> dict:
 
 def _save(config: dict) -> None:
     with open(_CONFIG_FILE, 'w') as fh:
-        fh.write('# fMCSI user path configuration — auto-generated, do not commit\n')
+        fh.write('# fMCSI user path configuration -- auto-generated, do not commit\n')
         fh.write('# Delete this file to re-run path setup prompts.\n')
         for key, value in config.items():
             fh.write(f'{key}: {value}\n')
 
 
+# pops a native file dialog so the user can pick a directory on first run.
+# falls back to the system temp dir if tkinter isnt available (e.g. headless servers)
 def _pick_directory(prompt: str) -> str:
     try:
         import tkinter as tk
@@ -46,7 +49,7 @@ def _pick_directory(prompt: str) -> str:
         root.attributes('-topmost', True)
 
         messagebox.showinfo(
-            'fMCSI — first-time path setup',
+            'fMCSI -- first-time path setup',
             f'{prompt}\n\nClick OK, then choose a folder.',
             parent=root,
         )

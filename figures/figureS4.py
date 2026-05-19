@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import argparse
 import os
@@ -114,7 +116,6 @@ def _load_all_records(data_dir):
         all_records[method_key] = recs
         print(f'  Loaded {len(recs):5d} records for {method_key}')
 
-        # recompute kurtosis from stored traces (dF/F normalisation)
         traces_dir  = os.path.join(data_dir, f'ground_truth_traces_{method_key}')
         ds_counters = {}
         npz_cache   = {}

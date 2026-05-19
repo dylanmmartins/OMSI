@@ -13,6 +13,9 @@ from scipy.linalg import toeplitz as sp_toeplitz
 from scipy.signal import lfilter
 
 
+# estimate noise std from the high-frequency end of the power spectral density.
+# calcium transients are slow, so high frequencies are dominated by noise rather than signal.
+# we use geometric mean of the psd (mean in log domain) which is more robust to outlier frequencies
 def _get_sn(y, range_ff):
 
     L = len(y)
@@ -26,7 +29,9 @@ def _get_sn(y, range_ff):
     return float(np.sqrt(np.exp(np.mean(np.log(psd[ind] / 2.0)))))
 
 
-
+# fits ar(p) time constants from the autocorrelation structure using yule-walker equations.
+# the toeplitz matrix is what the autocorrelation should look like under the ar model,
+# minus the noise contribution (sn^2 on the diagonal for lag zero)
 def _estimate_time_constants(y, p, sn, lags=20):
 
     lags = lags + p
@@ -46,6 +51,8 @@ def _estimate_time_constants(y, p, sn, lags=20):
 
 
 
+# compute the impulse response of the ar filter by recursively expanding h[k] = sum(g_j * h[k-j-1]).
+# cuts off the tail once it decays below 1% of the peak to keep convolution cheap
 def _ar_kernel(g, K):
 
     g = np.atleast_1d(g).flatten()
@@ -64,6 +71,9 @@ def _ar_kernel(g, K):
 
 
 
+# runs nnls block by block to keep memory manageable on long recordings.
+# spillover tracks the tail of each block's calcium response that bleeds into the next block,
+# so subtract it before solving the next block (otherwise it would undercount spikes near boundaries)
 def _block_nnls_deconv(y_corr, h, T, block_size=400):
 
     K = len(h)
@@ -155,9 +165,13 @@ def get_init_sample(Y, params):
 
     dt = 1.0
     sp_max = float(np.max(sp)) if len(sp) > 0 else 0.0
+    
+    # keep frames where the nnls response is at least 15% of the peak
     s_in = (sp > 0.15 * sp_max) if sp_max > 0 else np.zeros(T, dtype=bool)
     indices = np.where(s_in)[0]
 
+    # jitter spike positions slightly within their frame to get sub-frame precision
+    # and reflect any that land just outside the recording bounds back in
     spiketimes_ = dt * (indices.astype(float) + np.random.rand(len(indices)) - 0.5)
     oob = spiketimes_ >= T * dt
     spiketimes_[oob] = 2.0 * T * dt - spiketimes_[oob]
@@ -168,11 +182,14 @@ def get_init_sample(Y, params):
 
     sp_in = sp[s_in]
     if len(sp_in) > 0:
+        # amplitude guess is the median of detected spike amplitudes,
+        # but at least 1/4 of the max so we dont undershot on sparse data
         SAM['A_'] = max(float(np.median(sp_in)), float(np.max(sp_in)) / 4.0)
     else:
         SAM['A_'] = sn
 
     if len(g) == 2:
+        # rescale for ar(2): the peak of the impulse response isnt 1 but depends on g values
         denom = g[0] ** 2 + 4 * g[1]
         if denom > 0:
             SAM['A_'] = SAM['A_'] / np.sqrt(denom)

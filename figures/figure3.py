@@ -1580,7 +1580,6 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
 
-    # Build fMCSI cache from separate files (same priority logic as plot_figure)
     fmcsi_records_lookup = _build_fmcsi_records_lookup(data_dir)
     fmcsi_data_cache = {}
     for orig_basename, fmcsi_path in fmcsi_records_lookup.items():

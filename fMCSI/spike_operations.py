@@ -24,10 +24,14 @@ def add_spike(spike_train, n_spikes, old_calcium, old_ll, ef_h, ef_d, ef_nh, ef_
 
     tau_h, tau_d = tau[0], tau[1]
 
+    # wk_h and wk_d are the starting amplitudes of each exponential component at this spike time.
+    # the sub-frame offset (time_to_add - dt*ceil(...)) shifts the starting amplitude slightly
     wk_h = A * np.exp((time_to_add - dt * np.ceil(time_to_add / dt)) / tau_h)
     wk_d = A * np.exp((time_to_add - dt * np.ceil(time_to_add / dt)) / tau_d)
     t_floor = int(np.floor(time_to_add))
 
+    # check_only mode: compute the change in log-likelihood without modifying anything,
+    # used for the metropolis accept/reject step before committing
     if check_only:
 
         end_idx_h = min(len(ef_h) + t_floor, len(old_calcium))
@@ -57,10 +61,14 @@ def add_spike(spike_train, n_spikes, old_calcium, old_ll, ef_h, ef_d, ef_nh, ef_
                 
         delta_ll_d = 2.0 * dot_d - (wk_d ** 2 * ef_nd[tmp_len_d - 1])
         
+        # delta_ll is split across the two exponential components and summed.
+        # the 2*dot term captures how well the new spike explains the current residual,
+        # and the squared term accounts for the self-overlap of the new kernel
         total_delta_ll = delta_ll_h + delta_ll_d
-        
+
         return spike_train, n_spikes, old_calcium, total_delta_ll
 
+    # grow the spike array if we've run out of space
     if n_spikes == len(spike_train): # reallocate if full
         new_capacity = max(len(spike_train) * 2, 1)
         new_spike_train = np.empty(new_capacity, dtype=spike_train.dtype)
@@ -141,6 +149,8 @@ def remove_spike(spike_train, n_spikes, old_calcium, old_ll, ef_h, ef_d, ef_nh, 
         
         return n_spikes, old_calcium, delta_ll_h + delta_ll_d
 
+    # swap-and-pop deletion: replace the target with the last spike, then decrement count.
+    # order doesnt matter because spikes are treated as an unordered set
     spike_train[indx] = spike_train[n_spikes - 1]
     new_n_spikes = n_spikes - 1
 
@@ -174,6 +184,8 @@ def remove_spike(spike_train, n_spikes, old_calcium, old_ll, ef_h, ef_d, ef_nh, 
 def replace_spike(spike_train, old_calcium, old_ll, ef_h, ef_d, ef_nh, ef_nd, tau,
                   obs_calcium, time_to_remove, indx, time_to_add, dt, A, check_only=False):
 
+    # move a spike from time_to_remove to time_to_add in one pass.
+    # cheaper than calling remove then add because we only touch the affected calcium window once
     tau_h, tau_d = tau[0], tau[1]
 
     wk_hr = A * np.exp((time_to_remove - dt * np.ceil(time_to_remove / dt)) / tau_h)
@@ -184,6 +196,7 @@ def replace_spike(spike_train, old_calcium, old_ll, ef_h, ef_d, ef_nh, ef_nd, ta
     wk_da = A * np.exp((time_to_add - dt * np.ceil(time_to_add / dt)) / tau_d)
     t_add_floor = int(np.floor(time_to_add))
 
+    # start the window at whichever spike comes first in time
     min_t = int(np.floor(min(time_to_remove, time_to_add)))
 
     end_idx_d = min(len(ef_d) + min_t, len(old_calcium))

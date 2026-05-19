@@ -11,7 +11,7 @@ from numba import typed, types
 
 from .get_init_sample import get_init_sample
 from .get_next_spikes import get_next_spikes
-from .HMC_exact2 import HMC_exact2
+from .HMC import HMC_exact2
 
 
 @nb.njit(cache=True, fastmath=True)
@@ -35,7 +35,9 @@ def _compute_ge(gr_max, T):
 @nb.njit(cache=True, fastmath=True)
 def _bin_spikes_and_Gs(spiketimes, T, tau0, tau1, gr_min, gr_max, diff_gr, dt, p,
                        s_1, s_2, G1sp, G2sp, Gs):
-    
+
+    # bin the continuous-time spikes into frames, then apply the iir filter to
+    # get the calcium trace... dump spike amplitudes into the right bin, filter gives the decay
     s_1.fill(0.0)
     s_2.fill(0.0)
     for st in spiketimes:
@@ -86,6 +88,9 @@ def _bin_s2(spiketimes, T, tau1, dt, s_2):
 @nb.njit(cache=True, fastmath=True)
 def _posterior_update(Gs, ge, Y, isanY, sg2, ld_scale, mu):
 
+    # gaussian linear regression for [amplitude, baseline, initial_calcium].
+    # builds ATA and ATy from the design matrix [Gs, 1, ge] then solves the
+    # normal equations with a small ridge prior (ld_scale) to keep it well-conditioned
     ATA = np.zeros((3, 3))
     ATy = np.zeros(3)
     for i in range(len(Y)):
@@ -141,7 +146,9 @@ def _logC_nb(Y, Gs, ge, A_val, b_val, C_in_val, isanY):
 @nb.njit(cache=True, fastmath=True)
 def _build_ef_nb(tau_cur, diff_gr_cur, t_arr, T, p, prec):
 
-
+    # precompute the exponential kernel tails used for incremental likelihood updates.
+    # truncate at the point where the kernel drops below prec * peak to save time
+    # when looping over spike proposal windows in spike_operations
     ef_d_full = np.exp(-t_arr / tau_cur[1])   # float64
 
     if p > 1:
@@ -271,6 +278,8 @@ def _mcmc_kernel_nb(
 
         spiketimes = spiketimes_buf[:n_spikes_out].copy()
 
+        # if it ended up with spikes in more than half the frames something went wrong.
+        # clear spike train and bump up the amplitude floor to push it back toward reality
         if len(spiketimes) > T * 0.5:
             spiketimes = np.empty(0, dtype=np.float64)
             A_ = max(A_, A_lb * 2.0)
@@ -281,6 +290,8 @@ def _mcmc_kernel_nb(
         spiketimes[mask_hi] = 2.0 * T * dt - spiketimes[mask_hi]
         spiketimes_ = spiketimes
 
+        # recover the normalized calcium shape (Gs) from the updated calcium trace.
+        # Gs_buf is reused as the design matrix column for the regression step below
         if A_ > 1e-9:
             for _k in range(T):
                 Gs_buf[_k] = np.float32(new_calcium[_k] / A_)
@@ -307,6 +318,8 @@ def _mcmc_kernel_nb(
                 if x_in[d] <= lb_arr[d]:
                     x_in[d] = (1.0 + 0.1 * np.sign(lb_arr[d])) * lb_arr[d] + 1e-5
 
+            # sample the next [amplitude, baseline, initial_calcium] using exact HMC
+            # in the truncated gaussian defined by the lower bounds (lb_arr)
             if np.any(np.isnan(cov_mat)):
                 Am[i]  = A_
                 Cb[i]  = b_
@@ -328,6 +341,8 @@ def _mcmc_kernel_nb(
 
             A_, b_, C_in = Am[i], Cb[i], Cin[i]
 
+            # sample noise std from its inverse-gamma posterior (conjugate to gaussian likelihood).
+            # sample precision (1/variance) from a gamma, then take the reciprocal
             sse, n_valid = _residual_sse(Y, Gs_buf, ge, A_, b_, C_in, isanY)
             shape_param  = alpha_prior + n_valid / 2.0
             scale_param  = 1.0 / (beta_prior + sse / 2.0)
@@ -356,11 +371,12 @@ def _mcmc_kernel_nb(
                 Sigb[0, 0] += cov_mat[1, 1]
                 Sigb[1, 1] += cov_mat[2, 2]
 
+        # metropolis updates for the time constants (every gam_step iterations after burn-in)
         if gam_flag and (i - B) % gam_step == 0:
 
             logC = _logC_nb(Y, Gs_buf, ge, A_, b_, C_in, isanY)
 
-
+            # propose new rise time constant tau[0], constrained to stay below tau[1]
             if p >= 2:
                 tau_  = tau.copy()
                 lc = 0
@@ -398,6 +414,7 @@ def _mcmc_kernel_nb(
                     logC = logC_
 
 
+            # propose new decay time constant tau[1], keeping it above tau[0]
             tau_  = tau.copy()
             lc = 0
             tau_temp = tau_[1] + tau2_std * np.random.randn()
@@ -439,7 +456,9 @@ def _mcmc_kernel_nb(
                 tau, diff_gr, t_arr, T, p, prec,
             )
 
-        # convergence check
+        # check for convergence compare the mean of the first half vs second half of recent samples.
+        # first wwait for burn-in to finish (amplitude stabilizes), then check whether
+        # spike count distribution has stabilized (both halves have similar means)
         if auto_stop and i >= check_every and i % check_every == 0:
             if not burn_in_done:
                 win = 100
@@ -513,7 +532,9 @@ def cont_ca_sampler(Y, params=None):
             if k not in params:
                 params[k] = v
 
-    # skip if it has low Kurtosis
+    # skip inference if the trace has low kurtosis (excess < 0.5).
+    # a gaussian trace has excess kurtosis = 0; calcium transients make the distribution
+    # heavy-tailed, so low kurtosis means the trace is basically just noise
     valid_Y = Y[isanY]
     if len(valid_Y) > 3:
         _mean = np.mean(valid_Y)
@@ -572,11 +593,15 @@ def cont_ca_sampler(Y, params=None):
     if p == 1:
         gr = np.array([0.0, np.max(gr)])
 
+    # if estimated time constants are garbage (complex, negative, or explosive),
+    # fall back to the defaults rather than letting the sampler blow up
     if np.any(gr < 0) or np.any(np.iscomplex(gr)) or len(gr) > 2 or np.max(gr) > 0.998:
         gr = np.array(params['defg'])
 
     gr = np.real(gr).astype(np.float64)
 
+    # if two roots are too close together the double-exp kernel degenerates,
+    # so replace with defaults to keep the model identifiable
     if p > 1 and abs(gr[1] - gr[0]) < 1e-4:
         gr = np.array(params['defg'], dtype=np.float64)
         gr = np.sort(gr)
@@ -634,6 +659,8 @@ def cont_ca_sampler(Y, params=None):
 
     A_lb_raw = float(params['A_lb'])
     if p > 1 and tau[1] > tau[0]:
+        # h_max is the peak of the double-exponential kernel, used to rescale the amplitude lower bound
+        # since amplitude in the sampler is in units of "peak kernel height", not raw dff
         t_max = (tau[0] * tau[1]) / (tau[1] - tau[0]) * np.log(tau[1] / tau[0])
         h_max = float(np.exp(-t_max / tau[1]) - np.exp(-t_max / tau[0]))
     else:

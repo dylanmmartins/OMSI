@@ -9,6 +9,7 @@ Written Feb 2026, DMM
 import argparse
 import glob
 import os
+import sys
 import textwrap
 import h5py
 import numpy as np
@@ -24,6 +25,9 @@ from .sampler import cont_ca_sampler
 from .make_mean_sample import make_mean_sample
 
 
+# otsu thresholding: scans every possible split point and picks the one where
+# the two resulting groups have the most separated means (weighted by group size).
+# used here to separate "noise" peaks from "real" spike peaks in the prob trace
 @numba.jit(nopython=True, cache=True)
 def _compute_otsu_threshold(data):
 
@@ -58,8 +62,10 @@ def _compute_otsu_threshold(data):
     return threshold
 
 
+# max_calls=1 tells ray to kill and restart the worker after each cell.
+# prevents memory from accumulating across cells in long sessions
 @ray.remote(max_calls=1)
-def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames):
+def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_s=0.0):
 
     t0 = time.time()
     SAMPLES = cont_ca_sampler(Y_cell, params)
@@ -71,7 +77,10 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames):
 
     calcium = make_mean_sample(SAMPLES, Y_cell)
 
-    ss          = SAMPLES['ss']
+    ss = SAMPLES['ss']
+
+    # build the spike probability trace by counting how often each frame
+    # had a spike across all posterior samples, then normalize by sample count
     prob_trace  = np.zeros(n_frames, dtype=np.float32)
     for sp_times in ss:
         if len(sp_times) > 0:
@@ -86,6 +95,9 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames):
     peaks, properties = find_peaks(prob_smooth, height=0)
     peak_heights = properties['peak_heights'] if 'peak_heights' in properties else np.array([])
 
+    # use otsu to split peaks into noise and signal clusters.
+    # then set the threshold well below the noise cluster (5 std below its mean)
+    # so we only call peaks that are clearly above the noise floor
     MIN_THRESH = 0.001
     if len(peak_heights) >= 2 and peak_heights.max() > 1e-6:
         otsu_thresh = _compute_otsu_threshold(peak_heights)
@@ -104,7 +116,10 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames):
         prob_smooth, height=prob_thresh, distance=min_dist_frames
     )
 
-    spikes_sec = spikes_frames / fs
+    # shift spike times back by the indicator lag so they line up with the actual spikes.
+    # the calcium signal peaks after the spike, so we subtract that delay here
+    lag_frames = lag_s * fs
+    spikes_sec = np.clip(spikes_frames - lag_frames, 0, n_frames - 1) / fs
 
     prec = rec = f1 = 0.0
     if true_spikes_cell is not None:
@@ -129,7 +144,7 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames):
     }
 
 
-def deconv(Y, params=None, true_spikes=None, benchmark=False):
+def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
 
     if ray.is_initialized():
         ray.shutdown()
@@ -141,21 +156,19 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False):
                'A fast local drive (e.g. SSD scratch space) is recommended.',
     )
 
-    os.environ.setdefault("RAY_enable_metrics_collection", "0")
-    os.environ.setdefault("RAY_DISABLE_METRICS_REPORTING", "1")
-
     ray.init(
         _temp_dir=ray_dir,
         ignore_reinit_error=False,
         include_dashboard=False,
         runtime_env={
             "env_vars": {
+                # pin each worker to a single thread so ray processes dont fight each other
+                # for cpu cores (ray already parallelizes at the process level)
                 "OMP_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
                 "OPENBLAS_NUM_THREADS": "1",
                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
                 "RAY_enable_metrics_collection": "0",
-                "RAY_DISABLE_METRICS_REPORTING": "1",
             }
         },
         _metrics_export_port=0,
@@ -165,6 +178,16 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False):
     n_cells, n_frames = Y.shape
 
     fs = params['f'] if params and 'f' in params else 1.0
+    
+    # derive the indicator lag from the rise time constant if we have it,
+    # otherwise fall back to 45ms which is a reasonable default for GCaMP6
+    if lag_s is None:
+        defg = params.get('defg', []) if params else []
+        if len(defg) > 0 and 0.0 < defg[0] < 1.0:
+            import math
+            lag_s = -1.0 / (fs * math.log(defg[0]))
+        else:
+            lag_s = 0.045
 
     futures = []
     for i in range(n_cells):
@@ -173,13 +196,9 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False):
         if 'auto_stop' not in p_copy:
             p_copy['auto_stop'] = True
 
-        # Support per-cell init: if 'init' is a list/tuple, extract the i-th entry
-        if 'init' in p_copy and isinstance(p_copy.get('init'), (list, tuple)):
-            p_copy['init'] = p_copy['init'][i]
-
         ts_cell  = true_spikes[i] if true_spikes is not None else None
         futures.append(
-            _process_cell.remote(Y[i].copy(), i, p_copy, ts_cell, fs, n_frames)
+            _process_cell.remote(Y[i].copy(), i, p_copy, ts_cell, fs, n_frames, lag_s)
         )
 
     results_list = []
@@ -240,15 +259,22 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False):
 
 
 def _compute_dff(f, fneu=None, f_corr=0.7, baseline_pct=8):
+
     f_corr_traces = f - f_corr * fneu if fneu is not None else f.copy()
     baseline = np.percentile(f_corr_traces, baseline_pct, axis=1, keepdims=True)
+
+    # if baseline is near zero the division blows up, so clamp it to 1.
+    # use abs in the denominator so dff stays positive when baseline goes negative
     baseline = np.where(np.abs(baseline) < 1.0, 1.0, baseline)
+
     return (f_corr_traces - baseline) / np.abs(baseline)
 
 
 def _spikes_to_train(spike_times_list, n_frames, hz):
+
     n_cells = len(spike_times_list)
     train = np.zeros((n_cells, n_frames), dtype=np.uint8)
+
     for i, sp in enumerate(spike_times_list):
         sp = np.asarray(sp, dtype=float)
         sp = sp[np.isfinite(sp)]
@@ -256,17 +282,21 @@ def _spikes_to_train(spike_times_list, n_frames, hz):
             continue
         frames = np.clip(np.round(sp * hz).astype(int), 0, n_frames - 1)
         np.add.at(train[i], frames, 1)
+
     return train
 
 
 def _spikes_to_padded(spike_times_list):
+
     n_cells = len(spike_times_list)
     lengths = [len(np.asarray(sp)) for sp in spike_times_list]
     max_n   = max(lengths) if lengths else 0
     out = np.full((n_cells, max(max_n, 1)), np.nan, dtype=np.float64)
+
     for i, sp in enumerate(spike_times_list):
         sp = np.asarray(sp, dtype=np.float64)
         out[i, :len(sp)] = sp
+
     return out
 
 
@@ -392,6 +422,8 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
         F    = np.load(f_path,    allow_pickle=True).astype(np.float32)
         Fneu = np.load(fneu_path, allow_pickle=True).astype(np.float32)
 
+        # iscell[:,0] is the binary cell/not-cell classification from suite2p.
+        # column 1 is the classifier probability... don't need this
         if cells_only and os.path.isfile(iscell_path):
             iscell = np.load(iscell_path, allow_pickle=True)  # (n_rois, 2)
             cell_mask = iscell[:, 0].astype(bool)
@@ -469,6 +501,8 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False):
                     'Pass --hz explicitly.'
                 )
 
+        # prefer F_dff if caiman already computed it, otherwise fall back to
+        # the raw component traces C and compute dff manually
         if 'estimates/F_dff' in hf:
             raw = hf['estimates/F_dff'][()]
             if raw is not None and np.ndim(raw) == 2 and raw.shape[0] > 0:
@@ -482,6 +516,7 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False):
                     'CaImAn file.  Make sure you saved a completed CNMF object.'
                 )
             C = hf['estimates/C'][()].astype(np.float32)
+            # 8th percentile as a rough baseline estimate (same logic as _compute_dff)
             baseline = np.percentile(C, 8, axis=1, keepdims=True)
             baseline = np.where(np.abs(baseline) < 1e-6, 1e-6, baseline)
             dFF = (C - baseline) / np.abs(baseline)
@@ -573,7 +608,7 @@ def _build_parser():
     s2p.add_argument(
         '--all-rois', action='store_true', default=False,
         help='Process all ROIs, including those not classified as cells by '
-             'suite2p.  Default behaviour keeps only cells (iscell[:,0]==1).',
+             'suite2p.  Default behavior keeps only cells (iscell[:,0]==1).',
     )
 
     return parser

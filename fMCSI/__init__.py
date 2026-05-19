@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fMCSI — fast Markov chain Monte Carlo spike inference for calcium imaging data.
+fMCSI -- fast Markov chain Monte Carlo spike inference for calcium imaging data.
 
 Continuous-time Markov chain Monte Carlo (MCMC) algorithm for inferring spike
 times from dF/F traces recorded with calcium indicators.

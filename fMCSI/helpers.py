@@ -28,6 +28,7 @@ def _otsu_threshold(values):
         v = w0 * w1 * (mu0 - mu1) ** 2
         if v > best_var:
             best_var, best_i = v, i
+
     return (x[best_i] + x[best_i + 1]) / 2.0
 
 
@@ -41,12 +42,15 @@ def detect_spikes_from_probs(probs, fs, sigma=1.5, min_thresh=0.001):
                    else probs[i].copy()
                    for i in range(n_cells)])
 
+    # pool peaks across all cells so the threshold is based on the global peak distribution,
+    # not just whatever one cell happens to have
     all_peaks = []
     for i in range(n_cells):
         _, props = find_peaks(sm[i], height=0)
         if 'peak_heights' in props:
             all_peaks.extend(props['peak_heights'].tolist())
 
+    # split peaks into noise and signal using otsu, then push threshold below the noise cluster
     if len(all_peaks) >= 2 and max(all_peaks) > 1e-6:
         peaks_arr = np.array(all_peaks)
         otsu = _otsu_threshold(peaks_arr)
@@ -70,9 +74,11 @@ def detect_spikes_from_probs(probs, fs, sigma=1.5, min_thresh=0.001):
 
 def spikes_to_calcium(spikes, fs_in, fs_out, tau, snr):
     n_cells, n_in = spikes.shape
-    
+
     k_len = int(5 * tau * fs_in)
 
+    # double exponential kernel: fast rise (tau_rise) followed by slow decay (tau).
+    # this mimics the shape of a real calcium transient from a spike
     tau_rise = 0.05
     t_k = np.arange(k_len) / fs_in
     kernel = np.exp(-t_k / tau) - np.exp(-t_k / tau_rise)
@@ -131,11 +137,13 @@ def compute_accuracy_strict(true_spikes, predicted_spikes, tolerance=0.100):
             continue
             
         diffs = np.abs(t_spk[:, None] - p_spk[None, :])
-        
+
+        # use hungarian algorithm for optimal one-to-one matching between true and predicted spikes.
+        # pairs outside tolerance get a huge cost so they're never matched
         cost_matrix = diffs.copy()
         LARGE_VAL = 1e6
         cost_matrix[cost_matrix > tolerance] = LARGE_VAL
-        
+
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
         
         matched_costs = cost_matrix[row_ind, col_ind]
@@ -161,6 +169,9 @@ def compute_cosmic(true_spikes, inferred_spikes, fs, tolerance=0.100):
 
     from scipy.signal import fftconvolve
 
+    # cosmic score... convolve both spike trains with a triangular kernel then compute
+    # a soft intersection-over-union. this gives partial credit for spikes that are close
+    # but not exactly aligned, unlike the strict binary matching in compute_accuracy_strict
     hw_frames = max(tolerance * fs, 1.0)
     r = int(np.ceil(hw_frames))
     t = np.arange(-r, r + 1, dtype=float)
@@ -197,6 +208,9 @@ def compute_cosmic(true_spikes, inferred_spikes, fs, tolerance=0.100):
 
 def make_event_ground_truth(spike_times_s, tau_s, event_window=0.250):
 
+    # groups spikes into burst events and keeps only isolated ones (quiet before and after).
+    # the idea is to filter down to clean single spikes that are easy to evaluate against.
+    # quiet windows are longer for slow indicators (tau >= 0.8s) since their transients overlap more
     t = np.asarray(spike_times_s, dtype=np.float64)
     if len(t) == 0:
         return t.copy()
@@ -237,7 +251,7 @@ def compute_accuracy_window(true_spikes, predicted_spikes, tolerance=0.100):
 
 
 def compute_kurtosis(traces):
-    # uses Fisher kurtosis, so normal == 0
+    # Fisher/excess kurtosis, so normal == 0
 
     if traces.ndim == 1:
         traces = traces[None, :]

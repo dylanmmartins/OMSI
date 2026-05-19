@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-CASCADE inference helper
-
-For inference:
-
-    conda run -n cascade python run_cascade_subprocess.py \
-        --mode inference --input in.npz --output out.npz
-
-For leave-one-out prediction:
-
-    conda run -n cascade python run_cascade_subprocess.py \
-        --mode loo-predict \
-        --raster-cells raster_cells.npz \
-        --loo-models-dir /path/to/cascade_loo_models \
-        --output raster_cascade_preds.npz
-
-Written DMM, 2026
-"""
 
 import argparse
 import os
@@ -177,7 +159,7 @@ def main():
     parser.add_argument('--mode', required=True,
                         choices=['inference', 'loo-predict'],
                         help='Operation mode')
-    # inference mode
+
     parser.add_argument('--input',  help='Input NPZ path (inference mode)')
     parser.add_argument('--output', required=True, help='Output NPZ path')
     parser.add_argument('--model',  default=None,

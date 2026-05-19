@@ -29,10 +29,12 @@ def get_next_spikes(curr_spikes, n_spikes, curr_calcium, calcium_signal,
     add_moves  = np.array([0, 0])
     drop_moves = np.array([0, 0])
 
+    # time-shift moves: propose moving each spike to a nearby time, accept/reject via metropolis
     for ni in range(n_spikes):
         tmpi = si[ni]
         tmpi_ = si[ni] + proposal_std * np.random.randn()
 
+        # reflect proposals outside [0, T] back into bounds
         if tmpi_ < 0:
             tmpi_ = -tmpi_
         elif tmpi_ > T:
@@ -56,6 +58,9 @@ def get_next_spikes(curr_spikes, n_spikes, curr_calcium, calcium_signal,
 
         time_moves[1] += 1
 
+    # birth-death moves: propose adding a spike at a uniform random time, then
+    # propose removing a random existing spike. these two are paired so the chain is reversible.
+    # add_move controls how many birth-death pairs to attempt per sweep
     for ii in range(add_move):
 
         tmpi = T * dt * np.random.rand()
@@ -66,6 +71,9 @@ def get_next_spikes(curr_spikes, n_spikes, curr_calcium, calcium_signal,
         )
         logC_ = logC + delta_ll
 
+        # fprob is the probability of proposing this exact time (uniform over [0, T])
+        # rprob is the probability of proposing to remove it in the reverse move
+        # the ratio includes the poisson prior on spike count via lam_val
         fprob = 1.0 / (T * dt)
         rprob = 1.0 / (n_spikes + 1)
 
