@@ -1,44 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-fMCSI -- fast Markov chain Monte Carlo spike inference for calcium imaging data.
+OMSI -- Optimized Markov chain Monte Carlo spike inference
 
 Continuous-time Markov chain Monte Carlo (MCMC) algorithm for inferring spike
 times from dF/F traces recorded with calcium indicators.
 
 If running from Suite2P:
 
-    import fMCSI
-    results = fMCSI.deconv_from_suite2p(
+    import OMSI
+    results = OMSI.deconv_from_suite2p(
         '/path/to/suite2p/output'
     )
 
 If running from CaImAn:
 
-    import fMCSI
-    results = fMCSI.deconv_from_caiman(
+    import OMSI
+    results = OMSI.deconv_from_caiman(
         '/path/to/caiman/results'
     )
 
 If running on a numpy array of fluorescence (F) and
 neuropil fluorescence (Fneu):
 
-    import fMCSI
-    results = fMCSI.deconv_from_array(
+    import OMSI
+    results = OMSI.deconv_from_array(
         f=F, fneu=Fneu, hz=30.0, outdir='/path/to/save'
     )
 
 If running on a numpy array of dF/F (dff):
 
-    import fMCSI
-    results = fMCSI.deconv_from_array(
+    import OMSI
+    results = OMSI.deconv_from_array(
         dff=dFF
     )
 
 If running from command line:
 
-    python -m fMCSI.main --suite2p -dir /data/session -hz 30
-    python -m fMCSI.main --caiman  -dir /data/session -hz 30 --mat
-    python -m fMCSI.main --array   -dir /data/session -hz 30
+    python -m OMSI.main --suite2p -dir /data/session -hz 30
+    python -m OMSI.main --caiman  -dir /data/session -hz 30 --mat
+    python -m OMSI.main --array   -dir /data/session -hz 30
 
     and add the flags
 

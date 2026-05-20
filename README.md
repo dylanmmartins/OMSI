@@ -1,6 +1,6 @@
-# Fast Markov chain Monte Carlo spike inference for calcium imaging data
+# Optimized Markov chain Monte Carlo spike inference
 
-Fast continuous-time Markov chain Monte Carlo (MCMC) algorithm for inferring spike times from dF/F traces recorded with calcium indicators. On standard lab hardware, this method can analyze a 20-minute 30 Hz recording with 500 cells in ~5 minutes, compared to 2.5+ hours with existing Matlab implementations of MCMC spike inference.
+Optimized continuous-time Markov chain Monte Carlo (MCMC) algorithm for inferring spike times from dF/F traces recorded with calcium indicators. On standard lab hardware, this method can analyze a 20-minute 30 Hz recording with 500 cells in ~5 minutes, compared to 2.5+ hours with existing Matlab implementations of MCMC spike inference.
 
 ## Installation
 
@@ -9,8 +9,8 @@ Requires Python 3.9 or later.
 ### Install with conda
 
 ```bash
-git clone https://github.com/dylanmmartins/fMCSI.git
-cd fMCSI
+git clone https://github.com/dylanmmartins/OMSI.git
+cd OMSI
 conda env create -f environment.yml
 conda activate spikeinf
 pip install -e .
@@ -19,8 +19,8 @@ pip install -e .
 ### Install with pip only
 
 ```bash
-git clone https://github.com/dylanmmartins/fMCSI.git
-cd fMCSI
+git clone https://github.com/dylanmmartins/OMSI.git
+cd OMSI
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -31,38 +31,38 @@ Both options install the package in editable mode so that updates pulled with `g
 
 If running from Suite2P:
 ```
-import fMCSI
-results = fMCSI.deconv_from_suite2p(
+import OMSI
+results = OMSI.deconv_from_suite2p(
     '/path/to/suite2p/output'
 )
 ```
 If running from CaImAn:
 ```
-import fMCSI
-results = fMCSI.deconv_from_caiman(
+import OMSI
+results = OMSI.deconv_from_caiman(
     '/path/to/caiman/results'
 )
 ```
 If running on a numpy array of fluorescence (`F`) and
 neuropil fluorescence (`Fneu`):
 ```
-import fMCSI
-results = fMCSI.deconv_from_array(
+import OMSI
+results = OMSI.deconv_from_array(
     f=F, fneu=Fneu, hz=30.0, outdir='/path/to/save'
 )
 ```
 To maximize accuracy, if you have access to the `F` and `Fneu` arrays, you should always use those when computing spike times from an array. If you only have dFF, you can call it running on a numpy array of dF/F (`dFF`):
 ```
-import fMCSI
-results = fMCSI.deconv_from_array(
+import OMSI
+results = OMSI.deconv_from_array(
     dff=dFF
 )
 ```
 ## Usage from command line
 ```
-python -m fMCSI.deconv --suite2p -dir /data/session
-python -m fMCSI.deconv --caiman  -dir /data/session
-python -m fMCSI.deconv --array   -dir /data/session -hz 30
+python -m OMSI.deconv --suite2p -dir /data/session
+python -m OMSI.deconv --caiman  -dir /data/session
+python -m OMSI.deconv --array   -dir /data/session -hz 30
 ```
 and add the optional flags
 ```

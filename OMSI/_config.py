@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fMCSI/_config.py
+OMSI/_config.py
 
 Set user-specific temp ray path to be stored in internals.yaml. GUI is
 used to get path on first use, then saved for all future runs.
