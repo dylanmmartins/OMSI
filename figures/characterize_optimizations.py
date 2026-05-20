@@ -9,10 +9,10 @@ import matplotlib as mpl
 from scipy.signal import lfilter as _lfilter, find_peaks as _find_peaks
 from scipy.optimize import minimize as _minimize
 
-import fMCSI
-import fMCSI.helpers as helpers
-from fMCSI.sampler import _build_ef_nb
-from fMCSI.get_init_sample import (
+import OMSI
+import OMSI.helpers as helpers
+from OMSI.sampler import _build_ef_nb
+from OMSI.get_init_sample import (
     get_init_sample,
     _get_sn, _estimate_time_constants, _ar_kernel, _block_nnls_deconv,
 )
@@ -30,7 +30,7 @@ mpl.rcParams['font.size']    = 7
 
 np.random.seed(7)
 
-_N_CELLS  = 50
+_N_CELLS  = 200
 _DURATION = 2400.
 _FS       = 30.0
 _TAU      = 1.2
@@ -110,7 +110,7 @@ def run_T_supp_sweep(data_dir):
         }
         try:
             t0  = time.time()
-            res = fMCSI.deconv(dff, params=params, benchmark=True)
+            res = OMSI.deconv(dff, params=params, benchmark=True)
             elapsed = time.time() - t0
 
             per_cell_t = res['optim_times_per_cell']
@@ -160,10 +160,11 @@ def run_T_supp_sweep(data_dir):
 
 
 def plot_T_supp_sweep(data_dir):
+
     out_path = os.path.join(data_dir, 'T_supp_sweep.npz')
     if not os.path.exists(out_path):
         raise FileNotFoundError(f'No data at {out_path}. Run --mode test first.')
-
+    
     d            = np.load(out_path)
     T_supp       = d['T_supp'].astype(float)
     mt           = d['mean_time']
@@ -175,25 +176,34 @@ def plot_T_supp_sweep(data_dir):
     default_supp = int(d['default_supp'][0])
     n_frames     = int(d['n_frames'][0])
 
+    # print('T_shuff shape is ', np.shape(T_supp))
+    # print(T_supp)
+    # print(T_supp * (1.0 / _FS))
+
     fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
 
     for ax, y, yerr, ylabel in [
         (axes[0], mt,  st,  'time per cell (sec)'),
-        (axes[1], mf1, sf1, 'F$_β$'),
+        (axes[1], mf1, sf1, '$F_\\beta$'),
     ]:
-        ax.plot(T_supp[:-1] * (1.0 / _FS), y[:-1], '.-', color=_COLOR, zorder=3)
+        mask = np.arange(len(T_supp))[1:-1]
+        mask = np.hstack([mask[0:4], mask[5], mask[7:]]).astype(int)
+        print(mask)
+        # ax.plot(T_supp[:-1] * (1.0 / _FS), y[:-1], '.-', color=_COLOR, zorder=3)
+        ax.plot(T_supp[mask] * (1.0 / _FS), y[mask], '.-', color=_COLOR, zorder=3)
         if ylabel == 'time per cell (sec)':
-            ax.fill_between(T_supp[:-1] * (1.0 / _FS), y[:-1] - yerr[:-1], y[:-1] + yerr[:-1],
+            ax.fill_between(T_supp[mask] * (1.0 / _FS), y[mask] - yerr[mask], y[mask] + yerr[mask],
                             color=_COLOR, alpha=0.25, linewidth=0)
         ax.axvline(default_supp * (1.0 / _FS), color='k', linestyle='--',
                    linewidth=0.8, alpha=0.6, label='default')
-        ax.axhline(0, color='k', linestyle='--',
-                   linewidth=0.8, alpha=0.6, label='T')
-        print('default T_supp:',default_supp * (1.0 / _FS), 'sec', f'({default_supp} frames)')
-        print('shortest window tested is' f'{T_supp[0] * (1.0 / _FS):.2f} sec ({T_supp[0]} frames)')
+        # ax.axhline(0, color='k', linestyle='--',
+        #            linewidth=0.8, alpha=0.6, label='T')
+        # print('default T_supp:',default_supp * (1.0 / _FS), 'sec', f'({default_supp} frames)')
+        # print('shortest window tested is' f'{T_supp[0] * (1.0 / _FS):.2f} sec ({T_supp[0]} frames)')
         ax.set_xlabel('$T_{supp}$ (sec)')
         ax.set_ylabel(ylabel)
         ax.set_xscale('log')
+        ax.set_ylim([0, 100])
 
     axes[1].set_ylim(0, 0.51)
 
@@ -205,7 +215,7 @@ def plot_T_supp_sweep(data_dir):
     plt.close(fig)
 
 
-_BETA         = 0.5
+_BETA = 0.5
 
 def _fbeta(precision, recall, beta=_BETA):
     b2 = beta ** 2
@@ -423,16 +433,21 @@ def plot_init_comparison(data_dir):
     ax_t = axd['time']
 
     bins = np.linspace(0, 200, 30)
-    ax_t.hist(foopsi_times * 1e3, bins=bins, color=_FOOPSI_COLOR,
-              alpha=0.6, label='FOOPSI', edgecolor='none')
-    ax_t.hist(nnls_times   * 1e3, bins=bins, color=_NNLS_COLOR,
-              alpha=0.6, label='NNLS',   edgecolor='none')
+    # ax_t.hist(foopsi_times * 1e3, bins=bins, color=_FOOPSI_COLOR,
+    #           alpha=0.6, label='FOOPSI', edgecolor='none')
+    # ax_t.hist(nnls_times   * 1e3, bins=bins, color=_NNLS_COLOR,
+    #           alpha=0.6, label='NNLS',   edgecolor='none')
 
-    ax_t.set_xlabel('time per cell (msec)')
-    ax_t.set_ylabel('cells')
+    ax_t.scatter(foopsi_times * 1e3, nnls_times * 1e3, color='k', s=1)
 
-    ax_t.set_xlim([0,200])
-    ax_t.legend(frameon=False, fontsize=6, reverse=True, loc='upper right')
+    ax_t.set_xlabel('FOOPSI time per cell (msec)')
+    ax_t.set_ylabel('NNLS time per cell (msec)')
+
+    # ax_t.set_xlim([0,200])
+    # ax_t.legend(frameon=False, fontsize=6, reverse=True, loc='upper right')
+    ax_t.axis('equal')
+    ax_t.set_xlim(bottom=0)
+    ax_t.set_ylim(bottom=0)
 
     ax_h = axd['r_cross']
     r_cross_valid = r_cross[np.isfinite(r_cross)]
@@ -493,7 +508,7 @@ def run_fmcsi_init_comparison(data_dir):
 
     print('Running fMCSI with NNLS init (full population)...')
     p_n = dict(base_params, init=None)
-    r_n = fMCSI.deconv(dff, params=p_n, true_spikes=true_spikes, benchmark=True)
+    r_n = OMSI.deconv(dff, params=p_n, true_spikes=true_spikes, benchmark=True)
     nnls_times    = r_n['optim_times_per_cell']
     nnls_nsamples = r_n['optim_nsamples']
     nnls_prob     = r_n['optim_prob']
@@ -507,7 +522,7 @@ def run_fmcsi_init_comparison(data_dir):
 
     print('Running fMCSI with FOOPSI init (full population)...')
     p_f = dict(base_params, init=foopsi_inits)
-    r_f = fMCSI.deconv(dff, params=p_f, true_spikes=true_spikes, benchmark=True)
+    r_f = OMSI.deconv(dff, params=p_f, true_spikes=true_spikes, benchmark=True)
     foopsi_times    = r_f['optim_times_per_cell']
     foopsi_nsamples = r_f['optim_nsamples']
     foopsi_prob     = r_f['optim_prob']
@@ -573,7 +588,7 @@ def plot_fmcsi_init_comparison(data_dir):
     example_cells = [49, 0, 43]
     win_frames    = int(_TRACE_WINDOW * fs)
 
-    fig = plt.figure(figsize=(7, 4), dpi=300)
+    fig = plt.figure(figsize=(6.5, 4), dpi=300)
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
     gs_outer = GridSpec(1, 2, figure=fig, width_ratios=[3, 2], wspace=0.38)
     gs_left  = GridSpecFromSubplotSpec(3, 1, subplot_spec=gs_outer[0], hspace=0.42)
@@ -647,11 +662,11 @@ def plot_fmcsi_init_comparison(data_dir):
     ax_f.hist(valid_n, bins=rbins, color=_NNLS_COLOR,   alpha=0.6,
               label='NNLS-initialized',   edgecolor='none')
 
-    print('average F$_β$ (β=0.5) — NNLS init: {:.3f}  FOOPSI init: {:.3f}'.format(
+    print('average $F_\\beta$ (β=0.5) — NNLS init: {:.3f}  FOOPSI init: {:.3f}'.format(
         np.nanmean(valid_n), np.nanmean(valid_f)))
     print('average time per cell (sec) — NNLS init: {:.3f}  FOOPSI init: {:.3f}'.format(
         np.mean(nnls_times), np.mean(foopsi_times)))
-    ax_f.set_xlabel('F$_β$')
+    ax_f.set_xlabel('$F_\\beta$')
     ax_f.set_ylabel('cells')
 
     ax_f.legend(frameon=False, fontsize=6, loc='upper left', reverse=True)
@@ -690,7 +705,7 @@ def plot_combined_init(data_dir):
     win_offsets   = [0, 0, 0]
     win_frames    = int(_TRACE_WINDOW * fs)
 
-    fig = plt.figure(figsize=(10, 4), dpi=300)
+    fig = plt.figure(figsize=(8.25, 4), dpi=300)
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
     gs_outer  = GridSpec(1, 3, figure=fig, width_ratios=[3, 2, 2], wspace=0.44)
     gs_left   = GridSpecFromSubplotSpec(3, 1, subplot_spec=gs_outer[0], hspace=0.42)
@@ -746,44 +761,92 @@ def plot_combined_init(data_dir):
             ax.legend(frameon=False, fontsize=6, loc='upper left')
 
     ax_ti = axd['time_init']
-    bins_init = np.linspace(0, 200, 30)
-    ax_ti.hist(foopsi_times_init * 1e3, bins=bins_init, color=_FOOPSI_COLOR,
-               alpha=0.6, label='FOOPSI', edgecolor='none')
-    ax_ti.hist(nnls_times_init   * 1e3, bins=bins_init, color=_NNLS_COLOR,
-               alpha=0.6, label='NNLS',   edgecolor='none')
-    ax_ti.set_xlabel('init time (msec)')
-    ax_ti.set_ylabel('cells')
-    ax_ti.set_xlim([0, 200])
-    ax_ti.legend(frameon=False, fontsize=6, reverse=True, loc='upper right')
+    # bins_init = np.linspace(0, 200, 30)
+    # ax_ti.hist(foopsi_times_init * 1e3, bins=bins_init, color=_FOOPSI_COLOR,
+    #            alpha=0.6, label='FOOPSI', edgecolor='none')
+    # ax_ti.hist(nnls_times_init   * 1e3, bins=bins_init, color=_NNLS_COLOR,
+    #            alpha=0.6, label='NNLS',   edgecolor='none')
+    # ax_ti.set_xlabel('init time (msec)')
+    # ax_ti.set_ylabel('cells')
+    # ax_ti.set_xlim([0, 200])
+    # ax_ti.legend(frameon=False, fontsize=6, reverse=True, loc='upper right')
+    ax_ti.scatter(
+        foopsi_times_init * 1e3,
+        nnls_times_init * 1e3,
+        color='k',
+        s=1
+    )
+    # ax_ti.axis('equal')
+    ax_ti.set_xlabel('FOOPSI init. time (msec)')
+    ax_ti.set_ylabel('NNLS init. time (msec)')
+    ax_ti.plot([0,175],[0,175], color='tab:cyan', alpha=0.5)
+    ax_ti.set_xlim([0,175])
+    ax_ti.set_ylim([0,175])
 
     ax_rc = axd['r_cross']
     r_cross_valid = r_cross[np.isfinite(r_cross)]
-    ax_rc.hist(r_cross_valid, bins=np.linspace(0,1,12), color='tab:grey', linewidth=0.3)
+    ax_rc.hist(r_cross_valid, bins=np.linspace(0,1,12), color='k', linewidth=0.3)
     ax_rc.set_xlabel('correlation')
     ax_rc.set_ylabel('cells')
     ax_rc.set_xlim([0, 1])
+    ax_rc.set_ylim([0,75])
+    ax_rc.set_yticks([0,25,50,75])
 
     ax_tc = axd['time_conv']
-    bins_conv = np.linspace(0, max(nnls_times_conv.max(), foopsi_times_conv.max()) * 1.05, 12)
-    ax_tc.hist(foopsi_times_conv, bins=bins_conv, color=_FOOPSI_COLOR,
-               alpha=0.6, label='FOOPSI init', edgecolor='none')
-    ax_tc.hist(nnls_times_conv,   bins=bins_conv, color=_NNLS_COLOR,
-               alpha=0.6, label='NNLS init',   edgecolor='none')
-    ax_tc.set_xlabel('fMCSI time per cell (sec)')
-    ax_tc.set_ylabel('cells')
-    ax_tc.legend(frameon=False, fontsize=6, reverse=True, loc='upper right')
+    # parts_tc = ax_tc.violinplot(
+    #     [nnls_times_conv, foopsi_times_conv], positions=[1, 2],
+    #     showmedians=True, widths=0.65, showextrema=False
+    # )
+    # for pc, col in zip(parts_tc['bodies'], [_NNLS_COLOR, _FOOPSI_COLOR]):
+    #     pc.set_facecolor(col); pc.set_alpha(0.75)
+    # parts_tc['cmedians'].set_color('k'); parts_tc['cmedians'].set_linewidth(0.8)
+    # ax_tc.set_xticks([1, 2])
+    # ax_tc.set_xticklabels(['NNLS\ninit', 'FOOPSI\ninit'], fontsize=6)
+    # # ax_tc.set_xlabel('fMCSI time per cell (sec)')
+    # ax_tc.set_ylabel('time per cell (sec)')
+
+    ax_tc.scatter(
+        foopsi_times_conv,
+        nnls_times_conv,
+        color='k',
+        s=1
+    )
+    ax_tc.set_xlim([0,6.5])
+    ax_tc.set_ylim([0,6.5])
+    ax_tc.plot([0,7],[0,7], color='tab:cyan', alpha=0.5)
+    ax_tc.set_xlabel('FOOPSI time per cell (sec)')
+    ax_tc.set_ylabel('NNLS time per cell (sec)')
+
 
     ax_fb = axd['f1']
     valid_n = nnls_fb[np.isfinite(nnls_fb) & (nnls_fb > 0)]
     valid_f = foopsi_fb[np.isfinite(foopsi_fb) & (foopsi_fb > 0)]
-    rbins = np.linspace(0, 1, 12)
-    ax_fb.hist(valid_f, bins=rbins, color=_FOOPSI_COLOR, alpha=0.6,
-               label='FOOPSI init', edgecolor='none')
-    ax_fb.hist(valid_n, bins=rbins, color=_NNLS_COLOR,   alpha=0.6,
-               label='NNLS init',   edgecolor='none')
-    ax_fb.set_xlabel('F$_β$ (β=0.5)')
-    ax_fb.set_ylabel('cells')
-    ax_fb.legend(frameon=False, fontsize=6, loc='upper left', reverse=True)
+    # parts_fb = ax_fb.violinplot(
+    #     [valid_n, valid_f], positions=[1, 2],
+    #     showmedians=True, widths=0.65, showextrema=False
+    # )
+    # for pc, col in zip(parts_fb['bodies'], [_NNLS_COLOR, _FOOPSI_COLOR]):
+    #     pc.set_facecolor(col); pc.set_alpha(0.75)
+    # parts_fb['cmedians'].set_color('k'); parts_fb['cmedians'].set_linewidth(0.8)
+    # ax_fb.set_xticks([1, 2])
+    # ax_fb.set_xticklabels(['NNLS\ninit', 'FOOPSI\ninit'], fontsize=6)
+    # # ax_fb.set_xlabel('$F_\\beta$ (β=0.5)')
+    # ax_fb.set_ylabel('$F_\\beta$')
+    # ax_fb.set_ylim(0, 1.05)
+
+    ax_fb.scatter(
+        valid_f,
+        valid_n,
+        color='k',
+        s=1
+    )
+    ax_fb.set_xlim([0,1.05])
+    ax_fb.set_ylim([0,1.05])
+    ax_fb.plot([0,1.05],[0,1.05], color='tab:cyan', alpha=0.5)
+    ax_fb.set_xlabel('FOOPSI F$_\\beta$')
+    ax_fb.set_ylabel('NNLS F$_\\beta$')
+    ax_fb.set_yticks([0,0.25,0.5,0.75,1])
+    ax_fb.set_xticks([0,0.25,0.5,0.75,1])
 
     for sfx in ('png', 'svg'):
         out = os.path.join(data_dir, f'combined_init_comparison.{sfx}')

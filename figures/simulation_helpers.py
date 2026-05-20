@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import os
 from scipy.signal import find_peaks
 
-import fMCSI
+import OMSI
 
 np.random.seed(3)
 
@@ -42,7 +42,7 @@ def estimate_real_properties(suite2p_dir):
     
     signal_peak = np.percentile(dff, 98, axis=1)
     snrs = signal_peak / sigma
-    kurtosis = fMCSI.compute_kurtosis(dff)
+    kurtosis = OMSI.compute_kurtosis(dff)
     
     rates = []
     for i in range(n_cells_real):
@@ -129,7 +129,7 @@ def generate_synthetic_data(
         true_spike_times.append(np.where(spikes_high[i])[0] / fs_high)
         
     dummy_snr = np.full(n_cells, 1000.0)
-    _, clean_traces = fMCSI.spikes_to_calcium(spikes_high, fs_high, fs, tau, dummy_snr)
+    _, clean_traces = OMSI.spikes_to_calcium(spikes_high, fs_high, fs, tau, dummy_snr)
     
     noisy_traces = np.zeros_like(clean_traces)
     
@@ -185,7 +185,7 @@ def generate_synthetic_data(
         noisy_traces[i] = trace + noise
         actual_snrs.append(peak_signal / sigma if sigma > 1e-9 else 100.0)
     
-    gen_kurtosis = fMCSI.compute_kurtosis(noisy_traces)
+    gen_kurtosis = OMSI.compute_kurtosis(noisy_traces)
         
     return noisy_traces, true_spike_times, clean_traces, t, firing_rates, gen_kurtosis
 

@@ -149,7 +149,7 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     if ray.is_initialized():
         ray.shutdown()
 
-    from fMCSI._config import get_path
+    from OMSI._config import get_path
     ray_dir = get_path(
         key='ray_dir',
         prompt='Select a directory for Ray temporary files.\n'
@@ -192,6 +192,9 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     futures = []
     for i in range(n_cells):
         p_copy   = params.copy() if params else {}
+
+        if isinstance(p_copy.get('init'), list):
+            p_copy['init'] = p_copy['init'][i]
 
         if 'auto_stop' not in p_copy:
             p_copy['auto_stop'] = True

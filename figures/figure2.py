@@ -23,8 +23,8 @@ import matplotlib as mpl
 from scipy.signal import find_peaks
 from oasis.functions import deconvolve
 
-import fMCSI
-import fMCSI.helpers as helpers
+import OMSI
+import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
 
@@ -86,7 +86,7 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
 
 
 def _metrics(true_spk, pred_spk, true_ev, fs_):
-    prec,   rec,   f1   = fMCSI.compute_accuracy_strict(true_spk, pred_spk, tolerance=0.1)
+    prec,   rec,   f1   = OMSI.compute_accuracy_strict(true_spk, pred_spk, tolerance=0.1)
     prec_w, rec_w, f1_w = helpers.compute_accuracy_window(true_spk, pred_spk)
     prec_e, rec_e, f1_e = helpers.compute_accuracy_window(true_ev,  pred_spk)
     cosmic = helpers.compute_cosmic(true_spk, pred_spk, fs_)
@@ -307,7 +307,7 @@ def benchmark_sweeps(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
                 t0 = time.time()
                 burn_in = int(s * 0.25)
                 params  = {'f': fs, 'p': 2, 'Nsamples': s - burn_in, 'B': burn_in, 'auto_stop': False}
-                res = fMCSI.deconv(dff, params=params, benchmark=True)
+                res = OMSI.deconv(dff, params=params, benchmark=True)
                 elapsed = time.time() - t0
                 sps = (s * n_cells * n_frames) / elapsed
                 results.append(_row('Sweeps', 'fMCSI', tau, fs, elapsed,
@@ -378,7 +378,7 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
         if run_mine:
             try:
                 t0 = time.time()
-                res = fMCSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
                                        benchmark=True)
                 t_my = time.time() - t0
                 sps  = (np.mean(res['optim_nsamples']) * n_cells * n_frames) / t_my
@@ -445,7 +445,7 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
         if run_mine:
             try:
                 t0 = time.time()
-                res = fMCSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
                                        benchmark=True)
                 t_my = time.time() - t0
                 sps  = (np.mean(res['optim_nsamples']) * fixed_cells * n_frames) / t_my
@@ -529,7 +529,7 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
 
             if run_mine:
                 t0  = time.time()
-                res = fMCSI.deconv(dff, params={'f': fixed_fs, 'p': 2, 'auto_stop': True},
+                res = OMSI.deconv(dff, params={'f': fixed_fs, 'p': 2, 'auto_stop': True},
                                        benchmark=True)
                 t_my = time.time() - t0
                 results.append(_row('Tau_Sensitivity', 'fMCSI', tau, fixed_fs, t_my,
@@ -582,7 +582,7 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
 
             if run_mine:
                 t0  = time.time()
-                res = fMCSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
                                        benchmark=True)
                 t_my = time.time() - t0
                 results.append(_row('Fs_Sensitivity', 'fMCSI', fixed_tau, fs, t_my,
@@ -663,7 +663,7 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
     peak_signals = np.maximum(peak_signals, 1e-9)
 
     def _append_cell_rows(model_name, snr_val, pred_spk):
-        p, r, _   = fMCSI.compute_accuracy_strict(true_spikes, pred_spk, tolerance=0.1)
+        p, r, _   = OMSI.compute_accuracy_strict(true_spikes, pred_spk, tolerance=0.1)
         pw, rw, _ = helpers.compute_accuracy_window(true_spikes, pred_spk)
         for i in range(n_cells):
             cell_records.append({
@@ -690,7 +690,7 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
 
             if run_mine:
                 t0  = time.time()
-                res = fMCSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
                                        benchmark=True)
                 t_my = time.time() - t0
                 results.append({**base, 'Model': 'fMCSI', 'Time': t_my,
@@ -762,7 +762,7 @@ def benchmark_firing_rate_sensitivity(data_dir, run_oasis=True, run_matlab=True,
     partial_path = os.path.join(data_dir, 'firing_rate_sensitivity_partial.npz')
 
     def per_cell(model, i, pred_spk_i, time_i):
-        prec,   rec,   f1   = fMCSI.compute_accuracy_strict([true_spikes[i]], [pred_spk_i])
+        prec,   rec,   f1   = OMSI.compute_accuracy_strict([true_spikes[i]], [pred_spk_i])
         prec_w, rec_w, f1_w = helpers.compute_accuracy_window([true_spikes[i]], [pred_spk_i])
         prec_e, rec_e, f1_e = helpers.compute_accuracy_window([true_events[i]], [pred_spk_i])
         cosmic = helpers.compute_cosmic([true_spikes[i]], [pred_spk_i], fs)
@@ -778,7 +778,7 @@ def benchmark_firing_rate_sensitivity(data_dir, run_oasis=True, run_matlab=True,
         print('\nRunning fMCSI...')
         try:
             t0  = time.time()
-            res = fMCSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+            res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
                                    benchmark=True)
             total_time = time.time() - t0
             for i in range(n_cells):
@@ -910,7 +910,7 @@ def benchmark_cascade_sample_rate(data_dir, run_cascade=True):
             results[f'cosmic_{suffix}'] = np.full(n_cells, np.nan)
             continue
 
-        prec, rec, _ = fMCSI.compute_accuracy_strict(true_spikes, cascade_spikes,
+        prec, rec, _ = OMSI.compute_accuracy_strict(true_spikes, cascade_spikes,
                                                       tolerance=0.1)
         b2    = BETA ** 2
         denom = b2 * prec + rec
@@ -1044,7 +1044,7 @@ def _rebuild_cascade_sample_rate_data(data_dir):
             print(f'  No CASCADE output found for {fs} Hz — re-run --mode test.')
             return
 
-        prec, rec, _ = fMCSI.compute_accuracy_strict(true_spikes, cascade_spikes,
+        prec, rec, _ = OMSI.compute_accuracy_strict(true_spikes, cascade_spikes,
                                                       tolerance=0.1)
         b2    = BETA ** 2
         denom = b2 * prec + rec
@@ -1214,7 +1214,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     scaling_stats = []
 
     _legend_labels = {
-        'fMCSI': 'fMCSI', 'CaImAn MCMC': 'CaImAn MCMC', 'OASIS': 'OASIS',
+        'fMCSI': 'OMSI', 'CaImAn MCMC': 'CaImAn MCMC', 'OASIS': 'OASIS',
         'CASCADE_GPU': 'CASCADE (GPU)', 'CASCADE_CPU': 'CASCADE (CPU)',
     }
     legend_handles = [
@@ -1224,7 +1224,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ]
 
     _legend_labels1 = {
-        'fMCSI': 'fMCSI', 'CaImAn MCMC': 'CaImAn MCMC', 'OASIS': 'OASIS',
+        'fMCSI': 'OMSI', 'CaImAn MCMC': 'CaImAn MCMC', 'OASIS': 'OASIS',
         'CASCADE_CPU': 'CASCADE',
     }
     legend_handles1 = [

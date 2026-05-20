@@ -33,7 +33,7 @@ from scipy.ndimage import percentile_filter, gaussian_filter1d
 from scipy.stats import kurtosis as sci_kurtosis
 from oasis.functions import deconvolve
 
-import fMCSI
+import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig3')
@@ -260,7 +260,7 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     all_results = []
     n_cells = dff.shape[0]
 
-    cell_kurtosis = fMCSI.helpers.compute_kurtosis(dff)
+    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
     kurtosis_threshold = 0.5
     good_mask = cell_kurtosis >= kurtosis_threshold
     good_idx  = np.where(good_mask)[0]
@@ -276,7 +276,7 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         print(f"  WARNING: No cells pass kurtosis filter for {label}, skipping.")
         return
 
-    true_events    = [fMCSI.helpers.make_event_ground_truth(sp, tau)
+    true_events    = [OMSI.helpers.make_event_ground_truth(sp, tau)
                       for sp in true_spikes]
     n_events_total = sum(len(e) for e in true_events)
     n_spikes_total = sum(len(s) for s in true_spikes)
@@ -294,16 +294,16 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         'g': g_ar2, 'defg': [g_rise, g_decay],
         'TauStd': [tau_rise * fs, tau * fs], 'lam_scale': 1.0,
     }
-    optim_dict = fMCSI.deconv(dff, params, true_spikes=true_spikes, benchmark=True)
+    optim_dict = OMSI.deconv(dff, params, true_spikes=true_spikes, benchmark=True)
     my_probs   = optim_dict['optim_prob']
     my_spikes  = list(optim_dict['optim_spikes'])
     time_my    = time.time() - t0
 
-    my_spikes_shifted, _ = fMCSI.detect_spikes_from_probs(my_probs, fs, sigma=1.5)
-    prec_my, rec_my, f1_my           = fMCSI.compute_accuracy_strict(true_spikes, my_spikes, tolerance=0.1)
+    my_spikes_shifted, _ = OMSI.detect_spikes_from_probs(my_probs, fs, sigma=1.5)
+    prec_my, rec_my, f1_my           = OMSI.compute_accuracy_strict(true_spikes, my_spikes, tolerance=0.1)
     prec_my_w, rec_my_w, f1_my_w     = compute_accuracy_window(true_spikes, my_spikes, tolerance=0.1)
     prec_my_e, rec_my_e, f1_my_e     = compute_accuracy_window(true_events,  my_spikes, tolerance=0.1)
-    cosmic_my                         = fMCSI.helpers.compute_cosmic(true_spikes, my_spikes_shifted, fs)
+    cosmic_my                         = OMSI.helpers.compute_cosmic(true_spikes, my_spikes_shifted, fs)
 
     print(f"    [fMCSI] strict F1={np.mean(f1_my):.3f}  window F1={np.mean(f1_my_w):.3f}")
     for i in range(n_cells):
@@ -329,14 +329,14 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
             dff, fs=fs, tau=tau, n_sweeps=500, true_spikes=true_spikes)
         time_trad = time.time() - t0
 
-        trad_spikes_out, _ = fMCSI.detect_spikes_from_probs(trad_probs, fs, sigma=1.5)
-        prec_trad, rec_trad, f1_trad       = fMCSI.compute_accuracy_strict(
+        trad_spikes_out, _ = OMSI.detect_spikes_from_probs(trad_probs, fs, sigma=1.5)
+        prec_trad, rec_trad, f1_trad       = OMSI.compute_accuracy_strict(
             true_spikes, trad_spikes_out, tolerance=0.1)
         prec_trad_w, rec_trad_w, f1_trad_w = compute_accuracy_window(
             true_spikes, trad_spikes_out, tolerance=0.1)
         prec_trad_e, rec_trad_e, f1_trad_e = compute_accuracy_window(
             true_events, trad_spikes_out, tolerance=0.1)
-        cosmic_trad                         = fMCSI.helpers.compute_cosmic(
+        cosmic_trad                         = OMSI.helpers.compute_cosmic(
             true_spikes, trad_spikes_out, fs)
 
         print(f"    [MATLAB] strict F1={np.mean(f1_trad):.3f}  window F1={np.mean(f1_trad_w):.3f}")
@@ -367,14 +367,14 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     oasis_probs = np.array(oasis_probs)
     time_oasis  = time.time() - t0
 
-    oasis_spikes_shifted, _ = fMCSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
-    prec_oasis, rec_oasis, f1_oasis       = fMCSI.compute_accuracy_strict(
+    oasis_spikes_shifted, _ = OMSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
+    prec_oasis, rec_oasis, f1_oasis       = OMSI.compute_accuracy_strict(
         true_spikes, oasis_spikes_shifted, tolerance=0.1)
     prec_oasis_w, rec_oasis_w, f1_oasis_w = compute_accuracy_window(
         true_spikes, oasis_spikes_shifted, tolerance=0.1)
     prec_oasis_e, rec_oasis_e, f1_oasis_e = compute_accuracy_window(
         true_events, oasis_spikes_shifted, tolerance=0.1)
-    cosmic_oasis                           = fMCSI.helpers.compute_cosmic(
+    cosmic_oasis                           = OMSI.helpers.compute_cosmic(
         true_spikes, oasis_spikes_shifted, fs)
 
     print(f"    [OASIS] strict F1={np.mean(f1_oasis):.3f}  window F1={np.mean(f1_oasis_w):.3f}")
@@ -415,13 +415,13 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         cascade_probs, cascade_spikes, time_cascade = _run_cascade_inference(
             dff, fs, label, data_dir)
 
-        prec_cas, rec_cas, f1_cas       = fMCSI.compute_accuracy_strict(
+        prec_cas, rec_cas, f1_cas       = OMSI.compute_accuracy_strict(
             true_spikes, cascade_spikes, tolerance=0.1)
         prec_cas_w, rec_cas_w, f1_cas_w = compute_accuracy_window(
             true_spikes, cascade_spikes, tolerance=0.1)
         prec_cas_e, rec_cas_e, f1_cas_e = compute_accuracy_window(
             true_events, cascade_spikes, tolerance=0.1)
-        cosmic_cas                       = fMCSI.helpers.compute_cosmic(
+        cosmic_cas                       = OMSI.helpers.compute_cosmic(
             true_spikes, cascade_spikes, fs)
 
         print(f"    [CASCADE] strict F1={np.mean(f1_cas):.3f}  window F1={np.mean(f1_cas_w):.3f}")
@@ -463,7 +463,7 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
 
     n_cells = dff.shape[0]
 
-    cell_kurtosis = fMCSI.helpers.compute_kurtosis(dff)
+    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
     kurtosis_threshold = 0.5
     good_mask = cell_kurtosis >= kurtosis_threshold
     good_idx  = np.where(good_mask)[0]
@@ -479,7 +479,7 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
         print(f"  WARNING: No cells pass kurtosis filter for {label}, skipping.")
         return
 
-    true_events = [fMCSI.helpers.make_event_ground_truth(sp, tau)
+    true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
                    for sp in true_spikes]
 
     print("  Running fMCSI...")
@@ -493,19 +493,19 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
         'g': g_ar2, 'defg': [g_rise, g_decay],
         'TauStd': [tau_rise * fs, tau * fs], 'lam_scale': 1.0,
     }
-    optim_dict = fMCSI.deconv(dff, params, true_spikes=true_spikes, benchmark=True)
+    optim_dict = OMSI.deconv(dff, params, true_spikes=true_spikes, benchmark=True)
     my_probs   = optim_dict['optim_prob']
     my_spikes  = list(optim_dict['optim_spikes'])
     time_my    = time.time() - t0
 
-    my_spikes_shifted, _ = fMCSI.detect_spikes_from_probs(my_probs, fs, sigma=1.5)
-    prec_my, rec_my, f1_my         = fMCSI.compute_accuracy_strict(
+    my_spikes_shifted, _ = OMSI.detect_spikes_from_probs(my_probs, fs, sigma=1.5)
+    prec_my, rec_my, f1_my         = OMSI.compute_accuracy_strict(
         true_spikes, my_spikes, tolerance=0.1)
     prec_my_w, rec_my_w, f1_my_w   = compute_accuracy_window(
         true_spikes, my_spikes, tolerance=0.1)
     prec_my_e, rec_my_e, f1_my_e   = compute_accuracy_window(
         true_events, my_spikes, tolerance=0.1)
-    cosmic_my                       = fMCSI.helpers.compute_cosmic(
+    cosmic_my                       = OMSI.helpers.compute_cosmic(
         true_spikes, my_spikes_shifted, fs)
 
     print(f"    [fMCSI] strict F1={np.mean(f1_my):.3f}  window F1={np.mean(f1_my_w):.3f}")
@@ -536,14 +536,14 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
     oasis_probs = np.array(oasis_probs)
     time_oasis  = time.time() - t0
 
-    oasis_spikes_shifted, _ = fMCSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
-    prec_oasis, rec_oasis, f1_oasis       = fMCSI.compute_accuracy_strict(
+    oasis_spikes_shifted, _ = OMSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
+    prec_oasis, rec_oasis, f1_oasis       = OMSI.compute_accuracy_strict(
         true_spikes, oasis_spikes_shifted, tolerance=0.1)
     prec_oasis_w, rec_oasis_w, f1_oasis_w = compute_accuracy_window(
         true_spikes, oasis_spikes_shifted, tolerance=0.1)
     prec_oasis_e, rec_oasis_e, f1_oasis_e = compute_accuracy_window(
         true_events, oasis_spikes_shifted, tolerance=0.1)
-    cosmic_oasis                           = fMCSI.helpers.compute_cosmic(
+    cosmic_oasis                           = OMSI.helpers.compute_cosmic(
         true_spikes, oasis_spikes_shifted, fs)
 
     print(f"    [OASIS] strict F1={np.mean(f1_oasis):.3f}  window F1={np.mean(f1_oasis_w):.3f}")
@@ -1003,7 +1003,7 @@ def _plot_combined_raster_trace(ax, cells, window=60.0):
         ('OASIS',        'oasis_spikes', model_colors['OASIS'],     0),
         ('CASCADE',      'cas_spikes',   model_colors['CASCADE'],   1),
         ('CaImAn',    'trad_spikes',  model_colors['MATLAB'], 2),
-        ('fMCSI',    'my_spikes',    model_colors['fMCSI'], 3),
+        ('OMSI',    'my_spikes',    model_colors['fMCSI'], 3),
         ('Ground Truth', 'true_spikes',  '#111111',                 4),
     ]
     label_x = -4.0
@@ -1167,7 +1167,7 @@ def _plot_fbeta_violin(ax, alldata):
         if len(vals) >= 2:
             positions.append(i); violin_data.append(vals)
             violin_colors.append(model_colors.get(model_name, 'k'))
-            tick_labels.append('CaImAn' if model_name == 'MATLAB' else model_name)
+            tick_labels.append('CaImAn' if model_name == 'MATLAB' else ('OMSI' if model_name == 'fMCSI' else model_name))
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
                               showmedians=True, widths=0.65)
@@ -1192,7 +1192,7 @@ def _plot_cosmic_violin(ax, alldata):
         if len(vals) >= 2:
             positions.append(i); violin_data.append(vals)
             violin_colors.append(model_colors.get(model_name, 'k'))
-            tick_labels.append('CaImAn' if model_name == 'MATLAB' else model_name)
+            tick_labels.append('CaImAn' if model_name == 'MATLAB' else ('OMSI' if model_name == 'fMCSI' else model_name))
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
                               showmedians=True, widths=0.65)
@@ -1211,24 +1211,24 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
                                         matlab_data_dir=None):
 
     def _from_probs(true_spikes, true_events, probs, fs, sigma):
-        spikes, _ = fMCSI.detect_spikes_from_probs(probs, fs, sigma=sigma)
-        prec,   rec,   f1   = fMCSI.compute_accuracy_strict(
+        spikes, _ = OMSI.detect_spikes_from_probs(probs, fs, sigma=sigma)
+        prec,   rec,   f1   = OMSI.compute_accuracy_strict(
             true_spikes, spikes, tolerance=0.1)
         prec_w, rec_w, f1_w = compute_accuracy_window(
             true_spikes, spikes, tolerance=0.1)
         prec_e, rec_e, f1_e = compute_accuracy_window(
             true_events, spikes, tolerance=0.1)
-        cosmic = fMCSI.helpers.compute_cosmic(true_spikes, spikes, fs)
+        cosmic = OMSI.helpers.compute_cosmic(true_spikes, spikes, fs)
         return prec, rec, f1, prec_w, rec_w, f1_w, prec_e, rec_e, f1_e, cosmic
 
     def _from_spikes(true_spikes, true_events, spikes, fs):
-        prec,   rec,   f1   = fMCSI.compute_accuracy_strict(
+        prec,   rec,   f1   = OMSI.compute_accuracy_strict(
             true_spikes, spikes, tolerance=0.1)
         prec_w, rec_w, f1_w = compute_accuracy_window(
             true_spikes, spikes, tolerance=0.1)
         prec_e, rec_e, f1_e = compute_accuracy_window(
             true_events, spikes, tolerance=0.1)
-        cosmic = fMCSI.helpers.compute_cosmic(true_spikes, spikes, fs)
+        cosmic = OMSI.helpers.compute_cosmic(true_spikes, spikes, fs)
         return prec, rec, f1, prec_w, rec_w, f1_w, prec_e, rec_e, f1_e, cosmic
 
     def _apply(recs, prec, rec, f1, prec_w, rec_w, f1_w,
@@ -1264,7 +1264,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
             re.search(r'(\d+)[Hh]z', basename).group(1)
             if re.search(r'(\d+)[Hh]z', basename) else 30)
         tau = float(d['tau']) if 'tau' in d else 1.2
-        true_events = [fMCSI.helpers.make_event_ground_truth(sp, tau)
+        true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
                        for sp in true_spikes]
 
         df = None
@@ -1320,7 +1320,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
         true_spikes = list(df['true_spikes'])
         fs  = float(df['fs'])  if 'fs'  in df else 30.0
         tau = float(df['tau']) if 'tau' in df else 1.2
-        true_events = [fMCSI.helpers.make_event_ground_truth(sp, tau)
+        true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
                        for sp in true_spikes]
 
         if 'my_probs' in df:
@@ -1353,7 +1353,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
         true_spikes = list(dc['true_spikes'])
         fs  = float(dc['fs'])  if 'fs'  in dc else 30.0
         tau = float(dc['tau']) if 'tau' in dc else 1.2
-        true_events    = [fMCSI.helpers.make_event_ground_truth(sp, tau)
+        true_events    = [OMSI.helpers.make_event_ground_truth(sp, tau)
                           for sp in true_spikes]
         cascade_spikes = list(dc['cascade_spikes'])
 
@@ -1384,7 +1384,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
             fs_m = re.search(r'(\d+)[Hh]z', basename)
             fs   = float(dm['fs'])  if 'fs'  in dm else (float(fs_m.group(1)) if fs_m else 30.0)
             tau  = float(dm['tau']) if 'tau' in dm else 1.2
-            true_events = [fMCSI.helpers.make_event_ground_truth(sp, tau)
+            true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
                            for sp in true_spikes]
             recs = [r for r in alldata
                     if r.get('model') == 'MATLAB' and r.get('label') == label]

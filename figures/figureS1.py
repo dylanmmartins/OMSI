@@ -11,8 +11,8 @@ import matplotlib.gridspec as gridspec
 import matplotlib as mpl
 from scipy.signal import find_peaks
 
-import fMCSI
-from fMCSI.helpers import compute_cosmic
+import OMSI
+from OMSI.helpers import compute_cosmic
 from simulation_helpers import generate_synthetic_data
 
 mpl.rcParams['axes.spines.top']  = False
@@ -100,7 +100,7 @@ def _fbeta(precision, recall):
 
 
 def _compute_metrics(true_spikes, spikes_list):
-    prec, rec, _ = fMCSI.helpers.compute_accuracy_window(true_spikes, spikes_list)
+    prec, rec, _ = OMSI.helpers.compute_accuracy_window(true_spikes, spikes_list)
     fb           = _fbeta(prec, rec)
     cosmic       = compute_cosmic(true_spikes, spikes_list, FS)
     return prec, rec, fb, cosmic

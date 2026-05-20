@@ -23,8 +23,8 @@ import matplotlib.gridspec as gridspec
 import matplotlib as mpl
 from matplotlib.patches import Patch
 
-import fMCSI
-import fMCSI.helpers as helpers
+import OMSI
+import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from oasis.functions import deconvolve as oasis_deconv
 
@@ -55,7 +55,7 @@ def _dff_kurtosis(fluo):
     return float(np.mean(((dff - m) / s) ** 4) - 3.0)
 
 _METHODS = {
-    'fmcsi':       {'label': 'fMCSI',   'color': '#4C72B0'},
+    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'matlab':      {'label': 'MATLAB',  'color': '#DD8452'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
@@ -321,7 +321,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
         for cell in cells:
             dff_1 = cell['fluo'][np.newaxis, :]
             try:
-                od = fMCSI.deconv(dff_1, params, benchmark=True)
+                od = OMSI.deconv(dff_1, params, benchmark=True)
                 probs_list.append(od['optim_prob'][0])
                 spk = np.asarray(list(od['optim_spikes'])[0], dtype=np.float64)
                 spikes_list.append(spk[np.isfinite(spk)])

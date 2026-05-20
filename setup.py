@@ -2,11 +2,11 @@
 import setuptools
 
 setuptools.setup(
-    name='fMCSI',
+    name='OMSI',
     packages=setuptools.find_packages(),
-    description='fast MCMC spike inference',
+    description='Optimized MCMC spike inference',
     author='Dylan Martins',
-    version='1.0.0',
+    version='1.1.0',
     python_requires='>=3.9',
     install_requires=[
         'numpy>=1.24',

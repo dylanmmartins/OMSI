@@ -12,8 +12,8 @@ import matplotlib.gridspec as gridspec
 import matplotlib as mpl
 from matplotlib.patches import Patch
 
-import fMCSI
-import fMCSI.helpers as helpers
+import OMSI
+import OMSI.helpers as helpers
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'figS3')
@@ -105,7 +105,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_cascade=True):
             results[f'cosmic_{suffix}'] = np.full(n_cells, np.nan)
             continue
 
-        prec, rec, _ = fMCSI.compute_accuracy_window(true_spikes, cascade_spikes,
+        prec, rec, _ = OMSI.compute_accuracy_window(true_spikes, cascade_spikes,
                                                       tolerance=0.1)
         fb     = _fbeta(prec, rec)
         cosmic = helpers.compute_cosmic(true_spikes, cascade_spikes, fs)

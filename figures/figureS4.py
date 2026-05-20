@@ -43,7 +43,7 @@ BETA = 0.5
 _TARGET_SENSORS = ['GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m']
 
 _METHODS = {
-    'fmcsi':       {'label': 'fMCSI',   'color': '#4C72B0'},
+    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'matlab':      {'label': 'MATLAB',  'color': '#DD8452'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},

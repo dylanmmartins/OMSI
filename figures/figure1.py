@@ -23,7 +23,7 @@ import matplotlib as mpl
 from scipy.signal import find_peaks
 from oasis.functions import deconvolve as oasis_deconv
 
-import fMCSI
+import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
 
@@ -45,7 +45,7 @@ BETA     = 0.5
 USE_STRICT_ACCURACY = False
 
 COLORS = {
-    'fMCSI':       '#4C72B0',
+    'fMCSI':      '#4C72B0',
     'MATLAB':      '#DD8452',
     'OASIS':       '#55A868',
     'CASCADE_GPU': '#8172B3',
@@ -53,7 +53,7 @@ COLORS = {
 }
 
 _NPZ_NAMES = {
-    'fMCSI':       'fixed_benchmark_fMCSI.npz',
+    'fMCSI':      'fixed_benchmark_fMCSI.npz',
     'MATLAB':      'fixed_benchmark_MATLAB.npz',
     'OASIS':       'fixed_benchmark_OASIS.npz',
     'CASCADE_GPU': 'fixed_benchmark_CASCADE_GPU.npz',
@@ -148,7 +148,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
 
         print('\nRunning fMCSI...')
         t0 = time.time()
-        optim_dict = fMCSI.deconv(noisy, params, true_spikes=true_spikes, benchmark=True)
+        optim_dict = OMSI.deconv(noisy, params, true_spikes=true_spikes, benchmark=True)
         optim_time = time.time() - t0
         print(f'  fMCSI took {optim_time:.1f}s ({optim_time/N_CELLS:.3f}s/cell)')
         print(f'  P={np.nanmean(optim_dict["optim_precision"]):.3f}  '
@@ -164,7 +164,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
             noisy, fs=FS, tau=TAU, n_sweeps=500, true_spikes=true_spikes
         )
         matlab_time = time.time() - t0
-        trad_prec, trad_rec, trad_F1 = fMCSI.compute_accuracy_strict(true_spikes, trad_spikes)
+        trad_prec, trad_rec, trad_F1 = OMSI.compute_accuracy_strict(true_spikes, trad_spikes)
         print(f'  MATLAB took {matlab_time:.1f}s  P={np.nanmean(trad_prec):.3f}  '
               f'R={np.nanmean(trad_rec):.3f}')
         save = {
@@ -192,7 +192,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
             _, s, _, _, _ = oasis_deconv(noisy[i], g=(g,), sn=sigmas[i], penalty=1)
             oasis_spikes.append(_oasis_spikes_from_s(s, sigmas[i], FS))
         oasis_time = time.time() - t0
-        oasis_prec, oasis_rec, oasis_F1 = fMCSI.compute_accuracy_strict(true_spikes, oasis_spikes)
+        oasis_prec, oasis_rec, oasis_F1 = OMSI.compute_accuracy_strict(true_spikes, oasis_spikes)
         print(f'  OASIS took {oasis_time:.1f}s  P={np.nanmean(oasis_prec):.3f}  '
               f'R={np.nanmean(oasis_rec):.3f}')
         save = {
@@ -213,7 +213,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
                 noisy, FS, N_CELLS, data_dir,
                 prefix=f'fig1_cascade_{_dev}', device=_dev
             )
-            _prec, _rec, _F1 = fMCSI.compute_accuracy_strict(true_spikes, _spikes)
+            _prec, _rec, _F1 = OMSI.compute_accuracy_strict(true_spikes, _spikes)
             print(f'  CASCADE ({_dev.upper()}) took {_time:.1f}s  '
                   f'P={np.nanmean(_prec):.3f}  R={np.nanmean(_rec):.3f}')
             np.savez(os.path.join(data_dir, _NPZ_NAMES[_key]), **{
@@ -340,7 +340,7 @@ def _plot_raster(ax, cells, window=60.0):
         ('OASIS',        'oasis_spikes',    COLORS['OASIS'],       0),
         ('CASCADE',       'cascade_spikes', COLORS['CASCADE_GPU'], 1),
         ('MATLAB',       'trad_spikes',     COLORS['MATLAB'],      2),
-        ('fMCSI',        'my_spikes',       COLORS['fMCSI'],       3),
+        ('OMSI',        'my_spikes',       COLORS['fMCSI'],       3),
         ('Ground Truth', 'true_spikes',     '#111111',             4),
     ]
     label_x = -4.0
@@ -404,7 +404,7 @@ def _with_window_metrics(res, prefix, true_spikes_list):
         return d
     spk_key = f'{prefix}_spikes'
     pred = list(res[spk_key])
-    prec_w, rec_w, f1_w = fMCSI.helpers.compute_accuracy_window(true_spikes_list, pred)
+    prec_w, rec_w, f1_w = OMSI.helpers.compute_accuracy_window(true_spikes_list, pred)
     d[f'{prefix}_precision_window'] = prec_w
     d[f'{prefix}_recall_window']    = rec_w
     d[f'{prefix}_F1_window']        = f1_w
@@ -453,7 +453,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     labels    = [name for name, *_ in METHOD_INFO]
     positions = list(range(len(labels)))
     _display  = {
-        'fMCSI': 'fMCSI',
+        'fMCSI': 'OMSI',
         'MATLAB': 'CaImAn',
         'OASIS': 'OASIS',
         'CASCADE_GPU': 'CASCADE',
@@ -519,7 +519,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     F1_dist.set_ylabel(r'$F_\beta$ score')
     F1_dist.set_ylim([0, 1.1])
 
-    from fMCSI.helpers import compute_cosmic
+    from OMSI.helpers import compute_cosmic
     true_spikes = list(MINE_RESULTS['true_spikes'])
     fs = float(MINE_RESULTS['f'])
     cosmic_spike_keys = [
@@ -647,14 +647,14 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     n_cells = int(MINE_RESULTS['n_cells'])
 
     method_entries = [
-        ('fMCSI',       MINE_RESULTS,        'optim_precision',    'optim_recall',    'optim_spikes',    float(MINE_RESULTS['optim_time'])),
+        ('OMSI',       MINE_RESULTS,        'optim_precision',    'optim_recall',    'optim_spikes',    float(MINE_RESULTS['optim_time'])),
         ('MATLAB',      MATLAB_RESULTS,      'tradmat_precision',  'tradmat_recall',  'tradmat_spikes',  float(MATLAB_RESULTS['tradmat_time'])),
         ('OASIS',       OASIS_RESULTS,       'oasis_precision',    'oasis_recall',    'oasis_spikes',    float(OASIS_RESULTS['oasis_time'])),
         ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_precision',  'cascade_recall',  'cascade_spikes',  float(CASCADE_GPU_RESULTS['cascade_time'])),
         ('CASCADE_CPU', CASCADE_CPU_RESULTS, 'cascade_precision',  'cascade_recall',  'cascade_spikes',  float(CASCADE_CPU_RESULTS['cascade_time'])),
     ]
 
-    from fMCSI.helpers import compute_cosmic
+    from OMSI.helpers import compute_cosmic
     true_spikes = list(MINE_RESULTS['true_spikes'])
     fs = float(MINE_RESULTS['f'])
 
@@ -680,7 +680,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     print('-'*52)
     fmcsi_total_s = None
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
-        if label == 'fMCSI':
+        if label == 'OMSI':
             fmcsi_total_s = total_t
         total_min = total_t / 60.0
         tpc_sec   = total_t / n_cells
@@ -689,7 +689,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     print(f'\n{"Method":<14}  {"% diff from fMCSI total time":>30}')
     print('-'*50)
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
-        if label == 'fMCSI':
+        if label == 'OMSI':
             print(f'{label:<14}  {"(reference)":>30}')
             continue
         pct = (total_t - fmcsi_total_s) / total_t * 100.0
