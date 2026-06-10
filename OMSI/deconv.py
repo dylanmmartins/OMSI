@@ -8,6 +8,7 @@ Written Feb 2026, DMM
 
 import argparse
 import glob
+import logging
 import os
 import sys
 import textwrap
@@ -160,6 +161,8 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
         _temp_dir=ray_dir,
         ignore_reinit_error=False,
         include_dashboard=False,
+        log_to_driver=False,
+        logging_level=logging.FATAL,
         runtime_env={
             "env_vars": {
                 # pin each worker to a single thread so ray processes dont fight each other
@@ -169,6 +172,8 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
                 "OPENBLAS_NUM_THREADS": "1",
                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
                 "RAY_enable_metrics_collection": "0",
+                # suppress C++ glog messages from gcs_server, raylet, core_worker
+                "GLOG_minloglevel": "3",
             }
         },
         _metrics_export_port=0,

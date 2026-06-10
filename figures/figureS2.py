@@ -63,7 +63,7 @@ _DEFAULT_OUT_DIR  = os.path.join(
 
 _METHODS = {
     'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
-    'matlab':      {'label': 'MATLAB',  'color': '#DD8452'},
+    'matlab':      {'label': 'CaImAn',  'color': '#DD8452'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
@@ -164,7 +164,7 @@ def _select_sensor_cells(data_dir, all_records, sensor):
 
     fmcsi_sorted = sorted(fmcsi_recs, key=lambda r: float(r.get('cosmic', 0.0)))
     n            = len(fmcsi_sorted)
-    target_pcts  = [0.90, 0.50, 0.10]
+    target_pcts  = [0.60, 0.40, 0.20]
     selected     = []
 
     for pct in target_pcts:
@@ -447,6 +447,14 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, out_dir=_DEFAULT_OUT_DIR):
 
         ax_hist = fig.add_subplot(inner_gs[2, 2])
         _plot_kurtosis_hist(ax_hist, all_records, sensor, selected)
+
+    legend_handles = [
+        plt.Line2D([0], [0], color=_METHODS[m]['color'], marker='.', linestyle='-',
+                   label=_METHODS[m]['label'])
+        for m in ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
+    ]
+    fig.legend(handles=legend_handles, loc='upper center', ncol=4,
+               bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)
 
     for ext in ('png', 'svg'):
         out = os.path.join(out_dir, f'figureS2.{ext}')

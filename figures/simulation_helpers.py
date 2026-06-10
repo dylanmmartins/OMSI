@@ -169,10 +169,7 @@ def generate_synthetic_data(
         k_clean = (m4 / (m2**2)) - 3.0
 
         if k_clean < target_kurtosis[i]:
-            k_ref = 200.0
-            k_tgt = max(target_kurtosis[i], 0.1)
-            v = m2 * (np.sqrt(k_ref / k_tgt) - 1.0)
-            sigma = np.sqrt(max(v, 0.0))
+            sigma = np.sqrt(m2) / 20.0
         else:
 
             k_tgt = min(target_kurtosis[i], k_clean * 0.99)

@@ -1333,8 +1333,8 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
                               color=COLORS.get(model, 'k'))
 
     for ax_key, xlabel, ylabel in [
-        ('tau_p', 'tau (s)', 'Precision'),
-        ('tau_r', 'tau (s)', 'Recall'),
+        ('tau_p', '$\tau$ (s)', 'Precision'),
+        ('tau_r', '$\tau$ (s)', 'Recall'),
     ]:
         axA[ax_key].set_xlabel(xlabel)
         axA[ax_key].set_ylabel(ylabel)

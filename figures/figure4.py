@@ -57,7 +57,7 @@ def _dff_kurtosis(fluo):
 _METHODS = {
     'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
-    'matlab':      {'label': 'MATLAB',  'color': '#DD8452'},
+    'matlab':      {'label': 'CaImAn',  'color': '#DD8452'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
 _METHOD_ORDER  = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
@@ -92,6 +92,7 @@ _SENSOR_ORDER = [
     'GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m',
     'GCaMP5k', 'OGB1', 'Cal520', 'jGECO', 'XCaMP', 'R-CaMP', 'jRCaMP', 'Other',
 ]
+_EXCLUDED_SENSORS = {'Other', 'Cal520'}
 
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
 
@@ -721,7 +722,8 @@ def _plot_raster(ax, cells, window=60.0):
 
 def _draw_grouped_violins(ax, all_records, values_fn, ylabel):
     all_flat     = [r for recs in all_records.values() for r in recs]
-    present      = sorted(set(_get_sensor(r['dataset']) for r in all_flat))
+    present      = sorted(set(_get_sensor(r['dataset']) for r in all_flat)
+                          - _EXCLUDED_SENSORS)
     sensor_order = [s for s in _SENSOR_ORDER if s in present]
     sensor_order += [s for s in present if s not in sensor_order]
     n_sensors      = len(sensor_order)
@@ -799,6 +801,14 @@ def plot_figure(data_dir):
                           lambda r: r.get('cosmic', np.nan), 'CosMIC')
 
     fig.align_ylabels([ax_fb, ax_cs])
+
+    legend_handles = [
+        plt.Line2D([0], [0], color=_METHODS[m]['color'], marker='.', linestyle='-',
+                   label=_METHODS[m]['label'])
+        for m in ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
+    ]
+    fig.legend(handles=legend_handles, loc='upper center', ncol=4,
+               bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)
 
     for ext in ('png', 'svg'):
         out = os.path.join(data_dir, f'full_ground_truth_comparison.{ext}')

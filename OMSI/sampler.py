@@ -519,7 +519,7 @@ def cont_ca_sampler(Y, params=None):
         'lam_pr': [0.1, 1.0],
         'auto_stop': True,
         'max_sweeps': 2000, 'min_sweeps': 300,
-        'burn_tol': 0.005, 'conv_tol': 0.001,
+        'burn_tol': 0.005, 'conv_tol': 0.00067,
         'check_every': 50,
         'prob_thresh': 0.85,
         'lam_scale': 0.002,
@@ -532,24 +532,20 @@ def cont_ca_sampler(Y, params=None):
             if k not in params:
                 params[k] = v
 
-    # skip inference if the trace has low kurtosis (excess < 0.5).
-    # a gaussian trace has excess kurtosis = 0; calcium transients make the distribution
-    # heavy-tailed, so low kurtosis means the trace is basically just noise
+    # skip inference if the trace is noise-dominated (SNR < 2.7).
+    # a pure gaussian trace scores ~2.64 by this formula; anything below 2.7
+    # means the calcium signal is completely buried in noise and inference is unreliable.
+    # SNR = (99th - 8th percentile) / MAD-based noise std.
     valid_Y = Y[isanY]
-    if len(valid_Y) > 3:
-        _mean = np.mean(valid_Y)
-        _diff = valid_Y - _mean
-        _m2   = np.mean(_diff ** 2)
-        _m4   = np.mean(_diff ** 4)
-        _kurt = _m4 / (_m2 ** 2) if _m2 > 0 else 0.0
-    else:
-        _kurt = 0.0
+    _sn_mad = (float(np.median(np.abs(np.diff(valid_Y)))) / 0.6745
+               if len(valid_Y) > 1 else 1e-4)
+    _peak   = float(np.percentile(valid_Y, 99)) if len(valid_Y) > 0 else 0.0
+    _base   = float(np.percentile(valid_Y,  8)) if len(valid_Y) > 0 else 0.0
+    _snr    = (_peak - _base) / (_sn_mad + 1e-9)
 
-    if (_kurt - 3.0) < 0.5:
+    if not params.get('skip_snr', False) and _snr < 2.7:
         _defg    = np.array(params['defg'])
         _tau_def = -1.0 / np.log(_defg)
-        _sn_mad  = (float(np.median(np.abs(np.diff(valid_Y)))) / 0.6745
-                    if len(valid_Y) > 1 else 1e-4)
         return {
             'ns':     np.array([0]),
             'ss':     [np.array([])],
@@ -677,7 +673,7 @@ def cont_ca_sampler(Y, params=None):
     max_sweeps  = int(params.get('max_sweeps', 2000))
     min_sweeps  = int(params.get('min_sweeps', 300))
     burn_tol    = float(params.get('burn_tol', 0.005))
-    conv_tol    = float(params.get('conv_tol', 0.001))
+    conv_tol    = float(params.get('conv_tol', 0.00067))
     check_every = int(params.get('check_every', 50))
 
     N_total = max_sweeps if auto_stop else int(params['Nsamples']) + B

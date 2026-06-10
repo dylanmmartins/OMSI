@@ -339,7 +339,7 @@ def _plot_raster(ax, cells, window=60.0):
     method_rows = [
         ('OASIS',        'oasis_spikes',    COLORS['OASIS'],       0),
         ('CASCADE',       'cascade_spikes', COLORS['CASCADE_GPU'], 1),
-        ('MATLAB',       'trad_spikes',     COLORS['MATLAB'],      2),
+        ('CaImAn',       'trad_spikes',     COLORS['MATLAB'],      2),
         ('OMSI',        'my_spikes',       COLORS['fMCSI'],       3),
         ('Ground Truth', 'true_spikes',     '#111111',             4),
     ]
@@ -589,6 +589,15 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         color='k',
         fb=True
     )
+
+    legend_handles = [
+        plt.Line2D([0], [0], color=COLORS['fMCSI'],      marker='.', linestyle='-', label='OMSI'),
+        plt.Line2D([0], [0], color=COLORS['MATLAB'],      marker='.', linestyle='-', label='CaImAn'),
+        plt.Line2D([0], [0], color=COLORS['OASIS'],       marker='.', linestyle='-', label='OASIS'),
+        plt.Line2D([0], [0], color=COLORS['CASCADE_GPU'], marker='.', linestyle='-', label='CASCADE'),
+    ]
+    fig.legend(handles=legend_handles, loc='upper center', ncol=4,
+               bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)
 
     for ext in ('png', 'svg'):
         out = os.path.join(data_dir, f'figure1.{ext}')

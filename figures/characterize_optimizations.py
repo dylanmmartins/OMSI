@@ -856,17 +856,596 @@ def plot_combined_init(data_dir):
     plt.close(fig)
 
 
+_DEFAULT_CONV_TOL = 0.00067 # was 0.001; tightened 1.5x
+_DEFAULT_BURN_TOL = 0.005   # original default
+
+def _build_tol_grid(default_val, n_below=7, n_above=7):
+    below = np.geomspace(default_val / 1000.0, default_val * 0.9, n_below)
+    above = np.geomspace(default_val * 1.1,   default_val * 1000.0, n_above)
+    return np.unique(np.concatenate([below, [default_val], above])).tolist()
+
+
+def _run_tol_sweep(dff, true_spikes, param_name, grid, fs):
+    rows = []
+    for val in grid:
+        print(f'\n  {param_name}={val:.2e} ...')
+        params = {
+            'f': fs, 'p': 2, 'auto_stop': True, 'upd_gam': 0,
+            'conv_tol': _DEFAULT_CONV_TOL,
+            'burn_tol': _DEFAULT_BURN_TOL,
+        }
+        params[param_name] = val
+        try:
+            res        = OMSI.deconv(dff, params=params, benchmark=True)
+            per_cell_t = res['optim_times_per_cell']
+            pred       = res['optim_spikes']
+            _, _, f1_w = helpers.compute_accuracy_window(true_spikes, pred)
+            cosmic     = helpers.compute_cosmic(true_spikes, pred, fs)
+            rows.append({
+                'val':       val,
+                'mean_time': float(np.mean(per_cell_t)),
+                'std_time':  float(np.std(per_cell_t, ddof=1)),
+                'mean_f1':   float(np.mean(f1_w)),
+                'std_f1':    float(np.std(f1_w, ddof=1)),
+            })
+            print(f'    mean_cell={np.mean(per_cell_t):.3f}s  '
+                  f'F1={np.mean(f1_w):.3f}  CosMIC={np.mean(cosmic):.3f}')
+        except Exception as exc:
+            print(f'    FAILED: {exc}')
+    return rows
+
+
+def _save_tol_sweep(out_path, rows, default_val):
+    np.savez(
+        out_path,
+        tol         = np.array([r['val']       for r in rows]),
+        mean_time   = np.array([r['mean_time'] for r in rows]),
+        std_time    = np.array([r['std_time']  for r in rows]),
+        mean_f1     = np.array([r['mean_f1']   for r in rows]),
+        std_f1      = np.array([r['std_f1']    for r in rows]),
+        default_val = np.array([default_val]),
+    )
+    print(f'\nSaved -> {out_path}')
+
+
+def run_conv_tol_sweep(data_dir):
+    os.makedirs(data_dir, exist_ok=True)
+    out_path = os.path.join(data_dir, 'conv_tol_sweep.npz')
+
+    print(f'Generating synthetic population '
+          f'(n={_N_CELLS}, T={_DURATION}s, fs={_FS}Hz, tau={_TAU}s)...')
+    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+        n_cells=_N_CELLS, fs=_FS, duration=_DURATION, tau=_TAU)
+
+    grid = _build_tol_grid(_DEFAULT_CONV_TOL)
+    print(f'  Sweep ({len(grid)} conv_tol values): {[f"{v:.2e}" for v in grid]}')
+
+    rows = _run_tol_sweep(dff, true_spikes, 'conv_tol', grid, _FS)
+    if rows:
+        _save_tol_sweep(out_path, rows, _DEFAULT_CONV_TOL)
+    else:
+        print('No results collected.')
+
+
+def run_burn_tol_sweep(data_dir):
+    os.makedirs(data_dir, exist_ok=True)
+    out_path = os.path.join(data_dir, 'burn_tol_sweep.npz')
+
+    print(f'Generating synthetic population '
+          f'(n={_N_CELLS}, T={_DURATION}s, fs={_FS}Hz, tau={_TAU}s)...')
+    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+        n_cells=_N_CELLS, fs=_FS, duration=_DURATION, tau=_TAU)
+
+    grid = _build_tol_grid(_DEFAULT_BURN_TOL)
+    print(f'  Sweep ({len(grid)} burn_tol values): {[f"{v:.2e}" for v in grid]}')
+
+    rows = _run_tol_sweep(dff, true_spikes, 'burn_tol', grid, _FS)
+    if rows:
+        _save_tol_sweep(out_path, rows, _DEFAULT_BURN_TOL)
+    else:
+        print('No results collected.')
+
+
+def _plot_tol_sweep(data_dir, npz_name, xlabel, fig_stem):
+    out_path = os.path.join(data_dir, npz_name)
+    if not os.path.exists(out_path):
+        raise FileNotFoundError(f'No data at {out_path}.')
+
+    d           = np.load(out_path)
+    tols        = d['tol'].astype(float)
+    mt          = d['mean_time']
+    st          = d['std_time']
+    mf1         = d['mean_f1']
+    sf1         = d['std_f1']
+    default_val = float(d['default_val'][0])
+
+    fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
+    for ax, y, yerr, ylabel in [
+        (axes[0], mt,  st,  'time per cell (sec)'),
+        (axes[1], mf1, sf1, '$F_\\beta$'),
+    ]:
+        ax.plot(tols, y, '.-', color=_COLOR, zorder=3)
+        if ylabel == 'time per cell (sec)':
+            ax.fill_between(tols, y - yerr, y + yerr,
+                            color=_COLOR, alpha=0.25, linewidth=0)
+        ax.axvline(default_val, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_xscale('log')
+        ax.set_ylim(bottom=0)
+
+    axes[1].set_ylim(0, 0.51)
+    fig.tight_layout()
+    for sfx in ('png', 'svg'):
+        out = os.path.join(data_dir, f'{fig_stem}.{sfx}')
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f'Saved -> {out}')
+    plt.close(fig)
+
+
+def plot_conv_tol_sweep(data_dir):
+    _plot_tol_sweep(data_dir, 'conv_tol_sweep.npz',
+                    'convergence threshold', 'conv_tol_sweep')
+
+
+def plot_burn_tol_sweep(data_dir):
+    _plot_tol_sweep(data_dir, 'burn_tol_sweep.npz',
+                    'burn-in completion threshold', 'burn_tol_sweep')
+
+
+def plot_combined_opt(data_dir):
+
+    t_supp_path   = os.path.join(data_dir, 'T_supp_sweep.npz')
+    conv_tol_path = os.path.join(data_dir, 'conv_tol_sweep.npz')
+    burn_tol_path = os.path.join(data_dir, 'burn_tol_sweep.npz')
+    snr_path      = os.path.join(data_dir, 'snr_threshold_sweep.npz')
+    for p in (t_supp_path, conv_tol_path, burn_tol_path, snr_path):
+        if not os.path.exists(p):
+            raise FileNotFoundError(f'No data at {p}.')
+
+    fig, axes = plt.subplots(4, 2, figsize=(4.8, 9.0), dpi=300)
+
+    d            = np.load(t_supp_path)
+    T_supp       = d['T_supp'].astype(float)
+    mt           = d['mean_time']
+    st           = d['std_time']
+    mf1          = d['mean_f1']
+    sf1          = d['std_f1']
+    default_supp = int(d['default_supp'][0])
+
+    mask = np.arange(len(T_supp))[1:-1]
+    mask = np.hstack([mask[0:4], mask[5], mask[7:]]).astype(int)
+
+    for ax, y, yerr, ylabel in [
+        (axes[0, 0], mt,  st,  'time per cell (sec)'),
+        (axes[0, 1], mf1, sf1, '$F_\\beta$'),
+    ]:
+        ax.fill_between(T_supp[mask] * (1.0 / _FS),
+                        y[mask] - yerr[mask], y[mask] + yerr[mask],
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(T_supp[mask] * (1.0 / _FS), y[mask], '.-', color=_COLOR, zorder=3)
+        ax.axvline(default_supp * (1.0 / _FS), color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel('$T_{supp}$ (sec)')
+        ax.set_ylabel(ylabel)
+        ax.set_xscale('log')
+        ax.set_ylim(bottom=0)
+
+    axes[0, 1].set_ylim(0, 1)
+
+    d           = np.load(conv_tol_path)
+    tols        = d['tol'].astype(float)
+    mt          = d['mean_time']
+    st          = d['std_time']
+    mf1         = d['mean_f1']
+    sf1         = d['std_f1']
+    default_val = float(d['default_val'][0])
+
+    for ax, y, yerr, ylabel in [
+        (axes[1, 0], mt,  st,  'time per cell (sec)'),
+        (axes[1, 1], mf1, sf1, '$F_\\beta$'),
+    ]:
+        ax.fill_between(tols, y - yerr, y + yerr,
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(tols, y, '.-', color=_COLOR, zorder=3)
+        ax.axvline(default_val, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel('convergence threshold')
+        ax.set_ylabel(ylabel)
+        ax.set_xscale('log')
+        ax.set_ylim(bottom=0)
+
+    axes[1, 1].set_ylim(0, 1)
+
+    d           = np.load(burn_tol_path)
+    tols        = d['tol'].astype(float)
+    mt          = d['mean_time']
+    st          = d['std_time']
+    mf1         = d['mean_f1']
+    sf1         = d['std_f1']
+    default_val = float(d['default_val'][0])
+
+    for ax, y, yerr, ylabel in [
+        (axes[2, 0], mt,  st,  'time per cell (sec)'),
+        (axes[2, 1], mf1, sf1, '$F_\\beta$'),
+    ]:
+        ax.fill_between(tols, y - yerr, y + yerr,
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(tols, y, '.-', color=_COLOR, zorder=3)
+        ax.axvline(default_val, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel('burn-in completion threshold')
+        ax.set_ylabel(ylabel)
+        ax.set_xscale('log')
+        ax.set_ylim(bottom=0)
+
+    axes[2, 1].set_ylim(0, 1)
+
+    d           = np.load(snr_path)
+    snr_levels  = d['snr_levels'].astype(float)
+    mean_f1     = d['mean_f1'].astype(float)
+    std_f1      = d['std_f1'].astype(float)
+    mean_cosmic = d['mean_cosmic'].astype(float)
+    std_cosmic  = d['std_cosmic'].astype(float)
+    threshold   = float(d['threshold'][0])
+
+    for ax, mean, std, ylabel in [
+        (axes[3, 0], mean_f1,     std_f1,     '$F_\\beta$'),
+        (axes[3, 1], mean_cosmic, std_cosmic, 'CosMIC'),
+    ]:
+        valid = np.isfinite(mean) & np.isfinite(std)
+        x, y, ye = snr_levels[valid], mean[valid], std[valid]
+        ax.fill_between(x, np.clip(y - ye, 0, 1), np.clip(y + ye, 0, 1),
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(x, y, '.-', color=_COLOR, zorder=3)
+        ax.axvline(threshold, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel('SNR')
+        ax.set_ylabel(ylabel)
+        ax.set_xlim(left=0)
+        ax.set_ylim(0, 1.)
+
+    fig.tight_layout()
+    for sfx in ('png', 'svg'):
+        out = os.path.join(data_dir, f'combined_opt.{sfx}')
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f'Saved -> {out}')
+    plt.close(fig)
+
+
+def _dff_snr(fluo):
+    f      = np.asarray(fluo, dtype=np.float64)
+    sn_mad = float(np.median(np.abs(np.diff(f)))) / 0.6745 if len(f) > 1 else 1e-4
+    peak   = float(np.percentile(f, 99))
+    base   = float(np.percentile(f,  8))
+    return (peak - base) / (sn_mad + 1e-9)
+
+
+def run_snr_filter_sweep(data_dir):
+
+    os.makedirs(data_dir, exist_ok=True)
+    out_path = os.path.join(data_dir, 'snr_filter_sweep.npz')
+
+    print(f'Generating synthetic population '
+          f'(n={_N_CELLS}, T={_DURATION}s, fs={_FS}Hz, tau={_TAU}s)...')
+    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+        n_cells=_N_CELLS, fs=_FS, duration=_DURATION, tau=_TAU
+    )
+
+    snr = np.array([_dff_snr(dff[i]) for i in range(_N_CELLS)])
+
+    params = {
+        'f':         _FS,
+        'p':         2,
+        'auto_stop': True,
+        'upd_gam':   0,
+        'conv_tol':  _DEFAULT_CONV_TOL,
+        'burn_tol':  _DEFAULT_BURN_TOL,
+        'skip_snr':  True,
+    }
+
+    print(f'Running OMSI on {_N_CELLS} synthetic cells (no SNR pre-filter)...')
+    res = OMSI.deconv(dff, params=params, benchmark=True)
+    pred = res['optim_spikes']
+
+    _, _, f1_window = helpers.compute_accuracy_window(true_spikes, pred)
+    cosmic          = helpers.compute_cosmic(true_spikes, pred, _FS)
+
+    np.savez(
+        out_path,
+        snr       = snr,
+        f1_window = f1_window,
+        cosmic    = cosmic,
+        threshold = np.array([_SNR_THRESHOLD]),
+    )
+    print(f'\nSaved {_N_CELLS} cells -> {out_path}')
+
+
+def plot_snr_filter_sweep(data_dir):
+    out_path = os.path.join(data_dir, 'snr_filter_sweep.npz')
+    if not os.path.exists(out_path):
+        raise FileNotFoundError(f'No data at {out_path}. Run --mode snr-filter-test first.')
+
+    d         = np.load(out_path)
+    snr       = d['snr'].astype(float)
+    f1_window = d['f1_window'].astype(float)
+    cosmic    = d['cosmic'].astype(float)
+    threshold = float(d['threshold'][0])
+
+    n_below_thresh = int(np.sum(snr < threshold))
+
+    snr_max = 15.0
+    bins = np.unique(np.concatenate([
+        np.linspace(0.0, threshold, 6),
+        np.linspace(threshold, snr_max, 13)[1:],
+    ]))
+    in_range  = snr <= snr_max
+    snr       = snr[in_range]
+    f1_window = f1_window[in_range]
+    cosmic    = cosmic[in_range]
+    bin_ids   = np.clip(np.digitize(snr, bins) - 1, 0, len(bins) - 2)
+
+    n_bins      = len(bins) - 1
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
+    f1_mean  = np.full(n_bins, np.nan)
+    f1_std   = np.full(n_bins, np.nan)
+    cos_mean = np.full(n_bins, np.nan)
+    cos_std  = np.full(n_bins, np.nan)
+    n_bin    = np.zeros(n_bins, dtype=int)
+
+    for b in range(n_bins):
+        mask = bin_ids == b
+        if mask.sum() < 2:
+            continue
+        n_bin[b]    = mask.sum()
+        f1_mean[b]  = np.nanmean(f1_window[mask])
+        f1_std[b]   = np.nanstd(f1_window[mask])
+        cos_mean[b] = np.nanmean(cosmic[mask])
+        cos_std[b]  = np.nanstd(cosmic[mask])
+
+    valid = n_bin >= 2
+    x = bin_centers[valid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
+    fig.suptitle(f'{n_below_thresh} cells below SNR threshold (with spikes)',
+                 fontsize=6, y=1.02)
+    for ax, mean, std, ylabel in [
+        (axes[0], f1_mean[valid],  f1_std[valid],  '$F_\\beta$'),
+        (axes[1], cos_mean[valid], cos_std[valid], 'CosMIC'),
+    ]:
+        ax.fill_between(x,
+                        np.clip(mean - std, 0, 1),
+                        np.clip(mean + std, 0, 1),
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(x, mean, '.-', color=_COLOR, zorder=3)
+        ax.axvline(threshold, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel('SNR')
+        ax.set_ylabel(ylabel)
+        ax.set_xlim(0, snr_max)
+        ax.set_ylim(0, 1.05)
+
+    fig.tight_layout()
+    for sfx in ('png', 'svg'):
+        out = os.path.join(data_dir, f'snr_filter_sweep.{sfx}')
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f'Saved -> {out}')
+    plt.close(fig)
+
+
+_SNR_THRESHOLD      = 2.7
+_SNR_N_CELLS        = 50
+_SNR_DURATION       = 120.0
+_SNR_N_LEVELS       = 18
+
+
+def run_snr_threshold_sweep(data_dir):
+
+    os.makedirs(data_dir, exist_ok=True)
+    out_path = os.path.join(data_dir, 'snr_threshold_sweep.npz')
+
+    snr_levels = np.geomspace(0.3, 3.0 * _SNR_THRESHOLD, _SNR_N_LEVELS)
+    print(f'SNR sweep: {_SNR_N_LEVELS} levels from {snr_levels[0]:.2f} to '
+          f'{snr_levels[-1]:.2f}  (threshold={_SNR_THRESHOLD})')
+    print(f'  {_SNR_N_CELLS} cells x {_SNR_DURATION}s each')
+
+    mean_f1    = np.full(_SNR_N_LEVELS, np.nan)
+    std_f1     = np.full(_SNR_N_LEVELS, np.nan)
+    mean_fb    = np.full(_SNR_N_LEVELS, np.nan)
+    std_fb     = np.full(_SNR_N_LEVELS, np.nan)
+    mean_cosmic = np.full(_SNR_N_LEVELS, np.nan)
+    std_cosmic  = np.full(_SNR_N_LEVELS, np.nan)
+
+    params = {
+        'f':         _FS,
+        'p':         2,
+        'auto_stop': True,
+        'upd_gam':   0,
+        'conv_tol':  _DEFAULT_CONV_TOL,
+        'burn_tol':  _DEFAULT_BURN_TOL,
+    }
+
+    for k, snr_val in enumerate(snr_levels):
+        print(f'\n  [{k+1}/{_SNR_N_LEVELS}] SNR={snr_val:.3f} ...')
+        dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+            n_cells=_SNR_N_CELLS, fs=_FS, duration=_SNR_DURATION,
+            tau=_TAU, snr=float(snr_val),
+        )
+        try:
+            res  = OMSI.deconv(dff, params=params, benchmark=True)
+            pred = res['optim_spikes']
+
+            _, _, f1_w = helpers.compute_accuracy_window(true_spikes, pred)
+            cosmic_v   = helpers.compute_cosmic(true_spikes, pred, _FS)
+
+            mean_f1[k]     = float(np.mean(f1_w))
+            std_f1[k]      = float(np.std(f1_w, ddof=1))
+            mean_cosmic[k] = float(np.mean(cosmic_v))
+            std_cosmic[k]  = float(np.std(cosmic_v, ddof=1))
+
+            if res['optim_precision'] is not None:
+                fb_arr = np.array([
+                    _fbeta(float(res['optim_precision'][i]),
+                           float(res['optim_recall'][i]))
+                    for i in range(_SNR_N_CELLS)
+                ])
+                mean_fb[k] = float(np.nanmean(fb_arr))
+                std_fb[k]  = float(np.nanstd(fb_arr))
+
+            print(f'    F_beta={mean_fb[k]:.3f}  CosMIC={mean_cosmic[k]:.3f}')
+        except Exception as exc:
+            print(f'    FAILED: {exc}')
+
+    np.savez(
+        out_path,
+        snr_levels  = snr_levels,
+        mean_f1     = mean_f1,
+        std_f1      = std_f1,
+        mean_fb     = mean_fb,
+        std_fb      = std_fb,
+        mean_cosmic = mean_cosmic,
+        std_cosmic  = std_cosmic,
+        threshold   = np.array([_SNR_THRESHOLD]),
+    )
+    print(f'\nSaved -> {out_path}')
+
+
+def plot_snr_threshold_sweep(data_dir):
+    out_path = os.path.join(data_dir, 'snr_threshold_sweep.npz')
+    if not os.path.exists(out_path):
+        raise FileNotFoundError(
+            f'No data at {out_path}. Run --mode snr-thresh-test first.')
+
+    d           = np.load(out_path)
+    snr_levels  = d['snr_levels'].astype(float)
+    mean_f1     = d['mean_f1'].astype(float)
+    std_f1      = d['std_f1'].astype(float)
+    mean_cosmic = d['mean_cosmic'].astype(float)
+    std_cosmic  = d['std_cosmic'].astype(float)
+    threshold   = float(d['threshold'][0])
+
+    fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
+    for ax, mean, std, ylabel in [
+        (axes[0], mean_f1,     std_f1,     '$F_\\beta$'),
+        (axes[1], mean_cosmic, std_cosmic, 'CosMIC'),
+    ]:
+        valid = np.isfinite(mean) & np.isfinite(std)
+        x, y, ye = snr_levels[valid], mean[valid], std[valid]
+        ax.fill_between(x,
+                        np.clip(y - ye, 0, 1),
+                        np.clip(y + ye, 0, 1),
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(x, y, '.-', color=_COLOR, zorder=3)
+        ax.axvline(threshold, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6, label=f'threshold={threshold}')
+        ax.set_xlabel('SNR')
+        ax.set_ylabel(ylabel)
+        ax.set_xlim(left=0)
+        ax.set_ylim(0, 1.05)
+
+    fig.tight_layout()
+    for sfx in ('png', 'svg'):
+        out = os.path.join(data_dir, f'snr_threshold_sweep.{sfx}')
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f'Saved -> {out}')
+    plt.close(fig)
+
+
+_SNR_SENSOR_ORDER = [
+    'GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m',
+    'GCaMP5k', 'OGB1', 'jGECO', 'XCaMP', 'R-CaMP', 'jRCaMP',
+]
+_SNR_EXCLUDED = {'Other', 'Cal520'}
+
+
+def _snr_get_sensor(ds_name):
+    s = ds_name.lower()
+    for keyword, label in [
+        ('gcaMP8s', 'GCaMP8s'), ('gcaMP8m', 'GCaMP8m'), ('gcaMP8f', 'GCaMP8f'),
+        ('gcaMP7f', 'GCaMP7f'), ('gcaMP6s', 'GCaMP6s'), ('gcaMP6f', 'GCaMP6f'),
+        ('gcaMP5k', 'GCaMP5k'), ('jgeco',   'jGECO'),   ('xcaMP',   'XCaMP'),
+        ('jrcamp',  'jRCaMP'),  ('rcamp',   'R-CaMP'),  ('ogb',     'OGB1'),
+        ('cal520',  'Cal520'),
+    ]:
+        if keyword.lower() in s:
+            return label
+    return 'Other'
+
+
+def print_snr_stats(fig4_data_dir):
+
+    traces_dir = os.path.join(fig4_data_dir, 'ground_truth_traces_fmcsi')
+    if not os.path.isdir(traces_dir):
+        print(f'Traces directory not found: {traces_dir}')
+        return
+
+    snr_by_sensor = {}
+    for fname in sorted(os.listdir(traces_dir)):
+        if not fname.endswith('_traces.npz'):
+            continue
+        ds_name = fname.replace('_traces.npz', '')
+        sensor  = _snr_get_sensor(ds_name)
+        if sensor in _SNR_EXCLUDED:
+            continue
+        try:
+            npz     = np.load(os.path.join(traces_dir, fname), allow_pickle=False)
+            n_cells = int(npz['n_cells'])
+        except Exception as exc:
+            print(f'  Warning: {fname}: {exc}')
+            continue
+        for i in range(n_cells):
+            trace = npz[f'dff_{i}'].astype(np.float64)
+            noise = _get_sn(trace, [0.25, 0.5])
+            b     = float(np.percentile(trace, 8))
+            peak  = float(np.percentile(trace, 99))
+            snr   = (peak - b) / (noise + 1e-9)
+            snr_by_sensor.setdefault(sensor, []).append(snr)
+
+    print('SNR statistics by sensor (figure4 datasets):')
+    print(f'  {"Sensor":<12}  {"n":>5}  {"mean SNR":>10}  {"std SNR":>10}')
+    print(f'  {"-"*12}  {"-"*5}  {"-"*10}  {"-"*10}')
+    for sensor in _SNR_SENSOR_ORDER:
+        if sensor not in snr_by_sensor:
+            continue
+        vals = np.array(snr_by_sensor[sensor])
+        print(f'  {sensor:<12}  {len(vals):>5}  {np.mean(vals):>10.2f}  {np.std(vals):>10.2f}')
+
+
 if __name__ == '__main__':
-    
+
     parser = argparse.ArgumentParser(
         description='T_supp sensitivity and init comparison benchmarks for fMCSI'
     )
     parser.add_argument(
         '--mode', required=True,
-        choices=['test', 'plot', 'init-test', 'init-plot', 'conv-test', 'conv-plot', 'combined-plot'],
+        choices=[
+            'test',
+            'plot',
+            'init-test',
+            'init-plot',
+            'conv-test',
+            'conv-plot',
+            'combined-plot',
+            'tol-conv-test',
+            'tol-conv-plot',
+            'tol-burn-test',
+            'tol-burn-plot',
+            'combined-opt-plot',
+            'snr-filter-test',
+            'snr-filter-plot',
+            'snr-thresh-test',
+            'snr-thresh-plot',
+            'snr-stats',
+        ],
     )
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for reading/writing result files')
+    parser.add_argument(
+        '--fig4-data-dir',
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig4'),
+        help='figure4 data directory (required for snr-stats mode)',
+    )
     args = parser.parse_args()
 
     if args.mode == 'test':
@@ -881,5 +1460,26 @@ if __name__ == '__main__':
         run_fmcsi_init_comparison(args.data_dir)
     elif args.mode == 'conv-plot':
         plot_fmcsi_init_comparison(args.data_dir)
-    else:
+    elif args.mode == 'combined-plot':
         plot_combined_init(args.data_dir)
+    elif args.mode == 'tol-conv-test':
+        run_conv_tol_sweep(args.data_dir)
+    elif args.mode == 'tol-conv-plot':
+        plot_conv_tol_sweep(args.data_dir)
+    elif args.mode == 'tol-burn-test':
+        run_burn_tol_sweep(args.data_dir)
+    elif args.mode == 'tol-burn-plot':
+        plot_burn_tol_sweep(args.data_dir)
+    elif args.mode == 'combined-opt-plot':
+        plot_combined_opt(args.data_dir)
+    elif args.mode == 'snr-filter-test':
+        run_snr_filter_sweep(args.data_dir)
+    elif args.mode == 'snr-filter-plot':
+        plot_snr_filter_sweep(args.data_dir)
+    elif args.mode == 'snr-thresh-test':
+        run_snr_threshold_sweep(args.data_dir)
+    elif args.mode == 'snr-thresh-plot':
+        plot_snr_threshold_sweep(args.data_dir)
+    elif args.mode == 'snr-stats':
+        print_snr_stats(args.fig4_data_dir)
+

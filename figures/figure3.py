@@ -1569,6 +1569,15 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     ax_f1 = fig.add_subplot(gs[2, 2:4])
     _plot_f1_violin(ax_f1, alldata, taus, f1_key=f1_key)
 
+    legend_handles = [
+        plt.Line2D([0], [0], color=model_colors['fMCSI'],   marker='.', linestyle='-', label='OMSI'),
+        plt.Line2D([0], [0], color=model_colors['MATLAB'],  marker='.', linestyle='-', label='CaImAn'),
+        plt.Line2D([0], [0], color=model_colors['OASIS'],   marker='.', linestyle='-', label='OASIS'),
+        plt.Line2D([0], [0], color=model_colors['CASCADE'], marker='.', linestyle='-', label='CASCADE'),
+    ]
+    fig.legend(handles=legend_handles, loc='upper center', ncol=4,
+               bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)
+
     plt.tight_layout()
     out_svg = os.path.join(data_dir, 'allen_combined_figure.svg')
     out_png = os.path.join(data_dir, 'allen_combined_figure.png')
