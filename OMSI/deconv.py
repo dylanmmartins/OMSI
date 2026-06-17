@@ -91,36 +91,63 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
             np.add.at(prob_trace, idx, 1)
     prob_trace /= max(1, len(ss))
 
-    prob_smooth = gaussian_filter1d(prob_trace, sigma=1.5)
-
-    peaks, properties = find_peaks(prob_smooth, height=0)
-    peak_heights = properties['peak_heights'] if 'peak_heights' in properties else np.array([])
-
-    # use otsu to split peaks into noise and signal clusters.
-    # then set the threshold well below the noise cluster (5 std below its mean)
-    # so we only call peaks that are clearly above the noise floor
-    MIN_THRESH = 0.001
-    if len(peak_heights) >= 2 and peak_heights.max() > 1e-6:
-        otsu_thresh = _compute_otsu_threshold(peak_heights)
-        noise_peaks = peak_heights[peak_heights < otsu_thresh]
-        if len(noise_peaks) >= 2:
-            prob_thresh = noise_peaks.mean() - 5.0 * noise_peaks.std()
-        else:
-            prob_thresh = otsu_thresh
-        prob_thresh = max(MIN_THRESH, prob_thresh)
-    else:
-        prob_thresh = MIN_THRESH
-
-    min_dist_frames = max(1, int(0.1 * fs))
-
-    spikes_frames, _ = find_peaks(
-        prob_smooth, height=prob_thresh, distance=min_dist_frames
-    )
-
-    # shift spike times back by the indicator lag so they line up with the actual spikes.
-    # the calcium signal peaks after the spike, so we subtract that delay here
     lag_frames = lag_s * fs
-    spikes_sec = np.clip(spikes_frames - lag_frames, 0, n_frames - 1) / fs
+    spike_method = params.get('spike_method', 'map') if params else 'map'
+
+    if spike_method == 'last' and len(ss) > 0:
+        # Return the final posterior sample directly — mirrors CaImAn's
+        # cont_ca_sampler which outputs samples{end} without any post-hoc
+        # scoring.  After burn-in the chain is drawing from the posterior;
+        # taking the last sample avoids MAP's double-penalisation of spike
+        # density (sparse prior deflates expected_n, then MAP penalises
+        # anything above that already-deflated expectation).
+        sp_best    = np.asarray(ss[-1], dtype=np.float64)
+        spikes_sec = np.clip(sp_best - lag_frames, 0, n_frames - 1) / fs
+
+    elif spike_method == 'map' and len(ss) > 0:
+        # MAP spike calling: select the single posterior sample whose spike
+        # times best agree with the full posterior consensus.
+        expected_n  = float(np.sum(prob_trace))
+        best_i      = 0
+        best_score  = -np.inf
+        for i, sp_times in enumerate(ss):
+            idxs  = (np.clip(sp_times.astype(int), 0, n_frames - 1)
+                     if len(sp_times) > 0 else np.array([], dtype=int))
+            score = (float(np.sum(prob_trace[idxs]))
+                     - 0.5 * max(0.0, len(sp_times) - expected_n))
+            if score > best_score:
+                best_score = score
+                best_i     = i
+
+        sp_best    = np.asarray(ss[best_i], dtype=np.float64)
+        spikes_sec = np.clip(sp_best - lag_frames, 0, n_frames - 1) / fs
+
+    else:
+        # prob spike calling: smooth the probability trace and apply Otsu
+        # thresholding to find peaks.  Kept as a fallback / alternative.
+        prob_smooth = gaussian_filter1d(prob_trace, sigma=max(1.5, 0.020 * fs))
+
+        peaks, properties = find_peaks(prob_smooth, height=0)
+        peak_heights = (properties['peak_heights']
+                        if 'peak_heights' in properties else np.array([]))
+
+        MIN_THRESH = 0.001
+        if len(peak_heights) >= 2 and peak_heights.max() > 1e-6:
+            otsu_thresh = _compute_otsu_threshold(peak_heights)
+            noise_peaks = peak_heights[peak_heights < otsu_thresh]
+            if len(noise_peaks) >= 2:
+                prob_thresh = noise_peaks.mean() - 5.0 * noise_peaks.std()
+            else:
+                prob_thresh = otsu_thresh
+            prob_thresh = max(MIN_THRESH, prob_thresh)
+        else:
+            prob_thresh = MIN_THRESH
+
+        min_dist_frames = max(1, int(0.1 * fs))
+        spikes_frames, _ = find_peaks(
+            prob_smooth, height=prob_thresh, distance=min_dist_frames
+        )
+        spikes_sec = np.clip(spikes_frames - lag_frames, 0, n_frames - 1) / fs
 
     prec = rec = f1 = 0.0
     if true_spikes_cell is not None:
@@ -156,6 +183,14 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
         prompt='Select a directory for Ray temporary files.\n'
                'A fast local drive (e.g. SSD scratch space) is recommended.',
     )
+
+    # runtime_env.env_vars below only reaches task/actor workers, not the
+    # raylet/dashboard-agent/driver core-worker processes ray.init() spawns
+    # itself — set these in the actual process env so the dashboard-less
+    # setup doesn't log "Failed to establish connection to the metrics
+    # exporter agent" on every run.
+    os.environ.setdefault('GLOG_minloglevel', '3')
+    os.environ.setdefault('RAY_enable_metrics_collection', '0')
 
     ray.init(
         _temp_dir=ray_dir,
@@ -316,7 +351,8 @@ def _save_results(results, dFF, hz, outdir, tag='', save_mat=False):
     dFF          - (n_cells, n_frames) dF/F input used for inference
     Ca_trace     - (n_cells, n_frames) MCMC-reconstructed calcium signal
     prob_trace   - (n_cells, n_frames) per-frame spike-probability trace
-    spike_train  - (n_cells, n_frames) uint8 Otsu-thresholded binary spike train
+    spike_train  - (n_cells, n_frames) uint8 binary spike train (from `spikes`,
+                   per the `spike_method` used during inference)
     spike_times  - (n_cells, max_spikes) spike times in seconds, NaN-padded
     n_spikes     - (n_cells,) number of detected spikes per cell
     hz           - scalar frame rate used during inference
@@ -364,7 +400,7 @@ def _save_results(results, dFF, hz, outdir, tag='', save_mat=False):
 
 
 def deconv_from_array(dff=None, f=None, fneu=None, hz=0, f_corr=0.7,
-                      outdir=None, tag='', save_mat=False):
+                      outdir=None, tag='', save_mat=False, params=None):
     if hz <= 0:
         raise ValueError('hz must be a positive frame rate in Hz.')
 
@@ -374,11 +410,12 @@ def deconv_from_array(dff=None, f=None, fneu=None, hz=0, f_corr=0.7,
         dff = _compute_dff(f, fneu=fneu, f_corr=f_corr)
 
     dff = np.atleast_2d(dff).astype(np.float32)
-    params = {'f': float(hz)}
+    run_params = dict(params) if params else {}
+    run_params['f'] = float(hz)
 
     print(f'Running deconvolution on {dff.shape[0]} cells x {dff.shape[1]} frames '
           f'at {hz} Hz...')
-    results = deconv(dff, params=params)
+    results = deconv(dff, params=run_params)
 
     if outdir is not None:
         _save_results(results, dff, hz, outdir, tag=tag, save_mat=save_mat)
@@ -387,7 +424,7 @@ def deconv_from_array(dff=None, f=None, fneu=None, hz=0, f_corr=0.7,
 
 
 def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
-                        cells_only=True, outdir=None, save_mat=False):
+                        cells_only=True, outdir=None, save_mat=False, params=None):
 
     suite2p_root = os.path.join(datadir, 'suite2p')
     search_root = suite2p_root if os.path.isdir(suite2p_root) else datadir
@@ -467,14 +504,14 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
 
         results = deconv_from_array(
             f=F, fneu=Fneu, hz=fs, f_corr=f_corr,
-            outdir=out_d, tag=tag, save_mat=save_mat,
+            outdir=out_d, tag=tag, save_mat=save_mat, params=params,
         )
         all_results[plane_name] = results
 
     return all_results
 
 
-def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False):
+def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=None):
 
     candidates = (
         glob.glob(os.path.join(datadir, '*.hdf5')) +
@@ -532,7 +569,7 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False):
 
     print(f'  Frame rate: {fs} Hz')
     out_d = outdir if outdir else datadir
-    results = deconv_from_array(dFF=dFF, hz=fs, outdir=out_d, save_mat=save_mat)
+    results = deconv_from_array(dFF=dFF, hz=fs, outdir=out_d, save_mat=save_mat, params=params)
     return results
 
 

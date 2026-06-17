@@ -42,7 +42,7 @@ DURATION = 60 * 20
 TAU      = 1.2
 N_CELLS  = 500
 BETA     = 0.5
-USE_STRICT_ACCURACY = False
+USE_STRICT_ACCURACY = True  # Hungarian one-to-one matching (compute_accuracy_strict)
 
 COLORS = {
     'fMCSI':      '#4C72B0',
@@ -284,6 +284,9 @@ def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
         n_win = int(np.sum((true_spk >= t_start) & (true_spk < t_start + window)))
         if n_win < min_spikes:
             continue
+        _f = raw[np.isfinite(raw)]
+        _mad = float(np.median(np.abs(np.diff(_f)))) / 0.6745 if len(_f) > 1 else 1e-4
+        _snr = (float(np.percentile(_f, 99)) - float(np.percentile(_f, 8))) / (_mad + 1e-9)
         cells.append({
             'cell_idx':      i,
             'true_spikes':   true_spk,
@@ -293,6 +296,7 @@ def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
             'trad_spikes':   mat_spk,
             'raw':           raw,
             'kurtosis':      float(kurtosis_arr[i]),
+            'snr':           _snr,
             'fs':            fs,
             't_start':       t_start,
         })
@@ -385,7 +389,7 @@ def _plot_raster(ax, cells, window=60.0):
                 fontweight='bold')
 
         ax.text(window + 0.8, base + cell_h / 2 - gap / 2,
-                f'kurt={cell["kurtosis"]:.1f}', va='center', ha='left', fontsize=6)
+                f'SNR={cell["snr"]:.1f}', va='center', ha='left', fontsize=6)
         if i < n - 1:
             ax.axhline(base - gap / 2, color='0.75', lw=0.4, ls='--')
 

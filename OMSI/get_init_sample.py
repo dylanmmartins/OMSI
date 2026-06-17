@@ -8,7 +8,7 @@ Written Feb 2026, DMM
 
 
 import numpy as np
-from scipy.optimize import nnls as scipy_nnls
+from scipy.optimize import nnls as scipy_nnls, minimize as _sp_minimize
 from scipy.linalg import toeplitz as sp_toeplitz
 from scipy.signal import lfilter
 
@@ -102,6 +102,32 @@ def _block_nnls_deconv(y_corr, h, T, block_size=400):
     return sp
 
 
+# AR(1) FOOPSI: L-BFGS-B with L1 spike penalty. Returns spike vector.
+def _foopsi_deconv(y, g_decay, lam):
+    T = len(y)
+    g = float(g_decay)
+
+    def _fwd(s):
+        return lfilter([1.0], [1.0, -g], s)
+
+    def _adj(v):
+        return lfilter([1.0], [1.0, -g], v[::-1])[::-1]
+
+    def _obj(s):
+        c    = _fwd(s)
+        res  = c - y
+        f    = 0.5 * float(np.dot(res, res)) + lam * float(s.sum())
+        grad = _adj(res) + lam
+        return f, grad
+
+    result = _sp_minimize(
+        _obj, np.zeros(T), method='L-BFGS-B', jac=True,
+        bounds=[(0.0, None)] * T,
+        options={'maxiter': 300, 'ftol': 1e-9, 'gtol': 1e-6},
+    )
+    return np.maximum(result.x, 0.0)
+
+
 
 def get_init_sample(Y, params):
 
@@ -133,8 +159,21 @@ def get_init_sample(Y, params):
             g = -np.poly(roots)[1:]
         g = np.atleast_1d(g).flatten()
 
-        sn = float(params['sn']) if params.get('sn') is not None \
-             else _get_sn(Y, [0.25, 0.5])
+        if params.get('sn') is not None:
+            sn = float(params['sn'])
+        else:
+            # for fast sensors the calcium signal has non-negligible power in
+            # the [0.25, 0.5] PSD band used by _get_sn, inflating the noise
+            # estimate and raising A_lb above real spike amplitudes.
+            # MAD of first differences is robust to this because the difference
+            # operator attenuates the slow signal and MAD ignores spike outliers.
+            _roots_abs = np.abs(np.roots(np.concatenate([[1.0], -g])))
+            _g_d = float(np.max(_roots_abs)) if len(_roots_abs) > 0 else float(np.max(g))
+            _tau_d_s = -1.0 / (np.log(max(min(_g_d, 0.9999), 1e-6)) * float(params.get('f', 30.0)))
+            if _tau_d_s < 0.6:
+                sn = float(np.median(np.abs(np.diff(Y))) / (0.6745 * np.sqrt(2.0)))
+            else:
+                sn = _get_sn(Y, [0.25, 0.5])
 
         bas_nonneg = params.get('bas_nonneg', 0)
         if params.get('b') is not None:
@@ -155,11 +194,13 @@ def get_init_sample(Y, params):
         y_corr = Y - b - c1 * ge
 
         tau_frames = max(1.0, -1.0 / np.log(max(g_decay, 1e-6)))
-        K = min(T, max(50, int(np.ceil(5 * tau_frames))))
-        h = _ar_kernel(g, K)
 
-        sp = _block_nnls_deconv(y_corr, h, T, block_size=min(400, T))
-
+        if params.get('init_method') == 'foopsi':
+            sp = _foopsi_deconv(y_corr, g_decay, lam=sn)
+        else:
+            K  = min(T, max(50, int(np.ceil(5 * tau_frames))))
+            h  = _ar_kernel(g, K)
+            sp = _block_nnls_deconv(y_corr, h, T, block_size=min(400, T))
 
         c = lfilter([1.0], np.concatenate([[1.0], -g]), sp)
 

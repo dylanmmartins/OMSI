@@ -53,7 +53,7 @@ model_colors = {
 }
 _MODEL_ORDER = ['fMCSI', 'MATLAB', 'CASCADE', 'OASIS']
 
-USE_STRICT_ACCURACY = False
+USE_STRICT_ACCURACY = True  # Hungarian one-to-one matching (compute_accuracy_strict)
 BETA = 0.5
 
 #   'threshold' : return every frame where s > height * sigma (default)
@@ -944,12 +944,15 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                 det_list = [s for s in [my_spk, trad_spk, oasis_spk, cas_spk]
                             if len(s) > 0]
                 t_start = _best_window(raw_trace, fs, spk, det_list, window=window)
+                _f = raw_trace[np.isfinite(raw_trace)]
+                _mad = float(np.median(np.abs(np.diff(_f)))) / 0.6745 if len(_f) > 1 else 1e-4
+                _snr = (float(np.percentile(_f, 99)) - float(np.percentile(_f, 8))) / (_mad + 1e-9)
                 all_cells.append({
                     'label': label, 'cell_idx': i,
                     'true_spikes': spk, 'my_spikes': my_spk,
                     'trad_spikes': trad_spk, 'oasis_spikes': oasis_spk,
                     'cas_spikes': cas_spk, 'raw': raw_trace,
-                    'kurtosis': kurt, 'fs': fs, 't_start': t_start,
+                    'kurtosis': kurt, 'snr': _snr, 'fs': fs, 't_start': t_start,
                 })
         except Exception as exc:
             print(f"Warning: could not load {fpath}: {exc}")
@@ -1042,7 +1045,7 @@ def _plot_combined_raster_trace(ax, cells, window=60.0):
                 va='center', ha='center', color='k', fontsize=5.5,
                 fontweight='bold')
         ax.text(window + 0.8, base + cell_h / 2 - gap / 2,
-                f'kurt={cell["kurtosis"]:.1f}', va='center', ha='left')
+                f'SNR={cell["snr"]:.1f}', va='center', ha='left')
         if i < n - 1:
             ax.axhline(base - gap / 2, color='0.75', lw=0.4, ls='--')
     ax.set_xlim(label_x - 0.5, window + 4.5)
@@ -1071,7 +1074,7 @@ def _plot_violin_metric(ax, alldata, taus, zoom, metric, ylabel):
                     violin_colors.append(model_colors.get(model_name, 'k'))
             x_pos += 1
         tau_ticks.append(group_center)
-        tau_labels.append(f'tau={tau_val} s')
+        tau_labels.append(f'τ={tau_val} s')
         x_pos += 0.5
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
@@ -1107,7 +1110,7 @@ def _plot_f1_violin(ax, alldata, taus, f1_key='f1'):
                 x_pos += 1
             z_abbrev = 'high zoom' if 'High' in zoom else 'low zoom'
             group_ticks.append(group_center)
-            group_labels.append(f'tau={tau_val} s\n{z_abbrev}')
+            group_labels.append(f'τ={tau_val} s\n{z_abbrev}')
             x_pos += 0.5
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
@@ -1400,7 +1403,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
             print(f"  {model}: recomputed metrics for {n} cells.")
             any_updated = True
     if not any_updated:
-        print("  No trace data found — metrics unchanged from saved values.")
+        print("  No trace data found -- metrics unchanged from saved values.")
 
 
 def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
@@ -1703,7 +1706,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
 def main():
 
     parser = argparse.ArgumentParser(
-        description='Figure 3 — Allen data benchmark'
+        description='Figure 3 -- Allen data benchmark'
     )
     parser.add_argument('--mode', required=True, choices=['test', 'fmcsi', 'plot', 'print'],
                         help='test: run all inference; fmcsi: re-run fMCSI only; '

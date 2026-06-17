@@ -116,9 +116,11 @@ def run_T_supp_sweep(data_dir):
             per_cell_t = res['optim_times_per_cell']
             pred       = res['optim_spikes']
 
-            _, _, f1_w = helpers.compute_accuracy_window(true_spikes, pred)
-            _, _, f1_e = helpers.compute_accuracy_window(true_events, pred)
+            prec_s, rec_s, _ = helpers.compute_accuracy_strict(true_spikes, pred)
+            _,      _,    f1_e = helpers.compute_accuracy_window(true_events, pred)
             cosmic     = helpers.compute_cosmic(true_spikes, pred, _FS)
+            fb = np.array([_fbeta(float(prec_s[i]), float(rec_s[i]))
+                            for i in range(len(prec_s))])
 
             rows.append({
                 'T_supp':          ts,
@@ -127,15 +129,15 @@ def run_T_supp_sweep(data_dir):
                 'total_time':      elapsed,
                 'mean_time':       float(np.mean(per_cell_t)),
                 'std_time':        float(np.std(per_cell_t, ddof=1)),
-                'mean_f1_window':  float(np.mean(f1_w)),
-                'std_f1_window':   float(np.std(f1_w, ddof=1)),
+                'mean_f1_window':  float(np.mean(fb)),
+                'std_f1_window':   float(np.std(fb, ddof=1)),
                 'mean_f1_event':   float(np.mean(f1_e)),
                 'mean_cosmic':     float(np.mean(cosmic)),
                 'std_cosmic':      float(np.std(cosmic, ddof=1)),
             })
             print(f'    total={elapsed:.1f}s  '
                   f'mean_cell={np.mean(per_cell_t):.3f}s  '
-                  f'F1={np.mean(f1_w):.3f}  '
+                  f'F_beta={np.mean(fb):.3f}  '
                   f'CosMIC={np.mean(cosmic):.3f}')
         except Exception as exc:
             print(f'    FAILED: {exc}')
@@ -203,7 +205,7 @@ def plot_T_supp_sweep(data_dir):
         ax.set_xlabel('$T_{supp}$ (sec)')
         ax.set_ylabel(ylabel)
         ax.set_xscale('log')
-        ax.set_ylim([0, 100])
+        ax.set_ylim([0, 500])
 
     axes[1].set_ylim(0, 0.51)
 
@@ -859,18 +861,39 @@ def plot_combined_init(data_dir):
 _DEFAULT_CONV_TOL = 0.00067 # was 0.001; tightened 1.5x
 _DEFAULT_BURN_TOL = 0.005   # original default
 
+# min_sweeps=300 (the default) gates how soon the post-burn-in convergence
+# check can fire, which floors total sweep count regardless of how loose
+# conv_tol/burn_tol are set. lower it per-sweep so loosening the tolerance
+# being tested can actually shorten the chain enough to reveal a quality drop.
+_CONV_TEST_MIN_SWEEPS = 50
+_BURN_TEST_MIN_SWEEPS = 50
+
+# B (initial samples before burn-in is even checked) and win (the trailing
+# window used to test amplitude stability) are normally 75/100, which floors
+# burn-in completion at sweep ~175-200 no matter how loose burn_tol is.
+# Shrunk here -- test-only, not the production default -- so a loose enough
+# burn_tol/conv_tol can actually let the chain stop while still under-mixed,
+# which is what's needed to see accuracy fall off.
+_TEST_B           = 5
+_TEST_WIN         = 5
+_TEST_CHECK_EVERY = 5
+
 def _build_tol_grid(default_val, n_below=7, n_above=7):
-    below = np.geomspace(default_val / 1000.0, default_val * 0.9, n_below)
-    above = np.geomspace(default_val * 1.1,   default_val * 1000.0, n_above)
-    return np.unique(np.concatenate([below, [default_val], above])).tolist()
+    # single geomspace symmetric in log around default_val: with an odd total
+    # point count its exact middle point is sqrt(a*b) = default_val, so it's
+    # included for free without bunching extra points (0.9x/1.1x) next to it.
+    n_total = n_below + n_above + 1
+    return np.geomspace(default_val / 1000.0, default_val * 1000.0, n_total).tolist()
 
 
-def _run_tol_sweep(dff, true_spikes, param_name, grid, fs):
+def _run_tol_sweep(dff, true_spikes, param_name, grid, fs, min_sweeps):
     rows = []
     for val in grid:
         print(f'\n  {param_name}={val:.2e} ...')
         params = {
             'f': fs, 'p': 2, 'auto_stop': True, 'upd_gam': 0,
+            'min_sweeps': min_sweeps,
+            'B': _TEST_B, 'win': _TEST_WIN, 'check_every': _TEST_CHECK_EVERY,
             'conv_tol': _DEFAULT_CONV_TOL,
             'burn_tol': _DEFAULT_BURN_TOL,
         }
@@ -879,17 +902,19 @@ def _run_tol_sweep(dff, true_spikes, param_name, grid, fs):
             res        = OMSI.deconv(dff, params=params, benchmark=True)
             per_cell_t = res['optim_times_per_cell']
             pred       = res['optim_spikes']
-            _, _, f1_w = helpers.compute_accuracy_window(true_spikes, pred)
+            prec_s, rec_s, _ = helpers.compute_accuracy_strict(true_spikes, pred)
             cosmic     = helpers.compute_cosmic(true_spikes, pred, fs)
+            fb = np.array([_fbeta(float(prec_s[i]), float(rec_s[i]))
+                            for i in range(len(prec_s))])
             rows.append({
                 'val':       val,
                 'mean_time': float(np.mean(per_cell_t)),
                 'std_time':  float(np.std(per_cell_t, ddof=1)),
-                'mean_f1':   float(np.mean(f1_w)),
-                'std_f1':    float(np.std(f1_w, ddof=1)),
+                'mean_f1':   float(np.mean(fb)),
+                'std_f1':    float(np.std(fb, ddof=1)),
             })
             print(f'    mean_cell={np.mean(per_cell_t):.3f}s  '
-                  f'F1={np.mean(f1_w):.3f}  CosMIC={np.mean(cosmic):.3f}')
+                  f'F_beta={np.mean(fb):.3f}  CosMIC={np.mean(cosmic):.3f}')
         except Exception as exc:
             print(f'    FAILED: {exc}')
     return rows
@@ -920,7 +945,7 @@ def run_conv_tol_sweep(data_dir):
     grid = _build_tol_grid(_DEFAULT_CONV_TOL)
     print(f'  Sweep ({len(grid)} conv_tol values): {[f"{v:.2e}" for v in grid]}')
 
-    rows = _run_tol_sweep(dff, true_spikes, 'conv_tol', grid, _FS)
+    rows = _run_tol_sweep(dff, true_spikes, 'conv_tol', grid, _FS, _CONV_TEST_MIN_SWEEPS)
     if rows:
         _save_tol_sweep(out_path, rows, _DEFAULT_CONV_TOL)
     else:
@@ -939,7 +964,7 @@ def run_burn_tol_sweep(data_dir):
     grid = _build_tol_grid(_DEFAULT_BURN_TOL)
     print(f'  Sweep ({len(grid)} burn_tol values): {[f"{v:.2e}" for v in grid]}')
 
-    rows = _run_tol_sweep(dff, true_spikes, 'burn_tol', grid, _FS)
+    rows = _run_tol_sweep(dff, true_spikes, 'burn_tol', grid, _FS, _BURN_TEST_MIN_SWEEPS)
     if rows:
         _save_tol_sweep(out_path, rows, _DEFAULT_BURN_TOL)
     else:
@@ -1084,14 +1109,14 @@ def plot_combined_opt(data_dir):
 
     d           = np.load(snr_path)
     snr_levels  = d['snr_levels'].astype(float)
-    mean_f1     = d['mean_f1'].astype(float)
-    std_f1      = d['std_f1'].astype(float)
+    mean_fb     = d['mean_fb'].astype(float)
+    std_fb      = d['std_fb'].astype(float)
     mean_cosmic = d['mean_cosmic'].astype(float)
     std_cosmic  = d['std_cosmic'].astype(float)
     threshold   = float(d['threshold'][0])
 
     for ax, mean, std, ylabel in [
-        (axes[3, 0], mean_f1,     std_f1,     '$F_\\beta$'),
+        (axes[3, 0], mean_fb,     std_fb,     '$F_\\beta$'),
         (axes[3, 1], mean_cosmic, std_cosmic, 'CosMIC'),
     ]:
         valid = np.isfinite(mean) & np.isfinite(std)
@@ -1149,13 +1174,15 @@ def run_snr_filter_sweep(data_dir):
     res = OMSI.deconv(dff, params=params, benchmark=True)
     pred = res['optim_spikes']
 
-    _, _, f1_window = helpers.compute_accuracy_window(true_spikes, pred)
-    cosmic          = helpers.compute_cosmic(true_spikes, pred, _FS)
+    prec_s, rec_s, _ = helpers.compute_accuracy_strict(true_spikes, pred)
+    cosmic           = helpers.compute_cosmic(true_spikes, pred, _FS)
+    fbeta = np.array([_fbeta(float(prec_s[i]), float(rec_s[i]))
+                       for i in range(len(prec_s))])
 
     np.savez(
         out_path,
         snr       = snr,
-        f1_window = f1_window,
+        fbeta     = fbeta,
         cosmic    = cosmic,
         threshold = np.array([_SNR_THRESHOLD]),
     )
@@ -1169,7 +1196,7 @@ def plot_snr_filter_sweep(data_dir):
 
     d         = np.load(out_path)
     snr       = d['snr'].astype(float)
-    f1_window = d['f1_window'].astype(float)
+    fbeta     = d['fbeta'].astype(float)
     cosmic    = d['cosmic'].astype(float)
     threshold = float(d['threshold'][0])
 
@@ -1182,7 +1209,7 @@ def plot_snr_filter_sweep(data_dir):
     ]))
     in_range  = snr <= snr_max
     snr       = snr[in_range]
-    f1_window = f1_window[in_range]
+    fbeta     = fbeta[in_range]
     cosmic    = cosmic[in_range]
     bin_ids   = np.clip(np.digitize(snr, bins) - 1, 0, len(bins) - 2)
 
@@ -1199,8 +1226,8 @@ def plot_snr_filter_sweep(data_dir):
         if mask.sum() < 2:
             continue
         n_bin[b]    = mask.sum()
-        f1_mean[b]  = np.nanmean(f1_window[mask])
-        f1_std[b]   = np.nanstd(f1_window[mask])
+        f1_mean[b]  = np.nanmean(fbeta[mask])
+        f1_std[b]   = np.nanstd(fbeta[mask])
         cos_mean[b] = np.nanmean(cosmic[mask])
         cos_std[b]  = np.nanstd(cosmic[mask])
 
@@ -1234,7 +1261,7 @@ def plot_snr_filter_sweep(data_dir):
     plt.close(fig)
 
 
-_SNR_THRESHOLD      = 2.7
+_SNR_THRESHOLD      = 2.0
 _SNR_N_CELLS        = 50
 _SNR_DURATION       = 120.0
 _SNR_N_LEVELS       = 18
@@ -1250,8 +1277,6 @@ def run_snr_threshold_sweep(data_dir):
           f'{snr_levels[-1]:.2f}  (threshold={_SNR_THRESHOLD})')
     print(f'  {_SNR_N_CELLS} cells x {_SNR_DURATION}s each')
 
-    mean_f1    = np.full(_SNR_N_LEVELS, np.nan)
-    std_f1     = np.full(_SNR_N_LEVELS, np.nan)
     mean_fb    = np.full(_SNR_N_LEVELS, np.nan)
     std_fb     = np.full(_SNR_N_LEVELS, np.nan)
     mean_cosmic = np.full(_SNR_N_LEVELS, np.nan)
@@ -1273,14 +1298,11 @@ def run_snr_threshold_sweep(data_dir):
             tau=_TAU, snr=float(snr_val),
         )
         try:
-            res  = OMSI.deconv(dff, params=params, benchmark=True)
+            res  = OMSI.deconv(dff, params=params, true_spikes=true_spikes, benchmark=True)
             pred = res['optim_spikes']
 
-            _, _, f1_w = helpers.compute_accuracy_window(true_spikes, pred)
             cosmic_v   = helpers.compute_cosmic(true_spikes, pred, _FS)
 
-            mean_f1[k]     = float(np.mean(f1_w))
-            std_f1[k]      = float(np.std(f1_w, ddof=1))
             mean_cosmic[k] = float(np.mean(cosmic_v))
             std_cosmic[k]  = float(np.std(cosmic_v, ddof=1))
 
@@ -1300,8 +1322,6 @@ def run_snr_threshold_sweep(data_dir):
     np.savez(
         out_path,
         snr_levels  = snr_levels,
-        mean_f1     = mean_f1,
-        std_f1      = std_f1,
         mean_fb     = mean_fb,
         std_fb      = std_fb,
         mean_cosmic = mean_cosmic,
@@ -1319,15 +1339,15 @@ def plot_snr_threshold_sweep(data_dir):
 
     d           = np.load(out_path)
     snr_levels  = d['snr_levels'].astype(float)
-    mean_f1     = d['mean_f1'].astype(float)
-    std_f1      = d['std_f1'].astype(float)
+    mean_fb     = d['mean_fb'].astype(float)
+    std_fb      = d['std_fb'].astype(float)
     mean_cosmic = d['mean_cosmic'].astype(float)
     std_cosmic  = d['std_cosmic'].astype(float)
     threshold   = float(d['threshold'][0])
 
     fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
     for ax, mean, std, ylabel in [
-        (axes[0], mean_f1,     std_f1,     '$F_\\beta$'),
+        (axes[0], mean_fb,     std_fb,     '$F_\\beta$'),
         (axes[1], mean_cosmic, std_cosmic, 'CosMIC'),
     ]:
         valid = np.isfinite(mean) & np.isfinite(std)

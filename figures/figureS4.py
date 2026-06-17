@@ -111,8 +111,8 @@ def _load_all_records(data_dir):
         for r in recs:
             r['method'] = method_key
             r['sensor'] = _get_sensor(r['dataset'])
-            r['fbeta']  = float(_fbeta(r.get('precision_window', 0.0),
-                                        r.get('recall_window',    0.0)))
+            r['fbeta']  = float(_fbeta(r.get('precision_window_oto', 0.0),
+                                        r.get('recall_window_oto',    0.0)))
         all_records[method_key] = recs
         print(f'  Loaded {len(recs):5d} records for {method_key}')
 

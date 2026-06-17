@@ -100,7 +100,7 @@ def _fbeta(precision, recall):
 
 
 def _compute_metrics(true_spikes, spikes_list):
-    prec, rec, _ = OMSI.helpers.compute_accuracy_window(true_spikes, spikes_list)
+    prec, rec, _ = OMSI.helpers.compute_accuracy_strict(true_spikes, spikes_list)
     fb           = _fbeta(prec, rec)
     cosmic       = compute_cosmic(true_spikes, spikes_list, FS)
     return prec, rec, fb, cosmic

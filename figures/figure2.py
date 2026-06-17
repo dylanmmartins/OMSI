@@ -42,7 +42,7 @@ mpl.rcParams['font.size']    = 7
 np.random.seed(3)
 
 BETA = 0.5
-USE_STRICT_ACCURACY = False
+USE_STRICT_ACCURACY = True  # Hungarian one-to-one matching (compute_accuracy_strict)
 
 COLORS = {
     'fMCSI':        '#4C72B0',

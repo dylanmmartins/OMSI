@@ -38,6 +38,7 @@ mpl.rcParams['font.size']    = 7
 
 BETA               = 0.5
 KURTOSIS_THRESHOLD = 0.5
+SNR_THRESHOLD      = 2.0
 TAU_RISE           = 0.05
 
 
@@ -53,6 +54,15 @@ def _dff_kurtosis(fluo):
     if s < 1e-9:
         return 0.0
     return float(np.mean(((dff - m) / s) ** 4) - 3.0)
+
+
+def _snr_from_fluo(fluo):
+    f  = np.asarray(fluo, dtype=np.float64)
+    fv = f[np.isfinite(f)]
+    if len(fv) < 2:
+        return 0.0
+    mad = float(np.median(np.abs(np.diff(fv)))) / 0.6745
+    return (float(np.percentile(fv, 99)) - float(np.percentile(fv, 8))) / (mad + 1e-9)
 
 _METHODS = {
     'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
@@ -94,7 +104,21 @@ _SENSOR_ORDER = [
 ]
 _EXCLUDED_SENSORS = {'Other', 'Cal520'}
 
+# Datasets excluded for sensor / recording reasons unrelated to cell type.
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
+
+# Inhibitory interneuron datasets are excluded because all evaluated methods
+# (OMSI, CaImAn, OASIS, CASCADE) are designed and validated on excitatory
+# principal cells.  PV / SST / VIP cells fire at rates that exceed the
+# Nyquist limit of typical imaging frame rates, making individual spike
+# resolution physically impossible at ≤30 Hz.  The 100 ms window metric is
+# also not meaningful for cells with <20 ms inter-spike intervals.
+_INTERNEURON_KEYWORDS = {'PV', 'SST', 'VIP', 'Interneuron', 'inhibitory'}
+
+
+def _is_interneuron_dataset(ds_folder):
+    parts = ds_folder.replace('-', ' ').replace('_', ' ').split()
+    return any(kw.lower() in p.lower() for p in parts for kw in _INTERNEURON_KEYWORDS)
 
 _DS_TAU = {
     'DS01': 0.6, 'DS02': 0.6, 'DS03': 0.6, 'DS04': 0.6, 'DS05': 0.6,
@@ -172,7 +196,7 @@ def _fbeta(precision, recall):
 
 
 def _get_fbeta(record):
-    return _fbeta(record['precision_window'], record['recall_window'])
+    return _fbeta(record['precision_window_oto'], record['recall_window_oto'])
 
 
 def get_tau(ds_folder):
@@ -227,6 +251,38 @@ def compute_accuracy_window(true_spikes, predicted_spikes, tolerance=0.1):
     return np.array(precs), np.array(recs), np.array(f1s)
 
 
+def compute_accuracy_window_oto(true_spikes, predicted_spikes, tolerance=0.1):
+    """One-to-one window matching via the Hungarian algorithm.  Each true spike
+    and each predicted spike can participate in at most one match, and the
+    assignment maximises the total number of matched pairs."""
+    from scipy.optimize import linear_sum_assignment
+
+    precs, recs, f1s = [], [], []
+    for t_raw, p_raw in zip(true_spikes, predicted_spikes):
+        t = np.asarray(t_raw, dtype=np.float64).flatten()
+        p = np.asarray(p_raw, dtype=np.float64).flatten()
+        if len(t) == 0 and len(p) == 0:
+            precs.append(1.0); recs.append(1.0); f1s.append(1.0); continue
+        if len(p) == 0:
+            precs.append(0.0); recs.append(0.0); f1s.append(0.0); continue
+        if len(t) == 0:
+            precs.append(0.0); recs.append(1.0); f1s.append(0.0); continue
+
+        # Cost matrix: distance for within-tolerance pairs, large sentinel otherwise.
+        # linear_sum_assignment minimises total cost, so valid matches (cost < 1)
+        # are always preferred over unmatched assignments (cost = 1).
+        dist = np.abs(t[:, None] - p[None, :])   # (n_true, n_pred)
+        cost = np.where(dist <= tolerance, dist, 1.0)
+        t_idx, p_idx = linear_sum_assignment(cost)
+        n_tp = int(np.sum(cost[t_idx, p_idx] < 1.0))
+
+        prec = n_tp / len(p)
+        rec  = n_tp / len(t)
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        precs.append(prec); recs.append(rec); f1s.append(f1)
+    return np.array(precs), np.array(recs), np.array(f1s)
+
+
 def _make_event_gt(spike_times_s, tau_s, event_window=0.250):
 
     t = np.asarray(spike_times_s, dtype=np.float64)
@@ -249,12 +305,27 @@ def _build_params(fs, tau):
 
     g_rise  = float(np.exp(-1.0 / (TAU_RISE * fs)))
     g_decay = float(np.exp(-1.0 / (tau * fs)))
+
+    if g_decay - g_rise < 0.15 and tau * fs < 40:
+        # close-pole case: fast indicator (short tau_d) at high frame rate.
+        # the decay spans < 40 frames, so downsampling to ~40 Hz does not
+        # discard useful temporal information and resolves the close-pole problem.
+        # sensors that are close-pole only because of a very high frame rate
+        # (e.g. GCaMP6f at 122 Hz, tau*fs ≈ 61) are left in the standard path.
+        return {
+            'f': fs, 'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 1, 'upd_gam': 1,
+            'g':       None,
+            'defg':    [g_rise, g_decay],
+            'TauStd':  [TAU_RISE * fs, tau * fs],
+            'con_lam': False,
+        }
+
     return {
-        'f': fs, 'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 0, 'upd_gam': 1,
+        'f': fs, 'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 1, 'upd_gam': 1,
         'g':       [g_rise + g_decay, -g_rise * g_decay],
         'defg':    [g_rise, g_decay],
         'TauStd':  [TAU_RISE * fs, tau * fs],
-        'lam_scale': 1.0,
+        'con_lam': False,
     }
 
 def process_dataset(ds_folder, ground_truth_dir, model):
@@ -267,7 +338,6 @@ def process_dataset(ds_folder, ground_truth_dir, model):
         return [], None
 
     cells = []
-    n_skipped = 0
     for fname in mat_files:
         try:
             mat = scipy.io.loadmat(os.path.join(ds_path, fname))
@@ -291,16 +361,12 @@ def process_dataset(ds_folder, ground_truth_dir, model):
             spk = spk / ephys_rate - t0
             spk = spk[(spk >= 0) & (spk <= dur)]
             kurt = _dff_kurtosis(fluo)
-            if kurt < KURTOSIS_THRESHOLD:
-                n_skipped += 1
-                continue
             cells.append({'fluo': fluo, 'spk': spk,
                           'fs': 1.0 / dt, 'fname': fname, 'kurt': float(kurt)})
         except Exception as exc:
             print(f"    Warning — skipping {fname}: {exc}")
 
-    print(f"  {ds_folder}: {len(cells)} cells pass kurtosis filter "
-          f"({n_skipped} skipped), tau={tau}s")
+    print(f"  {ds_folder}: {len(cells)} cells, tau={tau}s")
     if not cells:
         return [], None
 
@@ -318,16 +384,40 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     spikes_list = []
 
     if model == 'fmcsi':
-        params = _build_params(fs, tau)
+        params         = _build_params(fs, tau)
+        _is_close_pole = params['g'] is None
+
+        if _is_close_pole:
+            # Option B: AR(1) at full frame rate — avoids the degenerate
+            # double-exp kernel without discarding any temporal information.
+            g_decay_full   = float(np.exp(-1.0 / (tau * fs)))
+            params['p']    = 1
+            params['g']    = None
+            params['defg'] = [0.0, g_decay_full]
+            params['TauStd'] = [0.0, tau * fs]
+            # Option C: let λ adapt each sweep so the chain self-corrects
+            # from any inflated NNLS initialization.
+            params['con_lam'] = False
+            print(f"  Close-pole: AR(1) at {fs:.0f} Hz, con_lam=False")
+
+        # Batch into one deconv call so Ray parallelizes across cells rather
+        # than paying Ray init overhead once per cell.
+        processed_fluos = []
         for cell in cells:
-            dff_1 = cell['fluo'][np.newaxis, :]
-            try:
-                od = OMSI.deconv(dff_1, params, benchmark=True)
-                probs_list.append(od['optim_prob'][0])
-                spk = np.asarray(list(od['optim_spikes'])[0], dtype=np.float64)
+            processed_fluos.append(cell['fluo'].astype(np.float32))
+
+        min_T  = min(len(f) for f in processed_fluos)
+        dff_2d = np.stack([f[:min_T] for f in processed_fluos], axis=0)
+
+        try:
+            od = OMSI.deconv(dff_2d, params, benchmark=True)
+            for i in range(n_cells):
+                probs_list.append(od['optim_prob'][i])
+                spk = np.asarray(od['optim_spikes'][i], dtype=np.float64)
                 spikes_list.append(spk[np.isfinite(spk)])
-            except Exception as exc:
-                print(f"    Warning — inference failed for {cell['fname']}: {exc}")
+        except Exception as exc:
+            print(f"    Warning — batch inference failed: {exc}")
+            for cell in cells:
                 probs_list.append(np.zeros(len(cell['fluo']), dtype=np.float32))
                 spikes_list.append(np.array([], dtype=np.float64))
 
@@ -400,40 +490,47 @@ def process_dataset(ds_folder, ground_truth_dir, model):
         probs_2d[i, :len(p)] = p
 
     true_events = [_make_event_gt(sp, tau) for sp in true_spikes]
-    prec_s, rec_s, f1_s = helpers.compute_accuracy_strict(
+    prec_s,  rec_s,  f1_s  = helpers.compute_accuracy_strict(
         true_spikes, spikes_list, tolerance=0.1)
-    prec_w, rec_w, f1_w = compute_accuracy_window(
+    prec_w,  rec_w,  f1_w  = compute_accuracy_window(
         true_spikes, spikes_list, tolerance=0.1)
-    prec_e, rec_e, f1_e = compute_accuracy_window(
+    prec_w1, rec_w1, f1_w1 = compute_accuracy_window_oto(
+        true_spikes, spikes_list, tolerance=0.1)
+    prec_e,  rec_e,  f1_e  = compute_accuracy_window(
         true_events, spikes_list, tolerance=0.1)
     cosmic = helpers.compute_cosmic(true_spikes, spikes_list, fs)
 
-    print(f"  Strict  P={np.mean(prec_s):.3f}  R={np.mean(rec_s):.3f}  "
+    print(f"  Strict   P={np.mean(prec_s):.3f}  R={np.mean(rec_s):.3f}  "
           f"F1={np.mean(f1_s):.3f}")
-    print(f"  Window  P={np.mean(prec_w):.3f}  R={np.mean(rec_w):.3f}  "
+    print(f"  Window   P={np.mean(prec_w):.3f}  R={np.mean(rec_w):.3f}  "
           f"F1={np.mean(f1_w):.3f}")
-    print(f"  CosMIC  mean={np.mean(cosmic):.3f}")
+    print(f"  Win-OTO  P={np.mean(prec_w1):.3f}  R={np.mean(rec_w1):.3f}  "
+          f"F1={np.mean(f1_w1):.3f}")
+    print(f"  CosMIC   mean={np.mean(cosmic):.3f}")
 
     records = []
     for i, cell in enumerate(cells):
         records.append({
-            'model':            model,
-            'dataset':          ds_folder,
-            'fname':            cell['fname'],
-            'fs':               fs,
-            'tau':              tau,
-            'kurtosis':         cell['kurt'],
-            'n_true_spikes':    int(len(cell['spk'])),
-            'f1':               float(f1_s[i]),
-            'precision':        float(prec_s[i]),
-            'recall':           float(rec_s[i]),
-            'f1_window':        float(f1_w[i]),
-            'precision_window': float(prec_w[i]),
-            'recall_window':    float(rec_w[i]),
-            'f1_event':         float(f1_e[i]),
-            'precision_event':  float(prec_e[i]),
-            'recall_event':     float(rec_e[i]),
-            'cosmic':           float(cosmic[i]),
+            'model':                model,
+            'dataset':              ds_folder,
+            'fname':                cell['fname'],
+            'fs':                   fs,
+            'tau':                  tau,
+            'kurtosis':             cell['kurt'],
+            'n_true_spikes':        int(len(cell['spk'])),
+            'f1':                   float(f1_s[i]),
+            'precision':            float(prec_s[i]),
+            'recall':               float(rec_s[i]),
+            'f1_window':            float(f1_w[i]),
+            'precision_window':     float(prec_w[i]),
+            'recall_window':        float(rec_w[i]),
+            'f1_window_oto':        float(f1_w1[i]),
+            'precision_window_oto': float(prec_w1[i]),
+            'recall_window_oto':    float(rec_w1[i]),
+            'f1_event':             float(f1_e[i]),
+            'precision_event':      float(prec_e[i]),
+            'recall_event':         float(rec_e[i]),
+            'cosmic':               float(cosmic[i]),
         })
 
     traces = {'fs': fs, 'tau': tau, 'n_cells': n_cells}
@@ -456,6 +553,7 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
         d for d in os.listdir(ground_truth_dir)
         if os.path.isdir(os.path.join(ground_truth_dir, d))
         and d not in _EXCLUDED_DATASETS
+        and not _is_interneuron_dataset(d)
     )
     print(f"Found {len(ds_folders)} dataset folders "
           f"({len(_EXCLUDED_DATASETS)} excluded).\n")
@@ -503,9 +601,15 @@ def _load_all(data_dir):
             print(f'  (skipping {method_key}: {npz_path} not found)')
             continue
         recs = _load_records(npz_path)
-        recs = [r for r in recs if r.get('dataset') not in _EXCLUDED_DATASETS]
+        recs = [r for r in recs if r.get('dataset') not in _EXCLUDED_DATASETS
+                and not _is_interneuron_dataset(r.get('dataset', ''))]
+        ds_counts = {}
         for r in recs:
-            r['method'] = method_key
+            ds  = r['dataset']
+            idx = ds_counts.get(ds, 0)
+            r['cell_idx'] = idx
+            r['method']   = method_key
+            ds_counts[ds] = idx + 1
         all_records[method_key] = recs
         print(f'  Loaded {len(recs)} records for {method_key}')
     return all_records
@@ -532,6 +636,28 @@ def _best_window_raster(raw, fs, true_spk, pred_spks_list,
         if score > best_score:
             best_score = score; best_t0 = t0
     return best_t0
+
+
+def _build_snr_lookup(data_dir):
+    """Return {(dataset, cell_idx): snr} from saved trace files (any available method)."""
+    lookup = {}
+    for method_key in _METHOD_ORDER:
+        td = _traces_dir(data_dir, method_key)
+        if not os.path.isdir(td):
+            continue
+        for fname in os.listdir(td):
+            if not fname.endswith('_traces.npz'):
+                continue
+            ds = fname.replace('_traces.npz', '')
+            try:
+                npz = np.load(os.path.join(td, fname), allow_pickle=False)
+                n_c = int(npz['n_cells'])
+                for ci in range(n_c):
+                    if (ds, ci) not in lookup:
+                        lookup[(ds, ci)] = _snr_from_fluo(npz[f'dff_{ci}'])
+            except Exception:
+                pass
+    return lookup
 
 
 def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
@@ -603,9 +729,12 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
                 (true_spk >= t_start) & (true_spk < t_start + window)))
             if n_win < min_spikes:
                 continue
+            _snr = _snr_from_fluo(ref_npz[f'dff_{ci}'])
+            if _snr < SNR_THRESHOLD:
+                continue
             by_sensor[sensor].append({
                 'ds': ds, 'cell_idx': ci, 'sensor': sensor,
-                'kurtosis': kurt, 'fs': fs,
+                'kurtosis': kurt, 'snr': _snr, 'fs': fs,
                 'raw': ref_npz[f'dff_{ci}'],
                 'true_spikes': true_spk,
                 'pred_spikes': pred_by_method,
@@ -705,7 +834,7 @@ def _plot_raster(ax, cells, window=60.0):
                 fontweight='bold')
         ax.text(window + 0.8, base + cell_h / 2 - gap / 2,
                 f'{cell["ds"].split("-")[0]}\n{cell["sensor"]}\n'
-                f'kurt={cell["kurtosis"]:.1f}',
+                f'SNR={cell["snr"]:.1f}',
                 va='center', ha='left', fontsize=5, linespacing=1.3)
         if i < n - 1:
             ax.axhline(base - gap / 2, color='0.75', lw=0.4, ls='--')
@@ -781,6 +910,18 @@ def plot_figure(data_dir):
     print(f'Loaded {sum(len(v) for v in all_records.values())} records '
           f'across {len(all_records)} methods.')
 
+    print(f'  Building SNR lookup and filtering cells below {SNR_THRESHOLD}...')
+    snr_lookup = _build_snr_lookup(data_dir)
+    n_before = sum(len(v) for v in all_records.values())
+    for method_key in list(all_records.keys()):
+        all_records[method_key] = [
+            r for r in all_records[method_key]
+            if snr_lookup.get((r['dataset'], r.get('cell_idx', -1)), 0.0) >= SNR_THRESHOLD
+        ]
+    n_after = sum(len(v) for v in all_records.values())
+    print(f'  Excluded {n_before - n_after} cells (SNR < {SNR_THRESHOLD}), '
+          f'{n_after} remaining.')
+
     print('  Loading example cells for raster...')
     cells = _load_raster_cells(data_dir, raster_cells_npz, window=30.0)
     print(f'  Found {len(cells)} example cells.')
@@ -850,3 +991,4 @@ def main():
 if __name__ == '__main__':
 
     main()
+

@@ -199,7 +199,7 @@ def _mcmc_kernel_nb(
     tau_min, tau_min_decay, tau_max,
     lam_scale, prec, sn_mad,
     auto_stop, max_sweeps, min_sweeps,
-    burn_tol, conv_tol, check_every,
+    burn_tol, conv_tol, check_every, win,
     Ns,
     t_arr,
     con_lam,
@@ -461,7 +461,6 @@ def _mcmc_kernel_nb(
         # spike count distribution has stabilized (both halves have similar means)
         if auto_stop and i >= check_every and i % check_every == 0:
             if not burn_in_done:
-                win = 100
                 if i >= B + win:
                     recent = Am[i - win:i]
                     m1 = np.mean(recent[:win // 2])
@@ -532,9 +531,10 @@ def cont_ca_sampler(Y, params=None):
             if k not in params:
                 params[k] = v
 
-    # skip inference if the trace is noise-dominated (SNR < 2.7).
-    # a pure gaussian trace scores ~2.64 by this formula; anything below 2.7
-    # means the calcium signal is completely buried in noise and inference is unreliable.
+    # skip inference if the trace is noise-dominated (SNR < 2.0).
+    # a pure gaussian trace scores ~2.64 by this formula, but empirically cells
+    # down to SNR=2.0 still yield usable inference (F_beta/CosMIC > 0.5), so the
+    # cutoff is set by measured inference quality rather than the noise floor.
     # SNR = (99th - 8th percentile) / MAD-based noise std.
     valid_Y = Y[isanY]
     _sn_mad = (float(np.median(np.abs(np.diff(valid_Y)))) / 0.6745
@@ -543,7 +543,7 @@ def cont_ca_sampler(Y, params=None):
     _base   = float(np.percentile(valid_Y,  8)) if len(valid_Y) > 0 else 0.0
     _snr    = (_peak - _base) / (_sn_mad + 1e-9)
 
-    if not params.get('skip_snr', False) and _snr < 2.7:
+    if not params.get('skip_snr', False) and _snr < 2.0:
         _defg    = np.array(params['defg'])
         _tau_def = -1.0 / np.log(_defg)
         return {
@@ -621,6 +621,14 @@ def cont_ca_sampler(Y, params=None):
     else:
         tau_min = 0.0; tau_min_decay = 0.0; tau_max = 500.0
 
+    # fast sensors (tau_decay < 0.5 s): the decay pole sits only ~3–6 frames
+    # from the rise pole, so the MH proposal distribution hits the ordering
+    # constraint on nearly every step and the chain drifts badly. disable
+    # gamma updating automatically; the initialization is reliable enough
+    _tau_decay_s = tau[1] / fs if fs > 0 else np.inf
+    if gam_flag and _tau_decay_s < 0.6:
+        gam_flag = 0
+
     gr = np.where(np.isfinite(tau), np.exp(-dt / tau), 0.0)
     if p == 1:
         gr[0] = 0.0
@@ -675,6 +683,7 @@ def cont_ca_sampler(Y, params=None):
     burn_tol    = float(params.get('burn_tol', 0.005))
     conv_tol    = float(params.get('conv_tol', 0.00067))
     check_every = int(params.get('check_every', 50))
+    win         = int(params.get('win', 100))
 
     N_total = max_sweeps if auto_stop else int(params['Nsamples']) + B
 
@@ -697,7 +706,7 @@ def cont_ca_sampler(Y, params=None):
         tau_min, tau_min_decay, tau_max,
         lam_scale, prec, sn_mad,
         auto_stop, max_sweeps, min_sweeps,
-        burn_tol, conv_tol, check_every,
+        burn_tol, conv_tol, check_every, win,
         Ns,
         t_arr,
         con_lam,

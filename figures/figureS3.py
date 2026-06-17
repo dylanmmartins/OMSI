@@ -105,7 +105,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_cascade=True):
             results[f'cosmic_{suffix}'] = np.full(n_cells, np.nan)
             continue
 
-        prec, rec, _ = OMSI.compute_accuracy_window(true_spikes, cascade_spikes,
+        prec, rec, _ = OMSI.compute_accuracy_strict(true_spikes, cascade_spikes,
                                                       tolerance=0.1)
         fb     = _fbeta(prec, rec)
         cosmic = helpers.compute_cosmic(true_spikes, cascade_spikes, fs)
