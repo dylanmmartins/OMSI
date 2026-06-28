@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Exact Hamiltonian Monte Carlo for truncated Gaussians.
+OMSI/HMC.py
 
-Written Feb 2026, DMM
+Exact Hamiltonian Monte Carlo sampler for truncated multivariate Gaussians.
+
+Functions
+---------
+HMC_exact2
+    Draw L samples from a Gaussian truncated by linear inequality constraints.
+
+
+DMM, Feb 2026
 """
-
 
 import numpy as np
 import numba as nb
@@ -12,14 +19,43 @@ import numba as nb
 
 @nb.njit(cache=True, fastmath=True)
 def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
+    """ Draw L samples from a Gaussian truncated by linear inequality constraints.
+
+    Implements exact HMC for the distribution p(x) proportional to
+    N(x; mu, M) * I(F*x + g >= 0). Dynamics are exact sinusoidal arcs;
+    boundaries are constraint walls that the momentum reflects off of.
+
+    Parameters
+    ----------
+    F : np.ndarray, shape (m, d)
+        Constraint matrix. Each row is one linear constraint.
+    g : np.ndarray, shape (m, 1)
+        Constraint offsets. Constraint i is satisfied when F[i]*x + g[i] >= 0.
+    M : np.ndarray, shape (d, d)
+        Covariance matrix (if cov=True) or precision matrix (if cov=False).
+    mu_r : np.ndarray, shape (d, 1)
+        Prior mean (if cov=True) or precision-weighted mean (if cov=False).
+    cov : bool
+        True if M is the covariance; False if M is the precision.
+    L : int
+        Number of samples to draw.
+    initial_X : np.ndarray, shape (d, 1)
+        Starting point inside the feasible region.
+
+    Returns
+    -------
+    Xs : np.ndarray, shape (d, L)
+        L samples from the truncated Gaussian, or None if infeasible.
+    bounce_count : int
+        Total number of constraint-wall reflections across all trajectories.
+    """
 
     m = g.shape[0]
     if F.shape[0] != m:
         return None, None
 
-    # whiten the space by cholesky-factoring the covariance matrix M.
-    # in the whitened coordinates the covariance is identity, which means
-    # hamiltonian dynamics become simple circular motion (no coupling between dims)
+    # Whiten the space by Cholesky-factoring M so Hamiltonian dynamics become
+    # simple circular motion (no coupling between dimensions in whitened coords).
     if cov:
         mu = mu_r
         g  = g + F @ mu
@@ -36,7 +72,8 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
 
     d            = initial_X.shape[0]
     bounce_count = 0
-    # nearzero is used to avoid re-hitting the same constraint boundary on the very next step
+
+    # nearzero: avoid re-hitting the same wall immediately after a reflection.
     nearzero     = 10000 * np.finfo(np.float64).eps
 
     F = np.ascontiguousarray(F)
@@ -63,8 +100,8 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
     while i < L:
         outer_iter += 1
 
-        # if we're stuck bouncing around and never accepting new samples,
-        # just repeat the last valid sample for the remaning slots and bail out
+        # If stuck bouncing and never accepting new samples, fill remaining
+        # slots with the last valid sample and bail out.
         if outer_iter > L * 100:
             for k in range(i, L):
                 Xs[:, k] = last_X.flatten()
@@ -72,10 +109,10 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
 
         stop   = False
         j      = -1
-        
+
         for k in range(d):
             V0[k, 0] = np.random.randn()
-        
+
         X[:] = last_X[:]
         T_time = np.pi / 2
         tt     = 0.0
@@ -89,7 +126,7 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
 
             a  = V0
             b  = X
-            
+
             for r in range(m):
                 val = 0.0
                 for c in range(d):
@@ -101,19 +138,19 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
                     val += F[r, c] * b[c, 0]
                 fb[r, 0] = val
 
-            # for each constraint F[r]*x >= -g[r], the trajectory x(t) = a*sin(t) + b*cos(t)
-            # means the constraint value traces a sinusoid with amplitude U and phase phi.
-            # need to find the t values where this sinusoid crosses zero (hits the boundary)
+            # For each constraint F[r]*x >= -g[r], the trajectory
+            # x(t) = a*sin(t) + b*cos(t) traces a sinusoid. Find where
+            # each sinusoid crosses zero (hits the constraint boundary).
             U   = np.sqrt(fa ** 2 + fb ** 2)
             phi = np.arctan2(-fa, fb)
 
-            # constraints where |g/U| > 1 are never active along this arc (never hit the wall)
+            # Constraints where |g/U| > 1 are never active along this arc.
             g_over_U = g / U
             pn       = (np.abs(g_over_U) <= 1).flatten()
 
             if np.any(pn):
                 inds = np.where(pn)[0]
-                
+
                 phn  = phi.flatten()[pn]
                 gou_pn = g_over_U.flatten()[pn]
 
@@ -167,9 +204,8 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
             if stop:
                 break
 
-            # reflect the velocity off the j-th constraint wall.
-            # subtract the component of velocity
-            # normal to the wall (qj is the projection onto the normal direction)
+            # Reflect velocity off the j-th constraint wall: subtract
+            # the component normal to the wall (qj is the projection).
             dot_val = 0.0
             for k in range(d):
                 dot_val += F[j, k] * V[k, 0]
@@ -187,13 +223,13 @@ def HMC_exact2(F, g, M, mu_r, cov, L, initial_X):
             if val + g[r, 0] <= 0:
                 valid = False
                 break
-        
+
         if valid:
             Xs[:, i:i + 1] = X
             last_X = X
             i += 1
 
-    # transform samples back from whitened coordinates to the original space
+    # Transform samples back from whitened coordinates to original space.
     if cov:
         Xs = R.T @ Xs + mu
     else:

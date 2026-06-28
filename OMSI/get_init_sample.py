@@ -1,11 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Get an initial sample for the MCMC sampler. Uses block-wise unregularized
-non-negative least squares (NNLS) deconvolution instead of FOOPSI.
+OMSI/get_init_sample.py
 
-Written Feb 2026, DMM
+Compute an initial sample for the MCMC sampler via block-wise NNLS deconvolution.
+
+Functions
+---------
+_get_sn
+    Estimate noise std from high-frequency end of the power spectral density.
+_estimate_time_constants
+    Fit AR(p) time constants from autocorrelation via Yule-Walker equations.
+_ar_kernel
+    Compute the AR(p) impulse response, truncated at 1% of peak.
+_block_nnls_deconv
+    Block-wise NNLS deconvolution with cross-block spillover correction.
+_foopsi_deconv
+    AR(1) FOOPSI deconvolution via L-BFGS-B with L1 spike penalty.
+get_init_sample
+    Get initial spike times and parameters for MCMC via NNLS or FOOPSI.
+
+
+DMM, Feb 2026
 """
-
 
 import numpy as np
 from scipy.optimize import nnls as scipy_nnls, minimize as _sp_minimize
@@ -13,10 +29,25 @@ from scipy.linalg import toeplitz as sp_toeplitz
 from scipy.signal import lfilter
 
 
-# estimate noise std from the high-frequency end of the power spectral density.
-# calcium transients are slow, so high frequencies are dominated by noise rather than signal.
-# we use geometric mean of the psd (mean in log domain) which is more robust to outlier frequencies
 def _get_sn(y, range_ff):
+    """ Estimate noise std from high-frequency end of the power spectral density.
+
+    Calcium transients are slow, so high frequencies are dominated by noise
+    rather than signal. Uses geometric mean of PSD (mean in log domain) for
+    robustness to outlier frequencies.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Fluorescence trace.
+    range_ff : tuple of float
+        Normalized frequency range [low, high] in [0, 0.5] to use for estimation.
+
+    Returns
+    -------
+    float
+        Estimated noise standard deviation.
+    """
 
     L = len(y)
     xdft = np.fft.rfft(y)
@@ -29,10 +60,28 @@ def _get_sn(y, range_ff):
     return float(np.sqrt(np.exp(np.mean(np.log(psd[ind] / 2.0)))))
 
 
-# fits ar(p) time constants from the autocorrelation structure using yule-walker equations.
-# the toeplitz matrix is what the autocorrelation should look like under the ar model,
-# minus the noise contribution (sn^2 on the diagonal for lag zero)
 def _estimate_time_constants(y, p, sn, lags=20):
+    """ Fit AR(p) time constants from autocorrelation via Yule-Walker equations.
+
+    The Toeplitz matrix is what autocorrelation looks like under the AR model,
+    minus the noise contribution (sn^2 on the diagonal for lag zero).
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Fluorescence trace.
+    p : int
+        AR model order.
+    sn : float
+        Noise standard deviation.
+    lags : int
+        Number of autocorrelation lags to use.
+
+    Returns
+    -------
+    g : np.ndarray
+        AR coefficients of length p.
+    """
 
     lags = lags + p
     yn = y - np.mean(y)
@@ -50,10 +99,24 @@ def _estimate_time_constants(y, p, sn, lags=20):
     return g
 
 
-
-# compute the impulse response of the ar filter by recursively expanding h[k] = sum(g_j * h[k-j-1]).
-# cuts off the tail once it decays below 1% of the peak to keep convolution cheap
 def _ar_kernel(g, K):
+    """ Compute the AR(p) impulse response, truncated at 1% of peak.
+
+    Recursively expands h[k] = sum(g_j * h[k-j-1]). Truncates the tail
+    once it drops below 1% of the peak to keep convolution cheap.
+
+    Parameters
+    ----------
+    g : array-like
+        AR coefficients.
+    K : int
+        Maximum kernel length before truncation.
+
+    Returns
+    -------
+    h : np.ndarray
+        Impulse response, truncated at 1% of peak.
+    """
 
     g = np.atleast_1d(g).flatten()
     h = np.zeros(K)
@@ -70,15 +133,33 @@ def _ar_kernel(g, K):
     return h
 
 
-
-# runs nnls block by block to keep memory manageable on long recordings.
-# spillover tracks the tail of each block's calcium response that bleeds into the next block,
-# so subtract it before solving the next block (otherwise it would undercount spikes near boundaries)
 def _block_nnls_deconv(y_corr, h, T, block_size=400):
+    """ Block-wise NNLS deconvolution with cross-block spillover correction.
+
+    Processes the trace in chunks to keep memory manageable on long recordings.
+    Tracks the tail of each block's calcium response that bleeds into the next
+    block and subtracts it before solving -- otherwise spikes near block
+    boundaries would be undercounted.
+
+    Parameters
+    ----------
+    y_corr : np.ndarray
+        Baseline- and initial-calcium-corrected fluorescence trace.
+    h : np.ndarray
+        AR impulse response kernel.
+    T : int
+        Number of frames.
+    block_size : int
+        Frames per block.
+
+    Returns
+    -------
+    sp : np.ndarray
+        Nonnegative spike amplitude vector, shape (T,).
+    """
 
     K = len(h)
     sp = np.zeros(T)
-
     spillover = np.zeros(T + K)
 
     for start in range(0, T, block_size):
@@ -102,8 +183,24 @@ def _block_nnls_deconv(y_corr, h, T, block_size=400):
     return sp
 
 
-# AR(1) FOOPSI: L-BFGS-B with L1 spike penalty. Returns spike vector.
 def _foopsi_deconv(y, g_decay, lam):
+    """ AR(1) FOOPSI deconvolution via L-BFGS-B with L1 spike penalty.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Fluorescence trace.
+    g_decay : float
+        AR(1) decay coefficient.
+    lam : float
+        L1 penalty weight on spike amplitudes.
+
+    Returns
+    -------
+    np.ndarray
+        Nonnegative spike vector of length T.
+    """
+
     T = len(y)
     g = float(g_decay)
 
@@ -128,8 +225,28 @@ def _foopsi_deconv(y, g_decay, lam):
     return np.maximum(result.x, 0.0)
 
 
-
 def get_init_sample(Y, params):
+    """ Get initial spike times and parameters for the MCMC sampler.
+
+    Estimates noise, time constants, and baseline from the trace, then
+    runs block-wise NNLS (or FOOPSI) to get an initial spike position guess.
+    Returns a dict of initial values consumed by cont_ca_sampler.
+
+    Parameters
+    ----------
+    Y : np.ndarray
+        Fluorescence trace (dF/F or raw F).
+    params : dict
+        Sampler parameters. Relevant keys: 'p' (AR order), 'g' (AR coefficients),
+        'sn' (noise std), 'b' (baseline), 'c1' (initial calcium), 'f' (frame rate),
+        'bas_nonneg' (enforce nonnegative baseline), 'init_method' ('foopsi' or default).
+
+    Returns
+    -------
+    SAM : dict
+        Initial sample dict with keys: 'lam_', 'spiketimes_', 'A_', 'b_',
+        'C_in', 'sg', 'g'.
+    """
 
     options = {'p': params.get('p', 1)}
 
@@ -162,11 +279,11 @@ def get_init_sample(Y, params):
         if params.get('sn') is not None:
             sn = float(params['sn'])
         else:
-            # for fast sensors the calcium signal has non-negligible power in
-            # the [0.25, 0.5] PSD band used by _get_sn, inflating the noise
-            # estimate and raising A_lb above real spike amplitudes.
-            # MAD of first differences is robust to this because the difference
-            # operator attenuates the slow signal and MAD ignores spike outliers.
+            # For fast sensors, the calcium signal has non-negligible power in
+            # the [0.25, 0.5] PSD band used by _get_sn, which inflates the noise
+            # estimate and raises A_lb above real spike amplitudes. MAD of first
+            # differences is robust here -- the difference operator attenuates the
+            # slow signal and MAD ignores spike outliers.
             _roots_abs = np.abs(np.roots(np.concatenate([[1.0], -g])))
             _g_d = float(np.max(_roots_abs)) if len(_roots_abs) > 0 else float(np.max(g))
             _tau_d_s = -1.0 / (np.log(max(min(_g_d, 0.9999), 1e-6)) * float(params.get('f', 30.0)))
@@ -206,13 +323,13 @@ def get_init_sample(Y, params):
 
     dt = 1.0
     sp_max = float(np.max(sp)) if len(sp) > 0 else 0.0
-    
-    # keep frames where the nnls response is at least 15% of the peak
+
+    # Keep frames where NNLS response is at least 15% of the peak.
     s_in = (sp > 0.15 * sp_max) if sp_max > 0 else np.zeros(T, dtype=bool)
     indices = np.where(s_in)[0]
 
-    # jitter spike positions slightly within their frame to get sub-frame precision
-    # and reflect any that land just outside the recording bounds back in
+    # Jitter spike positions slightly within their frame for sub-frame precision;
+    # reflect any that land just outside recording bounds back in.
     spiketimes_ = dt * (indices.astype(float) + np.random.rand(len(indices)) - 0.5)
     oob = spiketimes_ >= T * dt
     spiketimes_[oob] = 2.0 * T * dt - spiketimes_[oob]
@@ -223,14 +340,14 @@ def get_init_sample(Y, params):
 
     sp_in = sp[s_in]
     if len(sp_in) > 0:
-        # amplitude guess is the median of detected spike amplitudes,
-        # but at least 1/4 of the max so we dont undershot on sparse data
+        # Amplitude guess: median of detected spike amplitudes, but at least
+        # 1/4 of the max so we don't undershoot on sparse data.
         SAM['A_'] = max(float(np.median(sp_in)), float(np.max(sp_in)) / 4.0)
     else:
         SAM['A_'] = sn
 
     if len(g) == 2:
-        # rescale for ar(2): the peak of the impulse response isnt 1 but depends on g values
+        # Rescale for AR(2): peak of impulse response isn't 1, it depends on g values.
         denom = g[0] ** 2 + 4 * g[1]
         if denom > 0:
             SAM['A_'] = SAM['A_'] / np.sqrt(denom)
@@ -242,4 +359,3 @@ def get_init_sample(Y, params):
     SAM['g']    = g
 
     return SAM
-

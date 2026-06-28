@@ -1,8 +1,38 @@
 # -*- coding: utf-8 -*-
 """
-Runnable modules for fast Markov chain Monte Carlo spike inference.
+OMSI/deconv.py
 
-Written Feb 2026, DMM
+Entry points and Ray-parallel dispatch for MCMC spike deconvolution.
+
+Functions
+---------
+_compute_otsu_threshold
+    Scans every split point and picks the threshold maximizing between-class variance.
+_process_cell
+    Ray remote task: runs MCMC sampler on one cell and returns results dict.
+deconv
+    Dispatches one _process_cell task per cell and assembles output arrays.
+_compute_dff
+    Computes dF/F with neuropil subtraction and near-zero baseline clamping.
+_spikes_to_train
+    Converts per-cell spike time arrays to a (n_cells, n_frames) uint8 spike train.
+_spikes_to_padded
+    Packs per-cell spike time arrays into a NaN-padded (n_cells, max_spikes) array.
+_save_results
+    Writes spike_inference{tag}.npz and optionally a .mat file.
+deconv_from_array
+    Entry point for numpy array inputs.
+deconv_from_suite2p
+    Entry point for suite2p output directories.
+deconv_from_caiman
+    Entry point for CaImAn HDF5 files.
+_build_parser
+    Builds the argparse CLI parser.
+main
+    CLI entry point, dispatches to the appropriate deconv_from_* function.
+
+
+DMM, Feb 2026
 """
 
 
@@ -26,47 +56,89 @@ from .sampler import cont_ca_sampler
 from .make_mean_sample import make_mean_sample
 
 
-# otsu thresholding: scans every possible split point and picks the one where
-# the two resulting groups have the most separated means (weighted by group size).
-# used here to separate "noise" peaks from "real" spike peaks in the prob trace
 @numba.jit(nopython=True, cache=True)
 def _compute_otsu_threshold(data):
+    """Otsu threshold via exhaustive between-class variance scan.
+
+    Sorts data, then walks every possible split point and tracks the split
+    maximizing weighted between-class variance. Used to separate noise peaks
+    from real spike peaks in the probability trace.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        1-D array of peak heights.
+
+    Returns
+    -------
+    float
+        Threshold midpoint between the best split pair.
+    """
 
     n_orig = len(data)
     sorted_data = np.zeros(n_orig + 1, dtype=data.dtype)
     sorted_data[:n_orig] = data
-    
+
     sorted_data.sort()
     n = len(sorted_data)
-    
+
     cum_sum = np.cumsum(sorted_data)
     total_sum = cum_sum[-1]
-    
+
     max_var = -1.0
     best_idx = 0
-    
+
     for i in range(n - 1):
         w0 = (i + 1) / n
         w1 = 1.0 - w0
-        
+
         mu0 = cum_sum[i] / (i + 1)
         mu1 = (total_sum - cum_sum[i]) / (n - (i + 1))
-        
+
         var_between = w0 * w1 * (mu0 - mu1)**2
-        
+
         if var_between > max_var:
             max_var = var_between
             best_idx = i
-    
+
     threshold = (sorted_data[best_idx] + sorted_data[best_idx+1]) / 2.0
-    
+
     return threshold
 
 
-# max_calls=1 tells ray to kill and restart the worker after each cell.
-# prevents memory from accumulating across cells in long sessions
+# max_calls=1 tells Ray to kill and restart the worker after each cell,
+# preventing memory from accumulating across cells in long sessions.
 @ray.remote(max_calls=1)
 def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_s=0.0):
+    """Ray remote task: run MCMC sampler on one cell and return results dict.
+
+    Runs cont_ca_sampler, builds the spike probability trace from posterior
+    samples, calls spike selection (last/MAP/prob methods), and optionally
+    computes precision/recall/F1 if ground truth is provided.
+
+    Parameters
+    ----------
+    Y_cell : np.ndarray
+        Fluorescence trace for one cell, shape (n_frames,).
+    cell_idx : int
+        Cell index, used to sort results after parallel collection.
+    params : dict
+        Sampler parameters forwarded to cont_ca_sampler.
+    true_spikes_cell : np.ndarray or None
+        Ground-truth spike times in seconds for this cell, or None.
+    fs : float
+        Frame rate in Hz.
+    n_frames : int
+        Number of frames in the recording.
+    lag_s : float
+        Indicator rise-time lag in seconds to subtract from inferred spike times.
+
+    Returns
+    -------
+    dict
+        Keys: cell_idx, calcium, prob, spikes, precision, recall, F1,
+        final_tau, sn_mad, final_sg, n_samples, time.
+    """
 
     t0 = time.time()
     SAMPLES = cont_ca_sampler(Y_cell, params)
@@ -80,12 +152,12 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
 
     ss = SAMPLES['ss']
 
-    # build the spike probability trace by counting how often each frame
-    # had a spike across all posterior samples, then normalize by sample count
+    # Count how often each frame had a spike across all posterior samples,
+    # then normalize by sample count to get per-frame spike probability.
     prob_trace  = np.zeros(n_frames, dtype=np.float32)
     for sp_times in ss:
         if len(sp_times) > 0:
-            # sp_times are in continuous frame units (dt=1).  A spike at position
+            # sp_times are in continuous frame units (dt=1). A spike at position
             # 100.7 belongs to frame 100.
             idx = np.clip(sp_times.astype(int), 0, n_frames - 1)
             np.add.at(prob_trace, idx, 1)
@@ -95,9 +167,9 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
     spike_method = params.get('spike_method', 'map') if params else 'map'
 
     if spike_method == 'last' and len(ss) > 0:
-        # Return the final posterior sample directly — mirrors CaImAn's
+        # Return the final posterior sample directly -- mirrors CaImAn's
         # cont_ca_sampler which outputs samples{end} without any post-hoc
-        # scoring.  After burn-in the chain is drawing from the posterior;
+        # scoring. After burn-in the chain draws from the posterior;
         # taking the last sample avoids MAP's double-penalisation of spike
         # density (sparse prior deflates expected_n, then MAP penalises
         # anything above that already-deflated expectation).
@@ -123,8 +195,8 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
         spikes_sec = np.clip(sp_best - lag_frames, 0, n_frames - 1) / fs
 
     else:
-        # prob spike calling: smooth the probability trace and apply Otsu
-        # thresholding to find peaks.  Kept as a fallback / alternative.
+        # Prob spike calling: smooth the probability trace and apply Otsu
+        # thresholding to find peaks. Kept as a fallback/alternative.
         prob_smooth = gaussian_filter1d(prob_trace, sigma=max(1.5, 0.020 * fs))
 
         peaks, properties = find_peaks(prob_smooth, height=0)
@@ -173,6 +245,33 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
 
 
 def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
+    """Initialize Ray, dispatch one _process_cell task per cell, collect results.
+
+    Assembles output arrays from per-cell result dicts. Returns a simple dict
+    when benchmark=False, or a full benchmark dict with per-cell accuracy
+    metrics when benchmark=True.
+
+    Parameters
+    ----------
+    Y : np.ndarray
+        Fluorescence array, shape (n_cells, n_frames).
+    params : dict, optional
+        Sampler parameters. Must include 'f' (frame rate in Hz).
+    true_spikes : list of np.ndarray, optional
+        Per-cell ground-truth spike times in seconds. Required for benchmark mode.
+    benchmark : bool
+        If True, return per-cell precision/recall/F1 alongside calcium and spikes.
+    lag_s : float, optional
+        Indicator rise-time lag in seconds. Derived from params['defg'] if omitted,
+        otherwise defaults to 45 ms.
+
+    Returns
+    -------
+    dict
+        benchmark=False: Ca_trace, prob_trace, spikes, spike_train.
+        benchmark=True: optim_F1, optim_precision, optim_recall, optim_calcium,
+        optim_prob, optim_spikes, optim_nsamples, optim_times_per_cell.
+    """
 
     if ray.is_initialized():
         ray.shutdown()
@@ -184,11 +283,10 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
                'A fast local drive (e.g. SSD scratch space) is recommended.',
     )
 
-    # runtime_env.env_vars below only reaches task/actor workers, not the
+    # runtime_env.env_vars only reaches task/actor workers, not the
     # raylet/dashboard-agent/driver core-worker processes ray.init() spawns
-    # itself — set these in the actual process env so the dashboard-less
-    # setup doesn't log "Failed to establish connection to the metrics
-    # exporter agent" on every run.
+    # itself -- set these in the actual process env so the dashboard-less
+    # setup doesn't log connection errors on every run.
     os.environ.setdefault('GLOG_minloglevel', '3')
     os.environ.setdefault('RAY_enable_metrics_collection', '0')
 
@@ -200,14 +298,15 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
         logging_level=logging.FATAL,
         runtime_env={
             "env_vars": {
-                # pin each worker to a single thread so ray processes dont fight each other
-                # for cpu cores (ray already parallelizes at the process level)
+                # Pin each worker to a single thread so Ray processes don't
+                # fight each other for CPU cores (Ray parallelizes at the
+                # process level).
                 "OMP_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
                 "OPENBLAS_NUM_THREADS": "1",
                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
                 "RAY_enable_metrics_collection": "0",
-                # suppress C++ glog messages from gcs_server, raylet, core_worker
+                # Suppress C++ glog messages from gcs_server, raylet, core_worker.
                 "GLOG_minloglevel": "3",
             }
         },
@@ -218,9 +317,9 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     n_cells, n_frames = Y.shape
 
     fs = params['f'] if params and 'f' in params else 1.0
-    
-    # derive the indicator lag from the rise time constant if we have it,
-    # otherwise fall back to 45ms which is a reasonable default for GCaMP6
+
+    # Derive indicator lag from the rise time constant if available,
+    # otherwise fall back to 45 ms -- a reasonable default for GCaMP6.
     if lag_s is None:
         defg = params.get('defg', []) if params else []
         if len(defg) > 0 and 0.0 < defg[0] < 1.0:
@@ -246,9 +345,9 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
 
     results_list = []
     pending = futures
-    
+
     del futures
-    
+
     with tqdm(total=len(pending), desc="Processing cells") as pbar:
         while pending:
             ready, pending = ray.wait(pending, num_returns=1)
@@ -302,18 +401,56 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
 
 
 def _compute_dff(f, fneu=None, f_corr=0.7, baseline_pct=8):
+    """Compute dF/F with neuropil subtraction and near-zero baseline clamping.
+
+    Subtracts f_corr * fneu from f, computes baseline as the baseline_pct
+    percentile, then clamps near-zero baselines to 1 to avoid divide-by-zero.
+    Uses abs in the denominator so dF/F stays positive when baseline goes
+    negative.
+
+    Parameters
+    ----------
+    f : np.ndarray
+        Raw fluorescence, shape (n_cells, n_frames).
+    fneu : np.ndarray, optional
+        Neuropil fluorescence, same shape as f. Skipped if None.
+    f_corr : float
+        Neuropil correction coefficient.
+    baseline_pct : float
+        Percentile of the corrected trace used as the dF/F baseline.
+
+    Returns
+    -------
+    np.ndarray
+        dF/F array, same shape as f.
+    """
 
     f_corr_traces = f - f_corr * fneu if fneu is not None else f.copy()
     baseline = np.percentile(f_corr_traces, baseline_pct, axis=1, keepdims=True)
 
-    # if baseline is near zero the division blows up, so clamp it to 1.
-    # use abs in the denominator so dff stays positive when baseline goes negative
+    # Near-zero baseline causes division to blow up -- clamp to 1.
     baseline = np.where(np.abs(baseline) < 1.0, 1.0, baseline)
 
     return (f_corr_traces - baseline) / np.abs(baseline)
 
 
 def _spikes_to_train(spike_times_list, n_frames, hz):
+    """Convert per-cell spike time arrays to a (n_cells, n_frames) uint8 spike train.
+
+    Parameters
+    ----------
+    spike_times_list : list of np.ndarray
+        Per-cell spike times in seconds.
+    n_frames : int
+        Number of frames in the recording.
+    hz : float
+        Frame rate in Hz.
+
+    Returns
+    -------
+    np.ndarray
+        Binary spike train, shape (n_cells, n_frames), dtype uint8.
+    """
 
     n_cells = len(spike_times_list)
     train = np.zeros((n_cells, n_frames), dtype=np.uint8)
@@ -330,6 +467,18 @@ def _spikes_to_train(spike_times_list, n_frames, hz):
 
 
 def _spikes_to_padded(spike_times_list):
+    """Pack per-cell spike time arrays into a NaN-padded (n_cells, max_spikes) array.
+
+    Parameters
+    ----------
+    spike_times_list : list of np.ndarray
+        Per-cell spike times in seconds.
+
+    Returns
+    -------
+    np.ndarray
+        Float64 array of shape (n_cells, max_spikes), NaN-padded.
+    """
 
     n_cells = len(spike_times_list)
     lengths = [len(np.asarray(sp)) for sp in spike_times_list]
@@ -344,19 +493,37 @@ def _spikes_to_padded(spike_times_list):
 
 
 def _save_results(results, dFF, hz, outdir, tag='', save_mat=False):
-    """ Write to npz file.
+    """Write spike_inference{tag}.npz and optionally a .mat file.
 
     Saved arrays
+    ------------
+    dFF          : (n_cells, n_frames) dF/F input used for inference.
+    Ca_trace     : (n_cells, n_frames) MCMC-reconstructed calcium signal.
+    prob_trace   : (n_cells, n_frames) per-frame spike-probability trace.
+    spike_train  : (n_cells, n_frames) uint8 binary spike train.
+    spike_times  : (n_cells, max_spikes) spike times in seconds, NaN-padded.
+    n_spikes     : (n_cells,) number of detected spikes per cell.
+    hz           : scalar frame rate used during inference.
 
-    dFF          - (n_cells, n_frames) dF/F input used for inference
-    Ca_trace     - (n_cells, n_frames) MCMC-reconstructed calcium signal
-    prob_trace   - (n_cells, n_frames) per-frame spike-probability trace
-    spike_train  - (n_cells, n_frames) uint8 binary spike train (from `spikes`,
-                   per the `spike_method` used during inference)
-    spike_times  - (n_cells, max_spikes) spike times in seconds, NaN-padded
-    n_spikes     - (n_cells,) number of detected spikes per cell
-    hz           - scalar frame rate used during inference
+    Parameters
+    ----------
+    results : dict
+        Output of deconv -- must contain Ca_trace, prob_trace, spike_train, spikes.
+    dFF : np.ndarray
+        dF/F array passed to deconv, saved alongside inference outputs.
+    hz : float
+        Frame rate in Hz.
+    outdir : str
+        Directory to write output files.
+    tag : str
+        String appended to the output filename stem.
+    save_mat : bool
+        If True, also write a MATLAB-compatible .mat file.
 
+    Returns
+    -------
+    str
+        Absolute path to the saved .npz file.
     """
 
     os.makedirs(outdir, exist_ok=True)
@@ -378,9 +545,9 @@ def _save_results(results, dFF, hz, outdir, tag='', save_mat=False):
         hz          = np.float64(hz),
     )
 
-    npz_path = os.path.join(outdir, f'spike_inference{tag}.npz')
+    npz_path = os.path.join(outdir, 'spike_inference{}.npz'.format(tag))
     np.savez_compressed(npz_path, **save_dict)
-    print(f'Results saved -> {npz_path}')
+    print('Results saved to {}.'.format(npz_path))
 
     if save_mat:
         import scipy.io
@@ -392,15 +559,47 @@ def _save_results(results, dFF, hz, outdir, tag='', save_mat=False):
                     if k != 'spike_times'}
         mat_dict['spike_times'] = spike_cell
 
-        mat_path = os.path.join(outdir, f'spike_inference{tag}.mat')
+        mat_path = os.path.join(outdir, 'spike_inference{}.mat'.format(tag))
         scipy.io.savemat(mat_path, mat_dict)
-        print(f'Results saved -> {mat_path}')
+        print('Results saved to {}.'.format(mat_path))
 
     return npz_path
 
 
 def deconv_from_array(dff=None, f=None, fneu=None, hz=0, f_corr=0.7,
                       outdir=None, tag='', save_mat=False, params=None):
+    """Entry point for numpy array inputs.
+
+    Computes dF/F if not provided, runs deconv, and optionally saves results.
+
+    Parameters
+    ----------
+    dff : np.ndarray, optional
+        Pre-computed dF/F array, shape (n_cells, n_frames). If None, computed
+        from f and fneu.
+    f : np.ndarray, optional
+        Raw fluorescence array. Used only when dff is None.
+    fneu : np.ndarray, optional
+        Neuropil fluorescence array. Used only when dff is None.
+    hz : float
+        Imaging frame rate in Hz. Must be positive.
+    f_corr : float
+        Neuropil correction coefficient passed to _compute_dff.
+    outdir : str, optional
+        Directory to write result files. If None, results are not saved.
+    tag : str
+        Tag appended to output filename stem.
+    save_mat : bool
+        If True, also save a MATLAB-compatible .mat file.
+    params : dict, optional
+        Sampler parameters forwarded to deconv.
+
+    Returns
+    -------
+    dict
+        Output of deconv -- Ca_trace, prob_trace, spikes, spike_train.
+    """
+
     if hz <= 0:
         raise ValueError('hz must be a positive frame rate in Hz.')
 
@@ -413,8 +612,8 @@ def deconv_from_array(dff=None, f=None, fneu=None, hz=0, f_corr=0.7,
     run_params = dict(params) if params else {}
     run_params['f'] = float(hz)
 
-    print(f'Running deconvolution on {dff.shape[0]} cells x {dff.shape[1]} frames '
-          f'at {hz} Hz...')
+    print('Running deconvolution on {} cells x {} frames at {} Hz...'.format(
+        dff.shape[0], dff.shape[1], hz))
     results = deconv(dff, params=run_params)
 
     if outdir is not None:
@@ -425,6 +624,36 @@ def deconv_from_array(dff=None, f=None, fneu=None, hz=0, f_corr=0.7,
 
 def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
                         cells_only=True, outdir=None, save_mat=False, params=None):
+    """Entry point for suite2p output directories.
+
+    Loads F.npy, Fneu.npy, iscell.npy, and ops.npy per plane, then calls
+    deconv_from_array for each plane.
+
+    Parameters
+    ----------
+    datadir : str
+        Path to the data directory. Searches for suite2p/plane*/ subdirectories,
+        then plane*/ directly, then F.npy in datadir itself.
+    hz : float, optional
+        Imaging frame rate in Hz. Read from ops.npy when omitted.
+    f_corr : float
+        Neuropil correction coefficient.
+    planes : list of int, optional
+        Plane indices to process. Defaults to all planes found.
+    cells_only : bool
+        If True, keep only ROIs classified as cells by suite2p (iscell[:,0]==1).
+    outdir : str, optional
+        Directory to write result files. Defaults to each plane subdirectory.
+    save_mat : bool
+        If True, also save a MATLAB-compatible .mat file per plane.
+    params : dict, optional
+        Sampler parameters forwarded to deconv_from_array.
+
+    Returns
+    -------
+    dict
+        Mapping of plane name to deconv_from_array output dict.
+    """
 
     suite2p_root = os.path.join(datadir, 'suite2p')
     search_root = suite2p_root if os.path.isdir(suite2p_root) else datadir
@@ -436,24 +665,25 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
             plane_dirs = [datadir]
         else:
             raise FileNotFoundError(
-                f'No suite2p plane directories found under {datadir}.\n'
+                '[fMCSI] No suite2p plane directories found under {}.\n'.format(datadir) +
                 'Expected: <datadir>/suite2p/plane*/ or <datadir>/plane*/ '
                 'or F.npy directly in <datadir>.'
             )
 
     if planes is not None:
         plane_dirs = [p for p in plane_dirs
-                      if any(os.path.basename(p) == f'plane{i}' for i in planes)]
+                      if any(os.path.basename(p) == 'plane{}'.format(i) for i in planes)]
         if not plane_dirs:
             raise FileNotFoundError(
-                f'No plane directories match --plane {planes} under {search_root}.'
+                '[fMCSI] No plane directories match --plane {} under {}.'.format(
+                    planes, search_root)
             )
 
     all_results = {}
 
     for plane_dir in plane_dirs:
         plane_name = os.path.basename(plane_dir)
-        print(f'\n--- {plane_name} ({plane_dir}) ---')
+        print('\n{} ({})'.format(plane_name, plane_dir))
 
         f_path      = os.path.join(plane_dir, 'F.npy')
         fneu_path   = os.path.join(plane_dir, 'Fneu.npy')
@@ -462,24 +692,24 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
 
         for req in [f_path, fneu_path]:
             if not os.path.isfile(req):
-                raise FileNotFoundError(f'Required file not found: {req}')
+                raise FileNotFoundError('[fMCSI] Required file not found: {}'.format(req))
 
         F    = np.load(f_path,    allow_pickle=True).astype(np.float32)
         Fneu = np.load(fneu_path, allow_pickle=True).astype(np.float32)
 
-        # iscell[:,0] is the binary cell/not-cell classification from suite2p.
-        # column 1 is the classifier probability... don't need this
+        # iscell[:,0]: binary cell/not-cell classification from suite2p.
+        # Column 1 is classifier probability -- not needed here.
         if cells_only and os.path.isfile(iscell_path):
-            iscell = np.load(iscell_path, allow_pickle=True)  # (n_rois, 2)
+            iscell = np.load(iscell_path, allow_pickle=True)
             cell_mask = iscell[:, 0].astype(bool)
             F    = F[cell_mask]
             Fneu = Fneu[cell_mask]
-            print(f'  Cells: {cell_mask.sum()} / {len(cell_mask)} ROIs')
+            print('  Cells: {} / {} ROIs'.format(cell_mask.sum(), len(cell_mask)))
         else:
             if cells_only and not os.path.isfile(iscell_path):
-                print(f'  iscell.npy not found - using all {F.shape[0]} ROIs')
+                print('  iscell.npy not found -- using all {} ROIs'.format(F.shape[0]))
             else:
-                print(f'  Using all {F.shape[0]} ROIs (--all-rois)')
+                print('  Using all {} ROIs (--all-rois)'.format(F.shape[0]))
 
         if hz and hz > 0:
             fs = float(hz)
@@ -488,8 +718,8 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
             fs = float(ops.get('fs', ops.get('fs2', 0)))
             if fs <= 0:
                 raise ValueError(
-                    f'Frame rate read from ops.npy is {fs}. '
-                    'Pass --hz explicitly.'
+                    'Frame rate read from ops.npy is {}. '
+                    'Pass --hz explicitly.'.format(fs)
                 )
         else:
             raise ValueError(
@@ -497,9 +727,9 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
                 'Cannot determine the frame rate.'
             )
 
-        print(f'  Frame rate: {fs} Hz  |  shape: {F.shape}')
+        print('  Frame rate: {} Hz  |  shape: {}'.format(fs, F.shape))
 
-        tag   = f'_{plane_name}' if len(plane_dirs) > 1 else ''
+        tag   = '_{}'.format(plane_name) if len(plane_dirs) > 1 else ''
         out_d = outdir if outdir else plane_dir
 
         results = deconv_from_array(
@@ -512,6 +742,29 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
 
 
 def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=None):
+    """Entry point for CaImAn HDF5 files.
+
+    Reads F_dff directly if present, otherwise computes dF/F from the raw
+    component traces C. Calls deconv_from_array with the result.
+
+    Parameters
+    ----------
+    datadir : str
+        Directory containing a CaImAn .hdf5 or .h5 result file.
+    hz : float, optional
+        Imaging frame rate in Hz. Read from HDF5 metadata when omitted.
+    outdir : str, optional
+        Directory to write result files. Defaults to datadir.
+    save_mat : bool
+        If True, also save a MATLAB-compatible .mat file.
+    params : dict, optional
+        Sampler parameters forwarded to deconv_from_array.
+
+    Returns
+    -------
+    dict
+        Output of deconv_from_array -- Ca_trace, prob_trace, spikes, spike_train.
+    """
 
     candidates = (
         glob.glob(os.path.join(datadir, '*.hdf5')) +
@@ -519,13 +772,14 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=Non
     )
     if not candidates:
         raise FileNotFoundError(
-            f'No .hdf5 or .h5 files found in {datadir}. '
+            '[fMCSI] No .hdf5 or .h5 files found in {}. '.format(datadir) +
             'CaImAn saves results via cnmf.save("path.hdf5").'
         )
     if len(candidates) > 1:
-        print(f'Multiple HDF5 files found; using {os.path.basename(candidates[0])}')
+        print('Multiple HDF5 files found -- using {}.'.format(
+            os.path.basename(candidates[0])))
     caiman_file = candidates[0]
-    print(f'Loading CaImAn file: {caiman_file}')
+    print('Loading CaImAn file: {}...'.format(caiman_file))
 
     dFF = None
     fs  = float(hz) if (hz and hz > 0) else None
@@ -546,34 +800,42 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=Non
                     'Pass --hz explicitly.'
                 )
 
-        # prefer F_dff if caiman already computed it, otherwise fall back to
-        # the raw component traces C and compute dff manually
+        # Prefer F_dff if CaImAn already computed it, otherwise fall back to
+        # raw component traces C and compute dF/F manually.
         if 'estimates/F_dff' in hf:
             raw = hf['estimates/F_dff'][()]
             if raw is not None and np.ndim(raw) == 2 and raw.shape[0] > 0:
                 dFF = raw.astype(np.float32)
-                print(f'  Source: estimates/F_dff  shape={dFF.shape}')
+                print('  Source: estimates/F_dff  shape={}'.format(dFF.shape))
 
         if dFF is None:
             if 'estimates/C' not in hf:
                 raise KeyError(
                     'Could not find estimates/F_dff or estimates/C in the '
-                    'CaImAn file.  Make sure you saved a completed CNMF object.'
+                    'CaImAn file. Make sure you saved a completed CNMF object.'
                 )
             C = hf['estimates/C'][()].astype(np.float32)
-            # 8th percentile as a rough baseline estimate (same logic as _compute_dff)
+            # 8th percentile as rough baseline estimate -- same logic as _compute_dff.
             baseline = np.percentile(C, 8, axis=1, keepdims=True)
             baseline = np.where(np.abs(baseline) < 1e-6, 1e-6, baseline)
             dFF = (C - baseline) / np.abs(baseline)
-            print(f'  Source: estimates/C -> dF/F  shape={dFF.shape}')
+            print('  Source: estimates/C, dF/F  shape={}'.format(dFF.shape))
 
-    print(f'  Frame rate: {fs} Hz')
+    print('  Frame rate: {} Hz'.format(fs))
     out_d = outdir if outdir else datadir
     results = deconv_from_array(dFF=dFF, hz=fs, outdir=out_d, save_mat=save_mat, params=params)
     return results
 
 
 def _build_parser():
+    """Build the argparse CLI parser with suite2p/caiman/array source flags and all options.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Fully configured parser for the fMCSI CLI.
+    """
+
     parser = argparse.ArgumentParser(
         prog='fMCSI',
         description=(
@@ -660,11 +922,19 @@ def _build_parser():
 
 
 def main(argv=None):
+    """CLI entry point, dispatches to the appropriate deconv_from_* function.
+
+    Parameters
+    ----------
+    argv : list of str, optional
+        Argument list. Defaults to sys.argv[1:] when None.
+    """
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.datadir):
-        parser.error(f'Data directory not found: {args.datadir}')
+        parser.error('[fMCSI] Data directory not found: {}'.format(args.datadir))
 
     hz       = args.sample_rate
     save_mat = args.mat
@@ -698,17 +968,17 @@ def main(argv=None):
             dFF  = np.load(dff_path, allow_pickle=True).astype(np.float32)
             f    = None
             fneu = None
-            print(f'Loaded dFF.npy: {dFF.shape}')
+            print('Loaded dFF.npy: {}.'.format(dFF.shape))
         elif os.path.isfile(f_path):
             dFF  = None
             f    = np.load(f_path, allow_pickle=True).astype(np.float32)
             fneu = (np.load(fneu_path, allow_pickle=True).astype(np.float32)
                     if os.path.isfile(fneu_path) else None)
-            print(f'Loaded F.npy: {f.shape}'
-                  + (f', Fneu.npy: {fneu.shape}' if fneu is not None else ''))
+            print('Loaded F.npy: {}'.format(f.shape)
+                  + (', Fneu.npy: {}.'.format(fneu.shape) if fneu is not None else '.'))
         else:
             parser.error(
-                f'--array requires F.npy or dFF.npy in {args.datadir}.'
+                '[fMCSI] --array requires F.npy or dFF.npy in {}.'.format(args.datadir)
             )
 
         if hz is None or hz <= 0:
@@ -724,5 +994,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    
+
     main()

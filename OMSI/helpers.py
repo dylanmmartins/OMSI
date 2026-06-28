@@ -1,10 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Helper functions.
+OMSI/helpers.py
 
-Written Feb 2026, DMM
+Utility functions for spike detection, calcium simulation, and accuracy scoring.
+
+Functions
+---------
+_otsu_threshold
+    Compute Otsu threshold for optimal binary split of a value array.
+detect_spikes_from_probs
+    Find spike peaks from a per-cell probability trace.
+spikes_to_calcium
+    Simulate noisy calcium traces from a binary spike train.
+compute_accuracy_strict
+    Hungarian-algorithm-based spike matching precision/recall/F1.
+compute_cosmic
+    CosMIC soft intersection-over-union score.
+make_event_ground_truth
+    Filter spike times down to clean, isolated events.
+compute_accuracy_window
+    Window-based spike matching precision/recall/F1.
+compute_kurtosis
+    Fisher excess kurtosis of one or more fluorescence traces.
+
+
+DMM, Feb 2026
 """
-
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -12,8 +33,22 @@ from scipy.signal import find_peaks
 from scipy.optimize import linear_sum_assignment
 
 
-
 def _otsu_threshold(values):
+    """ Compute Otsu threshold for optimal binary split of a value array.
+
+    Scans every possible split point and picks the one maximizing
+    weighted between-class variance.
+
+    Parameters
+    ----------
+    values : array-like
+        1-D array of values to threshold.
+
+    Returns
+    -------
+    float
+        Optimal threshold midpoint.
+    """
 
     x = np.sort(values)
     n = len(x)
@@ -33,6 +68,30 @@ def _otsu_threshold(values):
 
 
 def detect_spikes_from_probs(probs, fs, sigma=1.5, min_thresh=0.001):
+    """ Find spike peaks from a per-cell probability trace.
+
+    Optionally smooths the trace with a Gaussian, then finds peaks above
+    an Otsu-derived threshold computed from the global peak distribution
+    across all cells.
+
+    Parameters
+    ----------
+    probs : np.ndarray, shape (n_cells, n_frames) or (n_frames,)
+        Per-frame spike probability traces.
+    fs : float
+        Frame rate in Hz. Used to set minimum peak distance (100 ms).
+    sigma : float
+        Gaussian smoothing sigma in frames. Set to 0 to skip smoothing.
+    min_thresh : float
+        Minimum allowed threshold, regardless of Otsu result.
+
+    Returns
+    -------
+    spikes : list of np.ndarray
+        Per-cell spike times in seconds.
+    thresh : float
+        Threshold applied to peak heights.
+    """
 
     probs = np.atleast_2d(probs)
     n_cells, n_frames = probs.shape
@@ -42,15 +101,16 @@ def detect_spikes_from_probs(probs, fs, sigma=1.5, min_thresh=0.001):
                    else probs[i].copy()
                    for i in range(n_cells)])
 
-    # pool peaks across all cells so the threshold is based on the global peak distribution,
-    # not just whatever one cell happens to have
+    # Pool peaks across all cells so threshold is based on global peak
+    # distribution, not just whatever one cell happens to have.
     all_peaks = []
     for i in range(n_cells):
         _, props = find_peaks(sm[i], height=0)
         if 'peak_heights' in props:
             all_peaks.extend(props['peak_heights'].tolist())
 
-    # split peaks into noise and signal using otsu, then push threshold below the noise cluster
+    # Split peaks into noise and signal using Otsu, then push threshold
+    # below the noise cluster to keep sensitivity high.
     if len(all_peaks) >= 2 and max(all_peaks) > 1e-6:
         peaks_arr = np.array(all_peaks)
         otsu = _otsu_threshold(peaks_arr)
@@ -71,29 +131,55 @@ def detect_spikes_from_probs(probs, fs, sigma=1.5, min_thresh=0.001):
     return spikes, thresh
 
 
-
 def spikes_to_calcium(spikes, fs_in, fs_out, tau, snr):
+    """ Simulate noisy calcium traces from a binary spike train.
+
+    Convolves each cell's spike train with a double-exponential kernel
+    (fast rise, slow decay), resamples to fs_out, and adds Gaussian noise
+    scaled to the requested SNR.
+
+    Parameters
+    ----------
+    spikes : np.ndarray, shape (n_cells, n_frames_in)
+        Binary spike train at fs_in.
+    fs_in : float
+        Input spike train frame rate in Hz.
+    fs_out : float
+        Output calcium trace frame rate in Hz.
+    tau : float
+        Decay time constant in seconds.
+    snr : float or array-like of shape (n_cells,)
+        Signal-to-noise ratio. Noise std = 1/snr.
+
+    Returns
+    -------
+    noisy_traces : np.ndarray, shape (n_cells, n_frames_out)
+        Simulated calcium traces with noise.
+    clean_traces : np.ndarray, shape (n_cells, n_frames_out)
+        Noiseless calcium traces.
+    """
+
     n_cells, n_in = spikes.shape
 
     k_len = int(5 * tau * fs_in)
 
-    # double exponential kernel: fast rise (tau_rise) followed by slow decay (tau).
-    # this mimics the shape of a real calcium transient from a spike
+    # Double-exponential kernel: fast rise (tau_rise) then slow decay (tau).
+    # Mimics the shape of a real calcium transient from a spike.
     tau_rise = 0.05
     t_k = np.arange(k_len) / fs_in
     kernel = np.exp(-t_k / tau) - np.exp(-t_k / tau_rise)
     kernel /= np.max(kernel)
-    
+
     duration = n_in / fs_in
     n_out = int(duration * fs_out)
-    
+
     clean_traces = np.zeros((n_cells, n_out))
-    
+
     step = fs_in / fs_out
-    
+
     for i in range(n_cells):
         tr = np.convolve(spikes[i], kernel, mode='full')[:n_in]
-        
+
         if step.is_integer():
             s = int(step)
             clean_traces[i] = tr[::s][:n_out]
@@ -101,7 +187,7 @@ def spikes_to_calcium(spikes, fs_in, fs_out, tau, snr):
             in_times = np.arange(n_in) / fs_in
             out_times = np.arange(n_out) / fs_out
             clean_traces[i] = np.interp(out_times, in_times, tr)
-            
+
     noisy_traces = np.zeros_like(clean_traces)
 
     sigma = 1.0 / snr
@@ -110,21 +196,43 @@ def spikes_to_calcium(spikes, fs_in, fs_out, tau, snr):
 
     for i in range(n_cells):
         noisy_traces[i] = clean_traces[i] + np.random.normal(0, sigma[i], size=n_out)
-        
+
     return noisy_traces, clean_traces
 
 
-
 def compute_accuracy_strict(true_spikes, predicted_spikes, tolerance=0.100):
+    """ Hungarian-algorithm-based spike matching precision/recall/F1.
+
+    Finds the optimal one-to-one assignment between true and predicted spikes
+    within a tolerance window. Pairs outside tolerance are excluded.
+
+    Parameters
+    ----------
+    true_spikes : list of array-like
+        Per-cell ground-truth spike times in seconds.
+    predicted_spikes : list of array-like
+        Per-cell predicted spike times in seconds.
+    tolerance : float
+        Maximum time difference in seconds for a match.
+
+    Returns
+    -------
+    precisions : np.ndarray
+        Per-cell precision.
+    recalls : np.ndarray
+        Per-cell recall.
+    f1s : np.ndarray
+        Per-cell F1 score.
+    """
 
     precisions = []
     recalls = []
     f1s = []
-    
+
     for t_spk, p_spk in zip(true_spikes, predicted_spikes):
         t_spk = np.array(t_spk, dtype=np.float64).flatten()
         p_spk = np.array(p_spk, dtype=np.float64).flatten()
-        
+
         if len(p_spk) == 0:
             precisions.append(0.0)
             recalls.append(0.0 if len(t_spk) > 0 else 1.0)
@@ -135,43 +243,61 @@ def compute_accuracy_strict(true_spikes, predicted_spikes, tolerance=0.100):
             recalls.append(1.0)
             f1s.append(0.0)
             continue
-            
+
         diffs = np.abs(t_spk[:, None] - p_spk[None, :])
 
-        # use hungarian algorithm for optimal one-to-one matching between true and predicted spikes.
-        # pairs outside tolerance get a huge cost so they're never matched
+        # Hungarian algorithm for optimal one-to-one matching. Pairs outside
+        # tolerance get a large cost so they're never matched.
         cost_matrix = diffs.copy()
         LARGE_VAL = 1e6
         cost_matrix[cost_matrix > tolerance] = LARGE_VAL
 
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        
+
         matched_costs = cost_matrix[row_ind, col_ind]
         valid_mask = matched_costs <= tolerance
         n_tp = np.sum(valid_mask)
-        
+
         n_fp = len(p_spk) - n_tp
         n_fn = len(t_spk) - n_tp
-        
+
         prec = n_tp / (n_tp + n_fp) if (n_tp + n_fp) > 0 else 0.0
         rec = n_tp / (n_tp + n_fn) if (n_tp + n_fn) > 0 else 0.0
         f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-        
+
         precisions.append(prec)
         recalls.append(rec)
         f1s.append(f1)
-        
+
     return np.array(precisions), np.array(recalls), np.array(f1s)
 
 
-
 def compute_cosmic(true_spikes, inferred_spikes, fs, tolerance=0.100):
+    """ CosMIC soft intersection-over-union score.
+
+    Convolves both spike trains with a triangular kernel then computes soft
+    IOU. Gives partial credit for spikes that are close but not exactly
+    aligned, unlike the strict binary matching in compute_accuracy_strict.
+
+    Parameters
+    ----------
+    true_spikes : list of array-like
+        Per-cell ground-truth spike times in seconds.
+    inferred_spikes : list of array-like
+        Per-cell inferred spike times in seconds.
+    fs : float
+        Frame rate in Hz, used to convert times to bins.
+    tolerance : float
+        Half-width of the triangular kernel in seconds.
+
+    Returns
+    -------
+    np.ndarray
+        Per-cell CosMIC score in [0, 1].
+    """
 
     from scipy.signal import fftconvolve
 
-    # cosmic score... convolve both spike trains with a triangular kernel then compute
-    # a soft intersection-over-union. this gives partial credit for spikes that are close
-    # but not exactly aligned, unlike the strict binary matching in compute_accuracy_strict
     hw_frames = max(tolerance * fs, 1.0)
     r = int(np.ceil(hw_frames))
     t = np.arange(-r, r + 1, dtype=float)
@@ -205,12 +331,28 @@ def compute_cosmic(true_spikes, inferred_spikes, fs, tolerance=0.100):
     return np.array(scores)
 
 
-
 def make_event_ground_truth(spike_times_s, tau_s, event_window=0.250):
+    """ Filter spike times down to clean, isolated events.
 
-    # groups spikes into burst events and keeps only isolated ones (quiet before and after).
-    # the idea is to filter down to clean single spikes that are easy to evaluate against.
-    # quiet windows are longer for slow indicators (tau >= 0.8s) since their transients overlap more
+    Groups spikes into burst events and keeps only those with enough
+    quiet time before and after. Quiet windows are longer for slow indicators
+    (tau >= 0.8 s) since their transients overlap more.
+
+    Parameters
+    ----------
+    spike_times_s : array-like
+        Spike times in seconds.
+    tau_s : float
+        Decay time constant in seconds, used to set quiet-window lengths.
+    event_window : float
+        Maximum inter-spike interval in seconds to group into a burst.
+
+    Returns
+    -------
+    np.ndarray
+        Filtered spike times containing only isolated events.
+    """
+
     t = np.asarray(spike_times_s, dtype=np.float64)
     if len(t) == 0:
         return t.copy()
@@ -227,8 +369,31 @@ def make_event_ground_truth(spike_times_s, tau_s, event_window=0.250):
     return np.array(event_times)
 
 
-
 def compute_accuracy_window(true_spikes, predicted_spikes, tolerance=0.100):
+    """ Window-based spike matching precision/recall/F1.
+
+    For each predicted spike, checks whether any true spike falls within
+    tolerance (and vice versa). Allows many-to-one matches unlike the strict
+    Hungarian version.
+
+    Parameters
+    ----------
+    true_spikes : list of array-like
+        Per-cell ground-truth spike times in seconds.
+    predicted_spikes : list of array-like
+        Per-cell predicted spike times in seconds.
+    tolerance : float
+        Maximum time difference in seconds for a match.
+
+    Returns
+    -------
+    precisions : np.ndarray
+        Per-cell precision.
+    recalls : np.ndarray
+        Per-cell recall.
+    f1s : np.ndarray
+        Per-cell F1 score.
+    """
 
     precisions, recalls, f1s = [], [], []
     for t_spk, p_spk in zip(true_spikes, predicted_spikes):
@@ -249,18 +414,31 @@ def compute_accuracy_window(true_spikes, predicted_spikes, tolerance=0.100):
     return np.array(precisions), np.array(recalls), np.array(f1s)
 
 
-
 def compute_kurtosis(traces):
-    # Fisher/excess kurtosis, so normal == 0
+    """ Fisher excess kurtosis of one or more fluorescence traces.
+
+    Excess kurtosis is zero for a Gaussian, positive for heavy-tailed
+    distributions. Useful for checking whether a trace has spike-like events.
+
+    Parameters
+    ----------
+    traces : np.ndarray, shape (n_cells, n_frames) or (n_frames,)
+        Fluorescence traces.
+
+    Returns
+    -------
+    np.ndarray, shape (n_cells,)
+        Excess kurtosis per cell.
+    """
 
     if traces.ndim == 1:
         traces = traces[None, :]
-    
+
     mean = np.mean(traces, axis=1, keepdims=True)
     std = np.std(traces, axis=1, keepdims=True)
     std[std < 1e-9] = 1.0
-    
+
     fourth_moment = np.mean((traces - mean)**4, axis=1, keepdims=True)
     kurt = fourth_moment / (std**4)
-    
+
     return (kurt - 3.0).flatten()

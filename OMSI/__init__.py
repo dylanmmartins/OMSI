@@ -62,7 +62,7 @@ When `outdir` is provided, results are written into a numpy npz file,
 also contain n_spikes (number of spikes per cell), dFF (the input dF/F array),
 and hz (the sampling rate). Pass `save_mat=True` to also write a .mat file.
 
-Written Feb 2026, DMM
+DMM, Feb 2026
 """
 
 __version__ = '1.0.0'

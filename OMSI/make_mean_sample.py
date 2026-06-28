@@ -1,18 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-Construct the mean calcium trace from posterior samples.
+OMSI/make_mean_sample.py
 
-Written Feb 2026, DMM
+Reconstruct the mean calcium trace by averaging over posterior spike train samples.
+
+Functions
+---------
+_iir_filter
+    Simple recursive IIR filter: y[n] = x[n] + alpha*y[n-1].
+_compute_single_trace
+    Compute calcium trace for a single posterior spike train sample.
+make_mean_sample
+    Average calcium trace over all posterior samples.
+
+
+DMM, Feb 2026
 """
 
 import numpy as np
 import numba as nb
 
 
-# simple recursive filter: y[n] = x[n] + alpha*y[n-1]
-# this is equivalent to convolution with a decaying exponential, but way faster
 @nb.njit(cache=True, fastmath=True)
 def _iir_filter(x, alpha):
+    """ Simple recursive IIR: y[n] = x[n] + alpha*y[n-1].
+
+    Equivalent to convolution with a decaying exponential, but faster.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input signal.
+    alpha : float
+        Filter coefficient (AR pole).
+
+    Returns
+    -------
+    y : np.ndarray
+        Filtered output, same shape as x.
+    """
 
     y = np.empty_like(x)
     y[0] = x[0]
@@ -23,13 +49,41 @@ def _iir_filter(x, alpha):
 
 @nb.njit(cache=True, fastmath=True)
 def _compute_single_trace(ss_arr, T, tau0, tau1, am_val, cb_val, cin_val, dt):
+    """ Compute calcium trace for a single posterior spike train sample.
+
+    Uses sub-frame timing via the offset between spike time and bin edge,
+    then IIR-filters the binned amplitudes to get the double-exponential shape.
+
+    Parameters
+    ----------
+    ss_arr : np.ndarray
+        Spike times in seconds for one posterior sample.
+    T : int
+        Number of frames.
+    tau0 : float
+        Rise time constant in seconds.
+    tau1 : float
+        Decay time constant in seconds.
+    am_val : float
+        Amplitude.
+    cb_val : float
+        Baseline.
+    cin_val : float
+        Initial calcium offset.
+    dt : float
+        Frame duration in seconds (1 / frame_rate).
+
+    Returns
+    -------
+    trace : np.ndarray of float32
+        Model calcium trace of length T.
+    """
 
     gr0 = np.float32(np.exp(-dt / tau0)) if tau0 > 0.0 else np.float32(0.0)
     gr1 = np.float32(np.exp(-dt / tau1))
     diff_gr = gr1 - gr0   # float32
 
     ge = np.empty(T, dtype=np.float32)
-
     ge[0] = np.float32(1.0)
     for k in range(1, T):
         ge[k] = ge[k - 1] * gr1
@@ -48,15 +102,15 @@ def _compute_single_trace(ss_arr, T, tau0, tau1, am_val, cb_val, cin_val, dt):
         elif idx >= T:
             idx = T - 1
 
-        # offset is the sub-frame time within the bin; use it to scale the starting amplitude
-        # of each exponential component so spike timing is precise below the frame resolution
+        # Sub-frame offset scales starting amplitude so spike timing is precise
+        # below the frame resolution.
         offset = st - dt * ceil_st
         if gr0 > 0.0:
             s_1[idx] += np.float32(np.exp(offset / tau0))
         s_2[idx] += np.float32(np.exp(offset / tau1))
 
-    # apply the iir filter to get the two exponential components of the calcium transient,
-    # then combine them to get the net double-exponential shape
+    # Apply IIR filter to get the two exponential components, then combine
+    # to get the net double-exponential calcium shape.
     G1sp = _iir_filter(s_1, gr0) if gr0 > 0.0 else np.zeros(T, dtype=np.float32)
     G2sp = _iir_filter(s_2, gr1)
     Gs   = (-G1sp + G2sp) / diff_gr   # float32
@@ -72,9 +126,25 @@ def _compute_single_trace(ss_arr, T, tau0, tau1, am_val, cb_val, cin_val, dt):
     return trace
 
 
-# reconstruct the mean calcium trace by averaging over all posterior spike train samples.
-# each sample gives a slightly different calcium trace, so the mean is a smoother estimate
 def make_mean_sample(SAMPLES, Y):
+    """ Average calcium trace over all posterior spike train samples.
+
+    Each sample gives a slightly different calcium trace; averaging gives a
+    smoother estimate than any single sample.
+
+    Parameters
+    ----------
+    SAMPLES : dict
+        Output of cont_ca_sampler. Must contain 'ns', 'ss', 'params', 'g',
+        'Am', 'Cb', 'Cin'.
+    Y : np.ndarray
+        Observed fluorescence trace -- used only to get length T.
+
+    Returns
+    -------
+    np.ndarray of float32
+        Mean calcium trace, shape (T,).
+    """
 
     T = len(Y)
     N = len(SAMPLES['ns'])
@@ -87,8 +157,8 @@ def make_mean_sample(SAMPLES, Y):
     if 'g' not in SAMPLES:
         SAMPLES['g'] = np.tile(g_val, (N, 1))
 
-    # if Cb has exactly 2 elements it's stored as [mean, std] (marginalized mode),
-    # otherwise it's a full array of per-sample values
+    # If Cb has exactly 2 elements it's stored as [mean, std] (marginalized mode);
+    # otherwise it's a full array of per-sample values.
     marg = 1 if len(np.atleast_1d(SAMPLES['Cb'])) == 2 else 0
 
     C_sum    = np.zeros(T, dtype=np.float32)

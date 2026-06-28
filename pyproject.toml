@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "OMSI"
+version = "1.1.0"
+description = "Optimized MCMC spike inference."
+authors = [{ name = "Dylan Martins", email = "dmartins@ucsb.edu" }]
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.13",
+    "numba>=0.60",
+    "h5py>=3.9",
+    "ray>=2.0",
+    "tqdm>=4.0",
+    "protobuf>=6.0",
+]
+
+[project.optional-dependencies]
+figures = [
+    "matplotlib>=3.7",
+    "oasis-deconv>=0.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["OMSI*"]

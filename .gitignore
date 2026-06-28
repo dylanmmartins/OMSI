@@ -219,3 +219,5 @@ settings.json
 
 *.npz.excluded
 *.npz.bak
+
+/figure/data/*
