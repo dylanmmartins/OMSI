@@ -93,6 +93,7 @@ mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype']  = 42
+mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
 BETA               = 0.5
@@ -184,7 +185,7 @@ _SENSOR_ORDER = [
     'GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m',
     'GCaMP5k', 'OGB1', 'Cal520', 'jGECO', 'XCaMP', 'R-CaMP', 'jRCaMP', 'Other',
 ]
-_EXCLUDED_SENSORS = {'Other', 'Cal520'}
+_EXCLUDED_SENSORS = {'Other', 'Cal520', 'OGB1', 'jGECO', 'GCaMP5k'}
 
 # Datasets excluded for sensor / recording reasons unrelated to cell type.
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
@@ -223,11 +224,10 @@ _DS_EPHYS_RATE  = {'DS05': 40000, 'DS28': 20000, 'DS29': 20000,
                    'DS32': 20000, 'DS33': 20000}
 _DEFAULT_EPHYS  = 10000
 
-RASTER_SENSORS = ['GCaMP6s', 'GCaMP6f', 'jGECO', 'GCaMP8m']
+RASTER_SENSORS = ['GCaMP6s', 'GCaMP6f', 'GCaMP8m']
 RASTER_PINS    = [
     ('DS13-GCaMP6s-m-V1-neuropil-corrected', 0),
     ('DS11-GCaMP6f-m-V1-neuropil-corrected', 2),
-    ('DS21-jGECO1a-m-V1',                    2),
     ('DS31-GCaMP8m-m-V1',                    6),
 ]
 

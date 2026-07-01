@@ -52,6 +52,7 @@ mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype']  = 42
+mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
 def _dff_kurtosis(fluo):
@@ -121,7 +122,7 @@ _METHODS = {
 _METHOD_ORDER  = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
 _TRACE_METHODS = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
 
-SENSORS = ['GCaMP8m', 'GCaMP8f']
+SENSORS = ['GCaMP8m']
 
 RASTER_WINDOW   = 30.0
 ROWS_PER_SENSOR = 3
@@ -361,7 +362,7 @@ def _plot_single_raster(ax, cell, window=30.0,
 
 
     row_specs = []
-    for mk in ['oasis', 'matlab', 'cascade_loo', 'fmcsi']:
+    for mk in ['cascade_loo', 'oasis', 'matlab', 'fmcsi']:
         if mk in cell['pred_spikes']:
             row_specs.append((_METHODS[mk]['label'], mk, _METHODS[mk]['color']))
     row_specs.append(('Ground Truth', None, '#111111'))
@@ -544,7 +545,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, out_dir=_DEFAULT_OUT_DIR):
     print('Loaded {} total records across {} methods.\n'.format(
         sum(len(v) for v in all_records.values()), len(all_records)))
 
-    fig = plt.figure(figsize=(6.5, 5), dpi=200)
+    fig = plt.figure(figsize=(6.5, 2.5), dpi=200)
 
     outer_gs = gridspec.GridSpec(
         N_SENSORS, 1,

@@ -60,6 +60,7 @@ mpl.rcParams['axes.spines.top'] = False
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
+mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size'] = 7
 
 np.random.seed(3)
@@ -493,8 +494,8 @@ def _plot_raster(ax, cells, window=60.0):
     cell_h = n_rows * rr + pad + th + gap
 
     method_rows = [
-        ('OASIS',        'oasis_spikes',    COLORS['OASIS'],       0),
-        ('CASCADE',       'cascade_spikes', COLORS['CASCADE_GPU'], 1),
+        ('CASCADE',       'cascade_spikes', COLORS['CASCADE_GPU'], 0),
+        ('OASIS',        'oasis_spikes',    COLORS['OASIS'],       1),
         ('CaImAn',       'trad_spikes',     COLORS['MATLAB'],      2),
         ('OMSI',        'my_spikes',       COLORS['fMCSI'],       3),
         ('Ground Truth', 'true_spikes',     '#111111',             4),

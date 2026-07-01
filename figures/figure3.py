@@ -114,6 +114,7 @@ mpl.rcParams['axes.spines.top'] = False
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
+mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size'] = 7
 
 model_colors = {
@@ -122,7 +123,7 @@ model_colors = {
     'OASIS':     '#55A868',
     'CASCADE':   '#8172B3',
 }
-_MODEL_ORDER = ['fMCSI', 'MATLAB', 'CASCADE', 'OASIS']
+_MODEL_ORDER = ['fMCSI', 'MATLAB', 'OASIS', 'CASCADE']
 
 USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
 BETA = 0.5
@@ -1421,8 +1422,8 @@ def _plot_combined_raster_trace(ax, cells, window=60.0):
     rr = 0.9; th = 2.2; pad = 0.25; gap = 0.7
     cell_h = 5 * rr + pad + th + gap
     method_rows = [
-        ('OASIS',        'oasis_spikes', model_colors['OASIS'],     0),
-        ('CASCADE',      'cas_spikes',   model_colors['CASCADE'],   1),
+        ('CASCADE',      'cas_spikes',   model_colors['CASCADE'],   0),
+        ('OASIS',        'oasis_spikes', model_colors['OASIS'],     1),
         ('CaImAn',    'trad_spikes',  model_colors['MATLAB'], 2),
         ('OMSI',    'my_spikes',    model_colors['fMCSI'], 3),
         ('Ground Truth', 'true_spikes',  '#111111',                 4),

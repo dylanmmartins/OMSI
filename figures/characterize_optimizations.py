@@ -100,6 +100,7 @@ mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype']  = 42
+mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
 np.random.seed(7)
@@ -1987,7 +1988,7 @@ if __name__ == '__main__':
         run_fmcsi_init_comparison(args.data_dir)
     elif args.mode == 'conv-plot':
         plot_fmcsi_init_comparison(args.data_dir)
-    elif args.mode == 'combined-plot':
+    elif args.mode == 'combined-plot':  ### THIS ONE
         plot_combined_init(args.data_dir)
     elif args.mode == 'tol-conv-test':
         run_conv_tol_sweep(args.data_dir)
@@ -1997,7 +1998,7 @@ if __name__ == '__main__':
         run_burn_tol_sweep(args.data_dir)
     elif args.mode == 'tol-burn-plot':
         plot_burn_tol_sweep(args.data_dir)
-    elif args.mode == 'combined-opt-plot':
+    elif args.mode == 'combined-opt-plot': ### AND THIS ONE
         plot_combined_opt(args.data_dir)
     elif args.mode == 'snr-filter-test':
         run_snr_filter_sweep(args.data_dir)

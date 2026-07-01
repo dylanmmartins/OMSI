@@ -100,6 +100,7 @@ mpl.rcParams['axes.spines.top']  = False
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype']  = 42
+mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
 np.random.seed(3)
@@ -1761,12 +1762,12 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
     _legend_labels1 = {
         'fMCSI': 'OMSI', 'CaImAn MCMC': 'CaImAn MCMC', 'OASIS': 'OASIS',
-        'CASCADE_CPU': 'CASCADE',
+        'CASCADE_GPU': 'CASCADE',
     }
     legend_handles1 = [
         plt.Line2D([0], [0], color=COLORS[m], marker='.', linestyle='-',
                    label=_legend_labels1[m])
-        for m in ['fMCSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_CPU']
+        for m in ['fMCSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU']
     ]
 
 
