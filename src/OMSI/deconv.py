@@ -8,6 +8,10 @@ Functions
 ---------
 _compute_otsu_threshold
     Scans every split point and picks the threshold maximizing between-class variance.
+spikes_from_samples
+    Per-frame spike probability and called spike times from posterior samples.
+default_lag_s
+    Indicator lag in seconds from params['defg'] rise root, else 45 ms.
 _process_cell
     Ray remote task: runs MCMC sampler on one cell and returns results dict.
 deconv
@@ -106,51 +110,29 @@ def _compute_otsu_threshold(data):
     return threshold
 
 
-# max_calls=1 tells Ray to kill and restart the worker after each cell,
-# preventing memory from accumulating across cells in long sessions.
-@ray.remote(max_calls=1)
-def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_s=0.0):
-    """Ray remote task: run MCMC sampler on one cell and return results dict.
-
-    Runs cont_ca_sampler, builds the spike probability trace from posterior
-    samples, calls spike selection (last/MAP/prob methods), and optionally
-    computes precision/recall/F1 if ground truth is provided.
+def spikes_from_samples(ss, n_frames, fs, lag_s=0.0, spike_method='map'):
+    """Per-frame spike probability and called spike times from posterior samples.
 
     Parameters
     ----------
-    Y_cell : np.ndarray
-        Fluorescence trace for one cell, shape (n_frames,).
-    cell_idx : int
-        Cell index, used to sort results after parallel collection.
-    params : dict
-        Sampler parameters forwarded to cont_ca_sampler.
-    true_spikes_cell : np.ndarray or None
-        Ground-truth spike times in seconds for this cell, or None.
-    fs : float
-        Frame rate in Hz.
+    ss : list of np.ndarray
+        Posterior spike time samples, in frame units.
     n_frames : int
         Number of frames in the recording.
-    lag_s : float
-        Indicator rise-time lag in seconds to subtract from inferred spike times.
+    fs : float
+        Frame rate in Hz.
+    lag_s : float, optional
+        Indicator rise-time lag in seconds to subtract from called spike times.
+    spike_method : str, optional
+        'map' (default), 'last', or anything else for Otsu-thresholded peaks.
 
     Returns
     -------
-    dict
-        Keys: cell_idx, calcium, prob, spikes, precision, recall, F1,
-        final_tau, sn_mad, final_sg, n_samples, time.
+    prob_trace : np.ndarray
+        Fraction of samples with a spike in each frame, shape (n_frames,).
+    spikes_sec : np.ndarray
+        Called spike times in seconds.
     """
-
-    t0 = time.time()
-    SAMPLES = cont_ca_sampler(Y_cell, params)
-    time_taken = time.time() - t0
-
-    final_tau = SAMPLES['g'][-1]
-    sn_mad    = SAMPLES.get('sn_mad', 0.0)
-    final_sg  = float(np.mean(np.sqrt(SAMPLES['sn2']))) if 'sn2' in SAMPLES else 0.0
-
-    calcium = make_mean_sample(SAMPLES, Y_cell)
-
-    ss = SAMPLES['ss']
 
     # Count how often each frame had a spike across all posterior samples,
     # then normalize by sample count to get per-frame spike probability.
@@ -164,7 +146,6 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
     prob_trace /= max(1, len(ss))
 
     lag_frames = lag_s * fs
-    spike_method = params.get('spike_method', 'map') if params else 'map'
 
     if spike_method == 'last' and len(ss) > 0:
         # Return the final posterior sample directly -- mirrors CaImAn's
@@ -220,6 +201,82 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
             prob_smooth, height=prob_thresh, distance=min_dist_frames
         )
         spikes_sec = np.clip(spikes_frames - lag_frames, 0, n_frames - 1) / fs
+
+    return prob_trace, spikes_sec
+
+
+def default_lag_s(params, fs):
+    """Indicator lag in seconds from params['defg'] rise root, else 45 ms.
+
+    Parameters
+    ----------
+    params : dict or None
+        Sampler parameters as passed by the caller, before defaults are filled.
+    fs : float
+        Frame rate in Hz.
+
+    Returns
+    -------
+    float
+        Lag in seconds.
+    """
+
+    # Derive indicator lag from the rise time constant if available,
+    # otherwise fall back to 45 ms -- a reasonable default for GCaMP6.
+    defg = params.get('defg', []) if params else []
+    if len(defg) > 0 and 0.0 < defg[0] < 1.0:
+        return -1.0 / (fs * np.log(defg[0]))
+    return 0.045
+
+
+# max_calls=1 tells Ray to kill and restart the worker after each cell,
+# preventing memory from accumulating across cells in long sessions.
+@ray.remote(max_calls=1)
+def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_s=0.0):
+    """Ray remote task: run MCMC sampler on one cell and return results dict.
+
+    Runs cont_ca_sampler, builds the spike probability trace from posterior
+    samples, calls spike selection (last/MAP/prob methods), and optionally
+    computes precision/recall/F1 if ground truth is provided.
+
+    Parameters
+    ----------
+    Y_cell : np.ndarray
+        Fluorescence trace for one cell, shape (n_frames,).
+    cell_idx : int
+        Cell index, used to sort results after parallel collection.
+    params : dict
+        Sampler parameters forwarded to cont_ca_sampler.
+    true_spikes_cell : np.ndarray or None
+        Ground-truth spike times in seconds for this cell, or None.
+    fs : float
+        Frame rate in Hz.
+    n_frames : int
+        Number of frames in the recording.
+    lag_s : float
+        Indicator rise-time lag in seconds to subtract from inferred spike times.
+
+    Returns
+    -------
+    dict
+        Keys: cell_idx, calcium, prob, spikes, precision, recall, F1,
+        final_tau, sn_mad, final_sg, n_samples, time.
+    """
+
+    t0 = time.time()
+    SAMPLES = cont_ca_sampler(Y_cell, params)
+    time_taken = time.time() - t0
+
+    final_tau = SAMPLES['g'][-1]
+    sn_mad    = SAMPLES.get('sn_mad', 0.0)
+    final_sg  = float(np.mean(np.sqrt(SAMPLES['sn2']))) if 'sn2' in SAMPLES else 0.0
+
+    calcium = make_mean_sample(SAMPLES, Y_cell)
+
+    ss = SAMPLES['ss']
+    spike_method = params.get('spike_method', 'map') if params else 'map'
+    prob_trace, spikes_sec = spikes_from_samples(
+        ss, n_frames, fs, lag_s=lag_s, spike_method=spike_method)
 
     prec = rec = f1 = 0.0
     if true_spikes_cell is not None:
@@ -318,15 +375,8 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
 
     fs = params['f'] if params and 'f' in params else 1.0
 
-    # Derive indicator lag from the rise time constant if available,
-    # otherwise fall back to 45 ms -- a reasonable default for GCaMP6.
     if lag_s is None:
-        defg = params.get('defg', []) if params else []
-        if len(defg) > 0 and 0.0 < defg[0] < 1.0:
-            import math
-            lag_s = -1.0 / (fs * math.log(defg[0]))
-        else:
-            lag_s = 0.045
+        lag_s = default_lag_s(params, fs)
 
     futures = []
     for i in range(n_cells):

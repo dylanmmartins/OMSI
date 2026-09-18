@@ -16,10 +16,12 @@ _load_records
     Load scalar records from an NPZ file into a list of dicts.
 _fbeta
     Compute vectorised F-beta score from arrays of precision and recall.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _load_all_records
     Load and annotate benchmark records for all methods.
 _plot_method_panel
-    Plot mean +/- std of kurtosis vs F-beta for each target sensor.
+    Plot median +/- MAD of kurtosis vs F-beta for each target sensor.
 plot_figure
     Assemble and save figure S4.
 main
@@ -149,6 +151,25 @@ def _fbeta(precision, recall):
         return np.where(denom > 0, (1 + b2) * p * r / denom, 0.0)
 
 
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
 def _load_all_records(data_dir):
     """Load and annotate benchmark records for all methods.
 
@@ -201,7 +222,7 @@ def _load_all_records(data_dir):
 
 
 def _plot_method_panel(ax, records, method_key, sensor_colors):
-    """Plot mean +/- std of kurtosis vs F-beta for each target sensor.
+    """Plot median +/- MAD of kurtosis vs F-beta for each target sensor.
 
     Parameters
     ----------
@@ -227,8 +248,8 @@ def _plot_method_panel(ax, records, method_key, sensor_colors):
         if len(kurts) < 2:
             continue
 
-        mk  = np.mean(kurts);  sk = np.std(kurts)
-        mf  = np.mean(fbs);    sf = np.std(fbs)
+        mk  = np.median(kurts);  sk = _mad(kurts)
+        mf  = np.median(fbs);    sf = _mad(fbs)
         col = sensor_colors[sensor]
 
         ax.plot([mk - sk, mk + sk], [mf, mf], '-', color=col, lw=1.4)

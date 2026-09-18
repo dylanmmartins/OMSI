@@ -8,6 +8,8 @@ Functions
 ---------
 _patched_il_init
     Keras InputLayer patch for batch_shape compatibility.
+_check_ruamel
+    Fail with an actionable message when ruamel.yaml is missing.
 _probs_to_spikes
     Convert CASCADE probability trace to spike times.
 mode_inference
@@ -108,6 +110,30 @@ def _probs_to_spikes(probs, fs, height=0.5):
     return peaks / fs
 
 
+def _check_ruamel():
+    """ Fail with an actionable message when ruamel.yaml is missing.
+
+    cascade2p/config.py does 'from pip._internal import main as pip' at module
+    level, then calls pip.main(...) in its ImportError handler for ruamel.
+    pip is bound to a function there, not the module, so the handler raises
+    AttributeError and buries the real cause: ruamel.yaml is not installed.
+    """
+
+    try:
+        import ruamel.yaml  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    print('[cascade-subprocess] ruamel.yaml is missing from this environment.\n'
+          '  CASCADE needs it, and its own auto-install is broken on pip 10+,\n'
+          '  so the traceback you would otherwise see points at pip, not here.\n'
+          '  Fix with:  conda run -n {} pip install "ruamel.yaml<0.18"'.format(
+              os.environ.get('CONDA_DEFAULT_ENV', 'cascade')),
+          file=sys.stderr)
+    sys.exit(2)
+
+
 def mode_inference(args):
     """ Run CASCADE forward inference on dF/F traces and save results.
 
@@ -116,6 +142,7 @@ def mode_inference(args):
     args : argparse.Namespace
         Parsed CLI arguments with fields: input, output, model.
     """
+    _check_ruamel()
     import cascade2p.cascade as cascade
 
     data = np.load(args.input, allow_pickle=True)
@@ -156,6 +183,7 @@ def mode_loo_predict(args):
     args : argparse.Namespace
         Parsed CLI arguments with fields: raster_cells, loo_models_dir, output.
     """
+    _check_ruamel()
     import cascade2p.cascade as cascade
 
     if not os.path.exists(args.raster_cells):

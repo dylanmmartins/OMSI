@@ -22,6 +22,8 @@ _load_records
     Load scalar records from an NPZ file into a list of dicts.
 _fbeta
     Compute F-beta score from scalar precision and recall values.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _get_fbeta
     Extract F-beta score from a benchmark record dict.
 get_tau
@@ -289,6 +291,25 @@ def _fbeta(precision, recall):
     b2 = BETA ** 2
     denom = b2 * p + r
     return (1 + b2) * p * r / denom if denom > 0 else 0.0
+
+
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _get_fbeta(record):
@@ -679,13 +700,13 @@ def process_dataset(ds_folder, ground_truth_dir, model):
         true_events, spikes_list, tolerance=0.1)
     cosmic = helpers.compute_cosmic(true_spikes, spikes_list, fs)
 
-    print('  Strict   P={:.3f}  R={:.3f}  F1={:.3f}'.format(
-        np.mean(prec_s), np.mean(rec_s), np.mean(f1_s)))
-    print('  Window   P={:.3f}  R={:.3f}  F1={:.3f}'.format(
-        np.mean(prec_w), np.mean(rec_w), np.mean(f1_w)))
-    print('  Win-OTO  P={:.3f}  R={:.3f}  F1={:.3f}'.format(
-        np.mean(prec_w1), np.mean(rec_w1), np.mean(f1_w1)))
-    print('  CosMIC   mean={:.3f}'.format(np.mean(cosmic)))
+    for tag, (p_, r_, f_) in [('Strict ', (prec_s,  rec_s,  f1_s)),
+                              ('Window ', (prec_w,  rec_w,  f1_w)),
+                              ('Win-OTO', (prec_w1, rec_w1, f1_w1))]:
+        print('  {}  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}  F1={:.3f} ± {:.3f}'.format(
+            tag, np.nanmedian(p_), _mad(p_), np.nanmedian(r_), _mad(r_),
+            np.nanmedian(f_), _mad(f_)))
+    print('  CosMIC   {:.3f} ± {:.3f}'.format(np.nanmedian(cosmic), _mad(cosmic)))
 
     records = []
     for i, cell in enumerate(cells):

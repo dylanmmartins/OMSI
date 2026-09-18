@@ -216,6 +216,7 @@ settings.json
 *.npz
 *.mat
 *.h5
+*.npy
 
 *.npz.excluded
 *.npz.bak

@@ -18,6 +18,8 @@ plot_T_supp_sweep
     Plot saved T_supp sweep results.
 _fbeta
     Compute F-beta score from precision and recall.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _sp_peaks
     Detect spike peaks from a continuous spike signal.
 _nnls_init
@@ -267,23 +269,26 @@ def run_T_supp_sweep(data_dir):
                 'is_default':      ts == default_supp,
                 'is_full':         ts == n_frames,
                 'total_time':      elapsed,
-                'mean_time':       float(np.mean(per_cell_t)),
-                'std_time':        float(np.std(per_cell_t, ddof=1)),
-                'mean_nsweeps':    float(np.mean(nsweeps)),
-                'std_nsweeps':     float(np.std(nsweeps, ddof=1)),
-                'mean_f1_window':  float(np.mean(fb)),
-                'std_f1_window':   float(np.std(fb, ddof=1)),
-                'mean_f1_event':   float(np.mean(f1_e)),
-                'mean_cosmic':     float(np.mean(cosmic)),
-                'std_cosmic':      float(np.std(cosmic, ddof=1)),
+                'med_time':        float(np.median(per_cell_t)),
+                'mad_time':        float(_mad(per_cell_t)),
+                'med_nsweeps':     float(np.median(nsweeps)),
+                'mad_nsweeps':     float(_mad(nsweeps)),
+                'med_f1_window':   float(np.nanmedian(fb)),
+                'mad_f1_window':   float(_mad(fb)),
+                'med_f1_event':    float(np.nanmedian(f1_e)),
+                'med_cosmic':      float(np.nanmedian(cosmic)),
+                'mad_cosmic':      float(_mad(cosmic)),
             })
+            r = rows[-1]
             print('    Total={:.1f}s  '
-                  'mean_cell={:.3f}s  '
-                  'mean_sweeps={:.1f}  '
-                  'F_beta={:.3f}  '
-                  'CosMIC={:.3f}'.format(
-                      elapsed, np.mean(per_cell_t), np.mean(nsweeps),
-                      np.mean(fb), np.mean(cosmic)))
+                  'cell={:.3f} ± {:.3f}s  '
+                  'sweeps={:.1f} ± {:.1f}  '
+                  'F_beta={:.3f} ± {:.3f}  '
+                  'CosMIC={:.3f} ± {:.3f}'.format(
+                      elapsed, r['med_time'], r['mad_time'],
+                      r['med_nsweeps'], r['mad_nsweeps'],
+                      r['med_f1_window'], r['mad_f1_window'],
+                      r['med_cosmic'], r['mad_cosmic']))
         except Exception as exc:
             print('    FAILED: {}'.format(exc))
 
@@ -294,14 +299,14 @@ def run_T_supp_sweep(data_dir):
     np.savez(
         out_path,
         T_supp       = np.array([r['T_supp']          for r in rows]),
-        mean_time    = np.array([r['mean_time']        for r in rows]),
-        std_time     = np.array([r['std_time']         for r in rows]),
-        mean_nsweeps = np.array([r['mean_nsweeps']     for r in rows]),
-        std_nsweeps  = np.array([r['std_nsweeps']      for r in rows]),
-        mean_f1      = np.array([r['mean_f1_window']   for r in rows]),
-        std_f1       = np.array([r['std_f1_window']    for r in rows]),
-        mean_cosmic  = np.array([r['mean_cosmic']      for r in rows]),
-        std_cosmic   = np.array([r['std_cosmic']       for r in rows]),
+        med_time    = np.array([r['med_time']        for r in rows]),
+        mad_time     = np.array([r['mad_time']         for r in rows]),
+        med_nsweeps = np.array([r['med_nsweeps']     for r in rows]),
+        mad_nsweeps  = np.array([r['mad_nsweeps']      for r in rows]),
+        med_f1      = np.array([r['med_f1_window']   for r in rows]),
+        mad_f1       = np.array([r['mad_f1_window']    for r in rows]),
+        med_cosmic  = np.array([r['med_cosmic']      for r in rows]),
+        mad_cosmic   = np.array([r['mad_cosmic']       for r in rows]),
         default_supp = np.array([default_supp]),
         n_frames     = np.array([n_frames]),
     )
@@ -322,12 +327,12 @@ def plot_T_supp_sweep(data_dir):
 
     d            = np.load(out_path)
     T_supp       = d['T_supp'].astype(float)
-    mt           = d['mean_time']
-    st           = d['std_time']
-    mf1          = d['mean_f1']
-    sf1          = d['std_f1']
-    mcos         = d['mean_cosmic']
-    scos         = d['std_cosmic']
+    mt           = d['med_time']
+    st           = d['mad_time']
+    mf1          = d['med_f1']
+    sf1          = d['mad_f1']
+    mcos         = d['med_cosmic']
+    scos         = d['mad_cosmic']
     default_supp = int(d['default_supp'][0])
     n_frames     = int(d['n_frames'][0])
 
@@ -383,6 +388,25 @@ def _fbeta(precision, recall, beta=_BETA):
     b2 = beta ** 2
     denom = b2 * precision + recall
     return (1 + b2) * precision * recall / denom if denom > 0 else 0.0
+
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
 
 _NNLS_COLOR   = '#4C72B0'
 _FOOPSI_COLOR = 'tab:red'
@@ -541,13 +565,13 @@ def run_init_comparison(data_dir):
 
         if (i + 1) % 10 == 0:
             print('  {}/{}  '
-                  'nnls={:.1f}ms  '
-                  'foopsi={:.1f}ms  '
-                  'r_cross={:.3f}'.format(
+                  'nnls={:.1f} ± {:.1f}ms  '
+                  'foopsi={:.1f} ± {:.1f}ms  '
+                  'r_cross={:.3f} ± {:.3f}'.format(
                       i + 1, _N_CELLS,
-                      np.mean(nnls_times[:i + 1]) * 1e3,
-                      np.mean(foopsi_times[:i + 1]) * 1e3,
-                      np.mean(r_cross[:i + 1])))
+                      np.median(nnls_times[:i + 1]) * 1e3,   _mad(nnls_times[:i + 1]) * 1e3,
+                      np.median(foopsi_times[:i + 1]) * 1e3, _mad(foopsi_times[:i + 1]) * 1e3,
+                      np.nanmedian(r_cross[:i + 1]),         _mad(r_cross[:i + 1])))
 
     np.savez(
         out_path,
@@ -788,14 +812,13 @@ def run_fmcsi_init_comparison(data_dir):
     else:
         foopsi_fb = np.full(_N_CELLS, np.nan)
 
-    print('NNLS   -- mean/cell: {:.2f}s  '
-          'mean samples: {}  '
-          'mean Fb: {:.3f}'.format(
-              np.mean(nnls_times), int(np.mean(nnls_nsamples)), np.nanmean(nnls_fb)))
-    print('FOOPSI -- mean/cell: {:.2f}s  '
-          'mean samples: {}  '
-          'mean Fb: {:.3f}'.format(
-              np.mean(foopsi_times), int(np.mean(foopsi_nsamples)), np.nanmean(foopsi_fb)))
+    for tag, t_, ns_, fb_ in [('NNLS  ', nnls_times,   nnls_nsamples,   nnls_fb),
+                              ('FOOPSI', foopsi_times, foopsi_nsamples, foopsi_fb)]:
+        print('{} -- time/cell: {:.2f} ± {:.2f}s  '
+              'samples: {:.0f} ± {:.0f}  '
+              'Fb: {:.3f} ± {:.3f}'.format(
+                  tag, np.median(t_), _mad(t_), np.median(ns_), _mad(ns_),
+                  np.nanmedian(fb_), _mad(fb_)))
 
     np.savez(
         out_path,
@@ -926,10 +949,10 @@ def plot_fmcsi_init_comparison(data_dir):
     ax_f.hist(valid_n, bins=rbins, color=_NNLS_COLOR,   alpha=0.6,
               label='NNLS-initialized',   edgecolor='none')
 
-    print('Average $F_\\beta$ (β=0.5) -- NNLS init: {:.3f}  FOOPSI init: {:.3f}'.format(
-        np.nanmean(valid_n), np.nanmean(valid_f)))
-    print('Average time per cell (sec) -- NNLS init: {:.3f}  FOOPSI init: {:.3f}'.format(
-        np.mean(nnls_times), np.mean(foopsi_times)))
+    print('Median $F_\\beta$ (β=0.5) -- NNLS init: {:.3f} ± {:.3f}  FOOPSI init: {:.3f} ± {:.3f}'.format(
+        np.nanmedian(valid_n), _mad(valid_n), np.nanmedian(valid_f), _mad(valid_f)))
+    print('Median time per cell (sec) -- NNLS init: {:.3f} ± {:.3f}  FOOPSI init: {:.3f} ± {:.3f}'.format(
+        np.median(nnls_times), _mad(nnls_times), np.median(foopsi_times), _mad(foopsi_times)))
     ax_f.set_xlabel('$F_\\beta$')
     ax_f.set_ylabel('cells')
 
@@ -1187,8 +1210,9 @@ def _run_tol_sweep(dff, true_spikes, param_name, grid, fs, min_sweeps):
     Returns
     -------
     list of dict
-        One dict per grid point with val, mean_time, std_time, mean_nsweeps,
-        std_nsweeps, mean_f1, and std_f1 fields.
+        One dict per grid point with val, med_time, mad_time, med_nsweeps,
+        mad_nsweeps, med_f1, and mad_f1 fields (medians and median absolute
+        deviations across cells).
     """
     rows = []
     for val in grid:
@@ -1212,18 +1236,21 @@ def _run_tol_sweep(dff, true_spikes, param_name, grid, fs, min_sweeps):
                             for i in range(len(prec_s))])
             rows.append({
                 'val':          val,
-                'mean_time':    float(np.mean(per_cell_t)),
-                'std_time':     float(np.std(per_cell_t, ddof=1)),
-                'mean_nsweeps': float(np.mean(nsweeps)),
-                'std_nsweeps':  float(np.std(nsweeps, ddof=1)),
-                'mean_f1':      float(np.mean(fb)),
-                'std_f1':       float(np.std(fb, ddof=1)),
+                'med_time':     float(np.median(per_cell_t)),
+                'mad_time':     float(_mad(per_cell_t)),
+                'med_nsweeps':  float(np.median(nsweeps)),
+                'mad_nsweeps':  float(_mad(nsweeps)),
+                'med_f1':       float(np.nanmedian(fb)),
+                'mad_f1':       float(_mad(fb)),
             })
-            print('    Mean_cell={:.3f}s  '
-                  'mean_sweeps={:.1f}  '
-                  'F_beta={:.3f}  CosMIC={:.3f}'.format(
-                      np.mean(per_cell_t), np.mean(nsweeps),
-                      np.mean(fb), np.mean(cosmic)))
+            r = rows[-1]
+            print('    cell={:.3f} ± {:.3f}s  '
+                  'sweeps={:.1f} ± {:.1f}  '
+                  'F_beta={:.3f} ± {:.3f}  CosMIC={:.3f} ± {:.3f}'.format(
+                      r['med_time'], r['mad_time'],
+                      r['med_nsweeps'], r['mad_nsweeps'],
+                      r['med_f1'], r['mad_f1'],
+                      np.nanmedian(cosmic), _mad(cosmic)))
         except Exception as exc:
             print('    FAILED: {}'.format(exc))
     return rows
@@ -1244,12 +1271,12 @@ def _save_tol_sweep(out_path, rows, default_val):
     np.savez(
         out_path,
         tol          = np.array([r['val']          for r in rows]),
-        mean_time    = np.array([r['mean_time']     for r in rows]),
-        std_time     = np.array([r['std_time']      for r in rows]),
-        mean_nsweeps = np.array([r['mean_nsweeps']  for r in rows]),
-        std_nsweeps  = np.array([r['std_nsweeps']   for r in rows]),
-        mean_f1      = np.array([r['mean_f1']       for r in rows]),
-        std_f1       = np.array([r['std_f1']        for r in rows]),
+        med_time    = np.array([r['med_time']     for r in rows]),
+        mad_time     = np.array([r['mad_time']      for r in rows]),
+        med_nsweeps = np.array([r['med_nsweeps']  for r in rows]),
+        mad_nsweeps  = np.array([r['mad_nsweeps']   for r in rows]),
+        med_f1      = np.array([r['med_f1']       for r in rows]),
+        mad_f1       = np.array([r['mad_f1']        for r in rows]),
         default_val  = np.array([default_val]),
     )
     print('\nSaved to {}.'.format(out_path))
@@ -1348,10 +1375,10 @@ def _plot_tol_sweep(data_dir, npz_name, xlabel, fig_stem):
 
     d           = np.load(out_path)
     tols        = d['tol'].astype(float)
-    mt          = d['mean_time']
-    st          = d['std_time']
-    mf1         = d['mean_f1']
-    sf1         = d['std_f1']
+    mt          = d['med_time']
+    st          = d['mad_time']
+    mf1         = d['med_f1']
+    sf1         = d['mad_f1']
     default_val = float(d['default_val'][0])
 
     fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
@@ -1423,7 +1450,7 @@ def plot_combined_opt(data_dir):
     fig, axes = plt.subplots(4, 3, figsize=(7.2, 9.0), dpi=300)
 
     def _sweeps_panel(ax, x, mns, sns, xlabel):
-        """Plot mean sweep count with std shading on ax."""
+        """Plot median sweep count with MAD shading on ax."""
         ax.fill_between(x, mns - sns, mns + sns,
                         color=_COLOR, alpha=0.25, linewidth=0)
         ax.plot(x, mns, '.-', color=_COLOR, zorder=3)
@@ -1435,12 +1462,12 @@ def plot_combined_opt(data_dir):
 
     d            = np.load(t_supp_path)
     T_supp       = d['T_supp'].astype(float)
-    mt           = d['mean_time']
-    st           = d['std_time']
-    mf1          = d['mean_f1']
-    sf1          = d['std_f1']
-    mns          = d['mean_nsweeps']
-    sns          = d['std_nsweeps']
+    mt           = d['med_time']
+    st           = d['mad_time']
+    mf1          = d['med_f1']
+    sf1          = d['mad_f1']
+    mns          = d['med_nsweeps']
+    sns          = d['mad_nsweeps']
     default_supp = int(d['default_supp'][0])
 
     mask = np.arange(len(T_supp))[1:-1]
@@ -1472,12 +1499,12 @@ def plot_combined_opt(data_dir):
 
     d           = np.load(conv_tol_path)
     tols        = d['tol'].astype(float)
-    mt          = d['mean_time']
-    st          = d['std_time']
-    mf1         = d['mean_f1']
-    sf1         = d['std_f1']
-    mns         = d['mean_nsweeps']
-    sns         = d['std_nsweeps']
+    mt          = d['med_time']
+    st          = d['mad_time']
+    mf1         = d['med_f1']
+    sf1         = d['mad_f1']
+    mns         = d['med_nsweeps']
+    sns         = d['mad_nsweeps']
     default_val = _DEFAULT_CONV_TOL  # Updated default; npz still reflects old value.
 
     for ax, y, yerr, ylabel in [
@@ -1503,12 +1530,12 @@ def plot_combined_opt(data_dir):
 
     d           = np.load(burn_tol_path)
     tols        = d['tol'].astype(float)
-    mt          = d['mean_time']
-    st          = d['std_time']
-    mf1         = d['mean_f1']
-    sf1         = d['std_f1']
-    mns         = d['mean_nsweeps']
-    sns         = d['std_nsweeps']
+    mt          = d['med_time']
+    st          = d['mad_time']
+    mf1         = d['med_f1']
+    sf1         = d['mad_f1']
+    mns         = d['med_nsweeps']
+    sns         = d['mad_nsweeps']
     default_val = _DEFAULT_BURN_TOL  # Updated default; npz still reflects old value.
 
     for ax, y, yerr, ylabel in [
@@ -1534,20 +1561,20 @@ def plot_combined_opt(data_dir):
 
     d           = np.load(snr_path)
     snr_levels  = d['snr_levels'].astype(float)
-    mean_fb     = d['mean_fb'].astype(float)
-    std_fb      = d['std_fb'].astype(float)
-    mean_cosmic = d['mean_cosmic'].astype(float)
-    std_cosmic  = d['std_cosmic'].astype(float)
-    mean_ns     = d['mean_nsweeps'].astype(float)
-    std_ns      = d['std_nsweeps'].astype(float)
+    med_fb     = d['med_fb'].astype(float)
+    mad_fb      = d['mad_fb'].astype(float)
+    med_cosmic = d['med_cosmic'].astype(float)
+    mad_cosmic  = d['mad_cosmic'].astype(float)
+    med_ns     = d['med_nsweeps'].astype(float)
+    mad_ns      = d['mad_nsweeps'].astype(float)
     threshold   = float(d['threshold'][0])
 
-    for ax, mean, std, ylabel in [
-        (axes[3, 0], mean_fb,     std_fb,     '$F_\\beta$'),
-        (axes[3, 1], mean_cosmic, std_cosmic, 'CosMIC'),
+    for ax, med, mad, ylabel in [
+        (axes[3, 0], med_fb,     mad_fb,     '$F_\\beta$'),
+        (axes[3, 1], med_cosmic, mad_cosmic, 'CosMIC'),
     ]:
-        valid = np.isfinite(mean) & np.isfinite(std)
-        x, y, ye = snr_levels[valid], mean[valid], std[valid]
+        valid = np.isfinite(med) & np.isfinite(mad)
+        x, y, ye = snr_levels[valid], med[valid], mad[valid]
         ax.fill_between(x, np.clip(y - ye, 0, 1), np.clip(y + ye, 0, 1),
                         color=_COLOR, alpha=0.25, linewidth=0)
         ax.plot(x, y, '.-', color=_COLOR, zorder=3)
@@ -1558,13 +1585,13 @@ def plot_combined_opt(data_dir):
         ax.set_xlim(x.min(), x.max())
         ax.set_ylim(0, 1.)
 
-    valid_ns = np.isfinite(mean_ns) & np.isfinite(std_ns)
+    valid_ns = np.isfinite(med_ns) & np.isfinite(mad_ns)
     ax = axes[3, 2]
     ax.fill_between(snr_levels[valid_ns],
-                    mean_ns[valid_ns] - std_ns[valid_ns],
-                    mean_ns[valid_ns] + std_ns[valid_ns],
+                    med_ns[valid_ns] - mad_ns[valid_ns],
+                    med_ns[valid_ns] + mad_ns[valid_ns],
                     color=_COLOR, alpha=0.25, linewidth=0)
-    ax.plot(snr_levels[valid_ns], mean_ns[valid_ns], '.-', color=_COLOR, zorder=3)
+    ax.plot(snr_levels[valid_ns], med_ns[valid_ns], '.-', color=_COLOR, zorder=3)
     ax.axvline(threshold, color='k', linestyle='--',
                linewidth=0.8, alpha=0.6)
     ax.set_xlabel('SNR')
@@ -1682,10 +1709,10 @@ def plot_snr_filter_sweep(data_dir):
 
     n_bins      = len(bins) - 1
     bin_centers = 0.5 * (bins[:-1] + bins[1:])
-    f1_mean  = np.full(n_bins, np.nan)
-    f1_std   = np.full(n_bins, np.nan)
-    cos_mean = np.full(n_bins, np.nan)
-    cos_std  = np.full(n_bins, np.nan)
+    f1_med   = np.full(n_bins, np.nan)
+    f1_mad   = np.full(n_bins, np.nan)
+    cos_med  = np.full(n_bins, np.nan)
+    cos_mad  = np.full(n_bins, np.nan)
     n_bin    = np.zeros(n_bins, dtype=int)
 
     for b in range(n_bins):
@@ -1693,10 +1720,10 @@ def plot_snr_filter_sweep(data_dir):
         if mask.sum() < 2:
             continue
         n_bin[b]    = mask.sum()
-        f1_mean[b]  = np.nanmean(fbeta[mask])
-        f1_std[b]   = np.nanstd(fbeta[mask])
-        cos_mean[b] = np.nanmean(cosmic[mask])
-        cos_std[b]  = np.nanstd(cosmic[mask])
+        f1_med[b]   = np.nanmedian(fbeta[mask])
+        f1_mad[b]   = _mad(fbeta[mask])
+        cos_med[b]  = np.nanmedian(cosmic[mask])
+        cos_mad[b]  = _mad(cosmic[mask])
 
     valid = n_bin >= 2
     x = bin_centers[valid]
@@ -1704,15 +1731,15 @@ def plot_snr_filter_sweep(data_dir):
     fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
     fig.suptitle('{} cells below SNR threshold (with spikes)'.format(n_below_thresh),
                  fontsize=6, y=1.02)
-    for ax, mean, std, ylabel in [
-        (axes[0], f1_mean[valid],  f1_std[valid],  '$F_\\beta$'),
-        (axes[1], cos_mean[valid], cos_std[valid], 'CosMIC'),
+    for ax, med, mad, ylabel in [
+        (axes[0], f1_med[valid],  f1_mad[valid],  '$F_\\beta$'),
+        (axes[1], cos_med[valid], cos_mad[valid], 'CosMIC'),
     ]:
         ax.fill_between(x,
-                        np.clip(mean - std, 0, 1),
-                        np.clip(mean + std, 0, 1),
+                        np.clip(med - mad, 0, 1),
+                        np.clip(med + mad, 0, 1),
                         color=_COLOR, alpha=0.25, linewidth=0)
-        ax.plot(x, mean, '.-', color=_COLOR, zorder=3)
+        ax.plot(x, med, '.-', color=_COLOR, zorder=3)
         ax.axvline(threshold, color='k', linestyle='--',
                    linewidth=0.8, alpha=0.6)
         ax.set_xlabel('SNR')
@@ -1751,12 +1778,12 @@ def run_snr_threshold_sweep(data_dir):
               _SNR_N_LEVELS, snr_levels[0], snr_levels[-1], _SNR_THRESHOLD))
     print('  {} cells x {}s each'.format(_SNR_N_CELLS, _SNR_DURATION))
 
-    mean_fb      = np.full(_SNR_N_LEVELS, np.nan)
-    std_fb       = np.full(_SNR_N_LEVELS, np.nan)
-    mean_cosmic  = np.full(_SNR_N_LEVELS, np.nan)
-    std_cosmic   = np.full(_SNR_N_LEVELS, np.nan)
-    mean_nsweeps = np.full(_SNR_N_LEVELS, np.nan)
-    std_nsweeps  = np.full(_SNR_N_LEVELS, np.nan)
+    med_fb      = np.full(_SNR_N_LEVELS, np.nan)
+    mad_fb       = np.full(_SNR_N_LEVELS, np.nan)
+    med_cosmic  = np.full(_SNR_N_LEVELS, np.nan)
+    mad_cosmic   = np.full(_SNR_N_LEVELS, np.nan)
+    med_nsweeps = np.full(_SNR_N_LEVELS, np.nan)
+    mad_nsweeps  = np.full(_SNR_N_LEVELS, np.nan)
 
     params = {
         'f':         _FS,
@@ -1779,10 +1806,10 @@ def run_snr_threshold_sweep(data_dir):
 
             cosmic_v   = helpers.compute_cosmic(true_spikes, pred, _FS)
 
-            mean_cosmic[k]  = float(np.mean(cosmic_v))
-            std_cosmic[k]   = float(np.std(cosmic_v, ddof=1))
-            mean_nsweeps[k] = float(np.mean(res['optim_nsamples']))
-            std_nsweeps[k]  = float(np.std(res['optim_nsamples'], ddof=1))
+            med_cosmic[k]  = float(np.nanmedian(cosmic_v))
+            mad_cosmic[k]  = float(_mad(cosmic_v))
+            med_nsweeps[k] = float(np.median(res['optim_nsamples']))
+            mad_nsweeps[k] = float(_mad(res['optim_nsamples']))
 
             if res['optim_precision'] is not None:
                 fb_arr = np.array([
@@ -1790,24 +1817,25 @@ def run_snr_threshold_sweep(data_dir):
                            float(res['optim_recall'][i]))
                     for i in range(_SNR_N_CELLS)
                 ])
-                mean_fb[k] = float(np.nanmean(fb_arr))
-                std_fb[k]  = float(np.nanstd(fb_arr))
+                med_fb[k] = float(np.nanmedian(fb_arr))
+                mad_fb[k] = float(_mad(fb_arr))
 
-            print('    F_beta={:.3f}  CosMIC={:.3f}  '
-                  'mean_sweeps={:.1f}'.format(
-                      mean_fb[k], mean_cosmic[k], mean_nsweeps[k]))
+            print('    F_beta={:.3f} ± {:.3f}  CosMIC={:.3f} ± {:.3f}  '
+                  'sweeps={:.1f} ± {:.1f}'.format(
+                      med_fb[k], mad_fb[k], med_cosmic[k], mad_cosmic[k],
+                      med_nsweeps[k], mad_nsweeps[k]))
         except Exception as exc:
             print('    FAILED: {}'.format(exc))
 
     np.savez(
         out_path,
         snr_levels   = snr_levels,
-        mean_fb      = mean_fb,
-        std_fb       = std_fb,
-        mean_cosmic  = mean_cosmic,
-        std_cosmic   = std_cosmic,
-        mean_nsweeps = mean_nsweeps,
-        std_nsweeps  = std_nsweeps,
+        med_fb      = med_fb,
+        mad_fb       = mad_fb,
+        med_cosmic  = med_cosmic,
+        mad_cosmic   = mad_cosmic,
+        med_nsweeps = med_nsweeps,
+        mad_nsweeps  = mad_nsweeps,
         threshold    = np.array([_SNR_THRESHOLD]),
     )
     print('\nSaved to {}.'.format(out_path))
@@ -1828,19 +1856,19 @@ def plot_snr_threshold_sweep(data_dir):
 
     d           = np.load(out_path)
     snr_levels  = d['snr_levels'].astype(float)
-    mean_fb     = d['mean_fb'].astype(float)
-    std_fb      = d['std_fb'].astype(float)
-    mean_cosmic = d['mean_cosmic'].astype(float)
-    std_cosmic  = d['std_cosmic'].astype(float)
+    med_fb     = d['med_fb'].astype(float)
+    mad_fb      = d['mad_fb'].astype(float)
+    med_cosmic = d['med_cosmic'].astype(float)
+    mad_cosmic  = d['mad_cosmic'].astype(float)
     threshold   = float(d['threshold'][0])
 
     fig, axes = plt.subplots(1, 2, figsize=(4.8, 2.25), dpi=300)
-    for ax, mean, std, ylabel in [
-        (axes[0], mean_fb,     std_fb,     '$F_\\beta$'),
-        (axes[1], mean_cosmic, std_cosmic, 'CosMIC'),
+    for ax, med, mad, ylabel in [
+        (axes[0], med_fb,     mad_fb,     '$F_\\beta$'),
+        (axes[1], med_cosmic, mad_cosmic, 'CosMIC'),
     ]:
-        valid = np.isfinite(mean) & np.isfinite(std)
-        x, y, ye = snr_levels[valid], mean[valid], std[valid]
+        valid = np.isfinite(med) & np.isfinite(mad)
+        x, y, ye = snr_levels[valid], med[valid], mad[valid]
         ax.fill_between(x,
                         np.clip(y - ye, 0, 1),
                         np.clip(y + ye, 0, 1),
@@ -1930,14 +1958,14 @@ def print_snr_stats(fig4_data_dir):
             snr_by_sensor.setdefault(sensor, []).append(snr)
 
     print('SNR statistics by sensor (figure4 datasets):')
-    print('  {:<12}  {:>5}  {:>10}  {:>10}'.format('Sensor', 'n', 'mean SNR', 'std SNR'))
-    print('  {}  {}  {}  {}'.format('-' * 12, '-' * 5, '-' * 10, '-' * 10))
+    print('  {:<12}  {:>5}  {:>20}'.format('Sensor', 'n', 'SNR (med ± MAD)'))
+    print('  {}  {}  {}'.format('-' * 12, '-' * 5, '-' * 20))
     for sensor in _SNR_SENSOR_ORDER:
         if sensor not in snr_by_sensor:
             continue
         vals = np.array(snr_by_sensor[sensor])
-        print('  {:<12}  {:>5}  {:>10.2f}  {:>10.2f}'.format(
-            sensor, len(vals), np.mean(vals), np.std(vals)))
+        print('  {:<12}  {:>5}  {:>20}'.format(
+            sensor, len(vals), '{:.2f} ± {:.2f}'.format(np.median(vals), _mad(vals))))
 
 
 if __name__ == '__main__':

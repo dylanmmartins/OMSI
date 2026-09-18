@@ -20,6 +20,8 @@ _load_records
     Load a list of result dicts from a compressed NPZ file.
 _fbeta
     Compute F-beta score from scalar precision and recall.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 normalize_label
     Strip leading run-label prefix from a dataset name.
 clean_label
@@ -72,10 +74,12 @@ _plot_cosmic_violin
     Plot overall CosMIC score violin per model.
 _recompute_all_metrics_from_traces
     Recompute precision, recall, F-beta, and CosMIC from saved trace NPZ files.
+_load_all_results
+    Load all benchmark records and recompute their metrics from saved traces.
 plot_figure
     Load all results, recompute metrics, and render the combined figure.
 print_stats
-    Print per-model median F-beta and CosMIC statistics to the terminal.
+    Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
 main
     Parse CLI arguments and dispatch to test, fmcsi, plot, or print mode.
 
@@ -249,6 +253,25 @@ def _fbeta(precision, recall):
     denom = b2 * p + r
     with np.errstate(divide='ignore', invalid='ignore'):
         return float(np.where(denom > 0, (1 + b2) * p * r / denom, 0.0))
+
+
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def normalize_label(label):
@@ -561,8 +584,8 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     prec_my_e, rec_my_e, f1_my_e     = compute_accuracy_window(true_events,  my_spikes, tolerance=0.1)
     cosmic_my                         = OMSI.helpers.compute_cosmic(true_spikes, my_spikes_shifted, fs)
 
-    print("    [fMCSI] strict F1={:.3f}  window F1={:.3f}".format(
-        np.mean(f1_my), np.mean(f1_my_w)))
+    print("    [fMCSI] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+        np.nanmedian(f1_my), _mad(f1_my), np.nanmedian(f1_my_w), _mad(f1_my_w)))
     for i in range(n_cells):
         all_results.append({
             'model': 'fMCSI', 'tau': tau, 'cell_id': int(good_idx[i]),
@@ -596,8 +619,8 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         cosmic_trad                         = OMSI.helpers.compute_cosmic(
             true_spikes, trad_spikes_out, fs)
 
-        print("    [MATLAB] strict F1={:.3f}  window F1={:.3f}".format(
-            np.mean(f1_trad), np.mean(f1_trad_w)))
+        print("    [MATLAB] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+            np.nanmedian(f1_trad), _mad(f1_trad), np.nanmedian(f1_trad_w), _mad(f1_trad_w)))
         for i in range(n_cells):
             all_results.append({
                 'model': 'MATLAB', 'tau': tau, 'cell_id': int(good_idx[i]),
@@ -635,8 +658,8 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     cosmic_oasis                           = OMSI.helpers.compute_cosmic(
         true_spikes, oasis_spikes_shifted, fs)
 
-    print("    [OASIS] strict F1={:.3f}  window F1={:.3f}".format(
-        np.mean(f1_oasis), np.mean(f1_oasis_w)))
+    print("    [OASIS] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+        np.nanmedian(f1_oasis), _mad(f1_oasis), np.nanmedian(f1_oasis_w), _mad(f1_oasis_w)))
     for i in range(n_cells):
         all_results.append({
             'model': 'OASIS', 'tau': tau, 'cell_id': int(good_idx[i]),
@@ -683,8 +706,8 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         cosmic_cas                       = OMSI.helpers.compute_cosmic(
             true_spikes, cascade_spikes, fs)
 
-        print("    [CASCADE] strict F1={:.3f}  window F1={:.3f}".format(
-            np.mean(f1_cas), np.mean(f1_cas_w)))
+        print("    [CASCADE] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+            np.nanmedian(f1_cas), _mad(f1_cas), np.nanmedian(f1_cas_w), _mad(f1_cas_w)))
 
         cas_results = []
         for i in range(n_cells):
@@ -784,8 +807,8 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
     cosmic_my                       = OMSI.helpers.compute_cosmic(
         true_spikes, my_spikes_shifted, fs)
 
-    print("    [fMCSI] strict F1={:.3f}  window F1={:.3f}".format(
-        np.mean(f1_my), np.mean(f1_my_w)))
+    print("    [fMCSI] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+        np.nanmedian(f1_my), _mad(f1_my), np.nanmedian(f1_my_w), _mad(f1_my_w)))
 
     all_results = []
     for i in range(n_cells):
@@ -823,8 +846,8 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
     cosmic_oasis                           = OMSI.helpers.compute_cosmic(
         true_spikes, oasis_spikes_shifted, fs)
 
-    print("    [OASIS] strict F1={:.3f}  window F1={:.3f}".format(
-        np.mean(f1_oasis), np.mean(f1_oasis_w)))
+    print("    [OASIS] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+        np.nanmedian(f1_oasis), _mad(f1_oasis), np.nanmedian(f1_oasis_w), _mad(f1_oasis_w)))
     for i in range(n_cells):
         all_results.append({
             'model': 'OASIS', 'tau': tau, 'cell_id': int(good_idx[i]),
@@ -1892,8 +1915,8 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
         print("  No trace data found -- metrics unchanged from saved values.")
 
 
-def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
-    """Load all results, recompute metrics, and render the combined figure.
+def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
+    """Load all benchmark records and recompute their metrics from saved traces.
 
     Parameters
     ----------
@@ -1901,6 +1924,17 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         Directory containing benchmark NPZ result files and trace files.
     matlab_data_dir : str, optional
         Directory containing CaImAn MCMC result files.
+
+    Returns
+    -------
+    alldata : list of dict
+        Result records with recomputed metrics, zoom, and F-beta fields.
+    label_map : dict
+        Clean label to normalized label.
+    file_path_map : dict
+        Clean label to original dataset basename.
+    fmcsi_traces_lookup : dict
+        fMCSI traces file lookup from _build_fmcsi_traces_lookup.
     """
     alldata       = []
     label_map     = {}
@@ -2000,8 +2034,7 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         alldata.extend(fmcsi_recs)
 
     if not alldata:
-        print("No data found in data_dir. Run with --mode test first.")
-        return
+        return alldata, label_map, file_path_map, fmcsi_traces_lookup
 
     print("Recomputing all metrics from traces (CosMIC, precision, recall, F_beta)...")
     _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
@@ -2018,6 +2051,25 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
 
     n_unique = len(set((d['label'], d['cell_id']) for d in alldata))
     print("Loaded {} records, {} unique cells.".format(len(alldata), n_unique))
+
+    return alldata, label_map, file_path_map, fmcsi_traces_lookup
+
+
+def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
+    """Load all results, recompute metrics, and render the combined figure.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing benchmark NPZ result files and trace files.
+    matlab_data_dir : str, optional
+        Directory containing CaImAn MCMC result files.
+    """
+    alldata, label_map, file_path_map, fmcsi_traces_lookup = _load_all_results(
+        data_dir, matlab_data_dir)
+    if not alldata:
+        print("No data found in data_dir. Run with --mode test first.")
+        return
 
     cascade_lookup = _build_cascade_lookup(data_dir)
 
@@ -2085,7 +2137,7 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
-    """Print per-model median F-beta and CosMIC statistics to the terminal.
+    """Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
 
     Parameters
     ----------
@@ -2094,88 +2146,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
     matlab_data_dir : str, optional
         Directory containing CaImAn MCMC result files.
     """
-    fmcsi_records_lookup = _build_fmcsi_records_lookup(data_dir)
-    fmcsi_data_cache = {}
-    for orig_basename, fmcsi_path in fmcsi_records_lookup.items():
-        if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
-            continue
-        try:
-            fmcsi_data_cache[orig_basename] = _load_records(fmcsi_path)
-        except Exception as exc:
-            print("Warning: could not load {}: {}.".format(fmcsi_path, exc))
-            fmcsi_data_cache[orig_basename] = []
-
-    alldata = []
-    for fpath in _glob.glob(os.path.join(data_dir, 'allen_data_results_*.npz')):
-        if 'allen_data_results_fmcsi_' in fpath:
-            continue
-        try:
-            data = _load_records(fpath)
-        except Exception as exc:
-            print("Warning: could not load {}: {}.".format(fpath, exc))
-            continue
-        orig_basename = (os.path.basename(fpath)
-                         .replace('allen_data_results_cascade_', '')
-                         .replace('allen_data_results_', '')
-                         .replace('.npz', ''))
-        if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
-            continue
-        is_cascade = 'allen_data_results_cascade_' in fpath
-        if not is_cascade and orig_basename in fmcsi_data_cache:
-            fmcsi_models = {r.get('model') for r in fmcsi_data_cache[orig_basename]}
-            data = [d for d in data if d.get('model') not in fmcsi_models]
-        data = [d for d in data if d.get('model') != 'MATLAB']
-        geno = get_genotype(orig_basename)
-        label = clean_label(normalize_label(orig_basename))
-        for d in data:
-            d['label']    = label
-            d['genotype'] = geno
-            d['zoom']     = get_zoom_for_label(d['label'])
-            d['fbeta']        = _fbeta(d.get('precision',        0.0), d.get('recall',        0.0))
-            d['fbeta_window'] = _fbeta(d.get('precision_window', 0.0), d.get('recall_window', 0.0))
-        alldata.extend(data)
-
-    if matlab_data_dir and os.path.isdir(matlab_data_dir):
-        for fpath in _glob.glob(
-                os.path.join(matlab_data_dir, 'allen_data_results_*.npz')):
-            basename = os.path.basename(fpath)
-            if 'allen_data_results_fmcsi_'   in fpath: continue
-            if 'allen_data_results_cascade_' in fpath: continue
-            try:
-                mdata = _load_records(fpath)
-            except Exception as exc:
-                print("Warning: could not load {}: {}.".format(fpath, exc))
-                continue
-            orig_basename = (basename
-                             .replace('allen_data_results_', '')
-                             .replace('.npz', ''))
-            if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
-                continue
-            mdata = [d for d in mdata if d.get('model') == 'MATLAB']
-            if not mdata:
-                continue
-            geno  = get_genotype(orig_basename)
-            label = clean_label(normalize_label(orig_basename))
-            for d in mdata:
-                d['label']    = label
-                d['genotype'] = geno
-                d['zoom']     = get_zoom_for_label(label)
-                d['fbeta']        = _fbeta(d.get('precision',        0.0), d.get('recall',        0.0))
-                d['fbeta_window'] = _fbeta(d.get('precision_window', 0.0), d.get('recall_window', 0.0))
-            alldata.extend(mdata)
-
-    for orig_basename, fmcsi_recs in fmcsi_data_cache.items():
-        if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
-            continue
-        geno  = get_genotype(orig_basename)
-        label = clean_label(normalize_label(orig_basename))
-        for d in fmcsi_recs:
-            d['label']    = label
-            d['genotype'] = geno
-            d['zoom']     = get_zoom_for_label(label)
-            d['fbeta']        = _fbeta(d.get('precision',        0.0), d.get('recall',        0.0))
-            d['fbeta_window'] = _fbeta(d.get('precision_window', 0.0), d.get('recall_window', 0.0))
-        alldata.extend(fmcsi_recs)
+    alldata = _load_all_results(data_dir, matlab_data_dir)[0]
 
     if not alldata:
         print("No data found. Run --mode test first.")
@@ -2185,11 +2156,10 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
     print('FIGURE 3 STATISTICS')
     print('='*80)
 
-    print('\n{:<12}  {:>18}  {:>10}  {:>18}  {:>10}  {:>11}  {:>10}'.format(
-        'Method', 'F_beta strict med', 'strict IQR',
-        'F_beta window med', 'window IQR',
-        'CosMIC med', 'CosMIC IQR'))
-    print('-'*98)
+    print('\n{:<12}  {:>27}  {:>27}  {:>20}'.format(
+        'Method', 'F_beta strict (med ± MAD)',
+        'F_beta window (med ± MAD)', 'CosMIC (med ± MAD)'))
+    print('-'*92)
     for model_name in _MODEL_ORDER:
         md = [d for d in alldata if d['model'] == model_name]
         if not md:
@@ -2197,11 +2167,52 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
         fb_s   = np.array([d['fbeta']        for d in md], dtype=float)
         fb_w   = np.array([d['fbeta_window'] for d in md], dtype=float)
         cosmic = np.array([d.get('cosmic', np.nan) for d in md], dtype=float)
-        fs_med = np.nanmedian(fb_s);   fs_iqr = np.subtract(*np.nanpercentile(fb_s,   [75, 25]))
-        fw_med = np.nanmedian(fb_w);   fw_iqr = np.subtract(*np.nanpercentile(fb_w,   [75, 25]))
-        co_med = np.nanmedian(cosmic); co_iqr = np.subtract(*np.nanpercentile(cosmic, [75, 25]))
-        print('{:<12}  {:>18.3f}  {:>10.3f}  {:>18.3f}  {:>10.3f}  {:>11.3f}  {:>10.3f}'.format(
-            model_name, fs_med, fs_iqr, fw_med, fw_iqr, co_med, co_iqr))
+        fs_med = np.nanmedian(fb_s);   fs_mad = np.nanmedian(np.abs(fb_s   - fs_med))
+        fw_med = np.nanmedian(fb_w);   fw_mad = np.nanmedian(np.abs(fb_w   - fw_med))
+        co_med = np.nanmedian(cosmic); co_mad = np.nanmedian(np.abs(cosmic - co_med))
+        print('{:<12}  {:>27}  {:>27}  {:>20}'.format(
+            model_name,
+            '{:.3f} ± {:.3f}'.format(fs_med, fs_mad),
+            '{:.3f} ± {:.3f}'.format(fw_med, fw_mad),
+            '{:.3f} ± {:.3f}'.format(co_med, co_mad)))
+
+    pr_keys = [('precision', 'Prec strict'), ('recall', 'Rec strict'),
+               ('precision_window', 'Prec window'), ('recall_window', 'Rec window')]
+    print('\n{:<12}'.format('Method') + ''.join(
+        '  {:>15}'.format(label) for _, label in pr_keys) + '   (med ± MAD)')
+    print('-'*94)
+    for model_name in _MODEL_ORDER:
+        md = [d for d in alldata if d['model'] == model_name]
+        if not md:
+            continue
+        line = '{:<12}'.format(model_name)
+        for key, _ in pr_keys:
+            vals = np.array([d.get(key, np.nan) for d in md], dtype=float)
+            line += '  {:>15}'.format('{:.3f} ± {:.3f}'.format(np.nanmedian(vals), _mad(vals)))
+        print(line)
+
+    # Precision/recall panels: one violin per (tau, zoom, model).
+    prec_key = 'precision' if USE_STRICT_ACCURACY else 'precision_window'
+    rec_key  = 'recall'    if USE_STRICT_ACCURACY else 'recall_window'
+    print('\nPrecision / recall panels ({}, med ± MAD)'.format(
+        'strict' if USE_STRICT_ACCURACY else 'window'))
+    print('{:<10}  {:<6}  {:<12}  {:>15}  {:>15}  {:>5}'.format(
+        'Zoom', 'Tau', 'Method', 'Precision', 'Recall', 'n'))
+    print('-'*72)
+    for zoom in ['High Zoom', 'Low Zoom']:
+        for tau_val in sorted(set(d['tau'] for d in alldata)):
+            for model_name in _MODEL_ORDER:
+                md = [d for d in alldata if d['tau'] == tau_val
+                      and d['zoom'] == zoom and d['model'] == model_name]
+                if not md:
+                    continue
+                p = np.array([d.get(prec_key, np.nan) for d in md], dtype=float)
+                r = np.array([d.get(rec_key,  np.nan) for d in md], dtype=float)
+                print('{:<10}  {:<6g}  {:<12}  {:>15}  {:>15}  {:>5}'.format(
+                    zoom, tau_val, model_name,
+                    '{:.3f} ± {:.3f}'.format(np.nanmedian(p), _mad(p)),
+                    '{:.3f} ± {:.3f}'.format(np.nanmedian(r), _mad(r)),
+                    int(np.sum(np.isfinite(p)))))
 
 
 def main():

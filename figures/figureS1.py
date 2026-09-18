@@ -15,6 +15,8 @@ _probs_to_spikes
     Convert CASCADE probability traces to spike times using peak detection.
 _fbeta
     Compute F-beta score from precision and recall arrays.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _compute_metrics
     Compute precision, recall, F-beta, and CosMIC for a set of spike train estimates.
 run_test
@@ -66,6 +68,10 @@ COLORS = {
 
 OASIS_THRESHOLDS   = np.array([0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0])
 CASCADE_THRESHOLDS = np.array([0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0])
+
+# Fixed thresholds reported by --mode print alongside the best-performing threshold.
+OASIS_REPORT_THRESHOLD   = 1.0
+CASCADE_REPORT_THRESHOLD = 0.5
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'figS1')
 
@@ -201,6 +207,25 @@ def _fbeta(precision, recall):
         return np.where(denom > 0, (1 + b2) * p * r / denom, 0.0)
 
 
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
 def _compute_metrics(true_spikes, spikes_list):
     """ Compute precision, recall, F-beta, and CosMIC for estimated spike trains.
 
@@ -282,8 +307,10 @@ def run_test(data_dir='.', run_oasis=True, run_cascade=True):
             oasis_recall[ti]    = rec
             oasis_fbeta[ti]     = fb
             oasis_cosmic[ti]    = cosmic
-            print('    thresh={:.3f}  |  P={:.3f}  R={:.3f}  Fb={:.3f}  CosMIC={:.3f}'.format(
-                thresh, np.nanmean(prec), np.nanmean(rec), np.nanmean(fb), np.nanmean(cosmic)))
+            print('    thresh={:.3f}  |  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}  '
+                  'Fb={:.3f} ± {:.3f}  CosMIC={:.3f} ± {:.3f}'.format(
+                      thresh, np.nanmedian(prec), _mad(prec), np.nanmedian(rec), _mad(rec),
+                      np.nanmedian(fb), _mad(fb), np.nanmedian(cosmic), _mad(cosmic)))
 
         save.update({
             'oasis_precision': oasis_precision,
@@ -314,8 +341,10 @@ def run_test(data_dir='.', run_oasis=True, run_cascade=True):
             cascade_recall[ti]    = rec
             cascade_fbeta[ti]     = fb
             cascade_cosmic[ti]    = cosmic
-            print('    thresh={:.3f}  |  P={:.3f}  R={:.3f}  Fb={:.3f}  CosMIC={:.3f}'.format(
-                thresh, np.nanmean(prec), np.nanmean(rec), np.nanmean(fb), np.nanmean(cosmic)))
+            print('    thresh={:.3f}  |  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}  '
+                  'Fb={:.3f} ± {:.3f}  CosMIC={:.3f} ± {:.3f}'.format(
+                      thresh, np.nanmedian(prec), _mad(prec), np.nanmedian(rec), _mad(rec),
+                      np.nanmedian(fb), _mad(fb), np.nanmedian(cosmic), _mad(cosmic)))
 
         save.update({
             'cascade_precision': cascade_precision,
@@ -381,14 +410,14 @@ def plot_figure(data_dir='.'):
         for col, (metric_key, ylabel) in enumerate(metrics):
             ax   = fig.add_subplot(gs[row_idx, col])
             vals = res[f'{prefix}_{metric_key}']
-            mean = np.nanmean(vals, axis=1)
-            std  = np.nanstd(vals,  axis=1)
+            med  = np.nanmedian(vals, axis=1)
+            mad  = _mad(vals, axis=1)
 
             ax.fill_between(thresholds,
-                            np.clip(mean - std, 0, 1),
-                            np.clip(mean + std, 0, 1),
+                            np.clip(med - mad, 0, 1),
+                            np.clip(med + mad, 0, 1),
                             color=color, alpha=0.18, zorder=1)
-            ax.plot(thresholds, mean, '.-',
+            ax.plot(thresholds, med, '.-',
                     color=color, lw=1.2, ms=4, zorder=3)
             if method == 'OASIS' and OASIS_SPIKE_DETECTION == 'peaks':
                 ax.axvline(1.0, color='k', lw=0.8, ls='--', alpha=0.55, zorder=2)
@@ -438,23 +467,30 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
 
     rows = []
     if 'oasis_fbeta' in res:
-        rows.append(('OASIS',   'oasis',   oasis_thresholds))
+        rows.append(('OASIS',   'oasis',   oasis_thresholds,   OASIS_REPORT_THRESHOLD))
     if 'cascade_fbeta' in res:
-        rows.append(('CASCADE', 'cascade', cascade_thresholds))
+        rows.append(('CASCADE', 'cascade', cascade_thresholds, CASCADE_REPORT_THRESHOLD))
 
     print('\n' + '='*72)
     print('FIGURE S1 STATISTICS -- maximum performance vs detection threshold')
     print('='*72)
 
-    for method, prefix, thresholds in rows:
+    for method, prefix, thresholds, report_thresh in rows:
         print('\n--- {} ---'.format(method))
+        matches = np.where(np.isclose(thresholds, report_thresh))[0]
         for metric_key, metric_label in [('fbeta', 'F_beta'), ('cosmic', 'CosMIC')]:
             arr  = res[f'{prefix}_{metric_key}']           # Shape (n_thresh, n_cells).
-            mean = np.nanmean(arr, axis=1)                 # Shape (n_thresh,).
-            std  = np.nanstd(arr,  axis=1)
-            best_idx = int(np.argmax(mean))
-            print('  Max mean {:>8}: {:.3f}  (std={:.3f})  at threshold={:.3f}'.format(
-                metric_label, mean[best_idx], std[best_idx], thresholds[best_idx]))
+            med  = np.nanmedian(arr, axis=1)               # Shape (n_thresh,).
+            mad  = _mad(arr, axis=1)
+            best_idx = int(np.argmax(med))
+            print('  Max median {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(
+                metric_label, med[best_idx], mad[best_idx], thresholds[best_idx]))
+            if len(matches) > 0:
+                idx = int(matches[0])
+                print('  Median     {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(
+                    metric_label, med[idx], mad[idx], thresholds[idx]))
+            else:
+                print('  Threshold {:.3f} not in saved sweep; re-run --mode test.'.format(report_thresh))
 
 
 if __name__ == '__main__':

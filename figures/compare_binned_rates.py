@@ -16,6 +16,8 @@ _bin_ground_truth
     Bin ground-truth spike times into per-frame counts at a given sample rate.
 _corr_and_residual
     Compute Pearson correlation and RMSE residual between two rate traces.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _load_cascade_samplerate_group
     Load true spikes and continuous CASCADE output for one sample rate.
 compare_cascade_samplerate
@@ -140,6 +142,25 @@ def _corr_and_residual(binned_gt, pred):
     return corr, residual
 
 
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
 def _load_cascade_samplerate_group(data_dir, fs):
     """
     Load true spikes and continuous CASCADE output for one sample rate.
@@ -208,8 +229,8 @@ def compare_cascade_samplerate(data_dir):
             corrs[i], resids[i] = _corr_and_residual(binned_gt, cascade_probs[i])
         results[f'corr_{suffix}']  = corrs
         results[f'resid_{suffix}'] = resids
-        print('  {} Hz: mean corr={:.3f}  mean resid={:.4f}'.format(
-            fs, np.nanmean(corrs), np.nanmean(resids)))
+        print('  {} Hz: corr={:.3f} ± {:.3f}  resid={:.4f} ± {:.4f}'.format(
+            fs, np.nanmedian(corrs), _mad(corrs), np.nanmedian(resids), _mad(resids)))
     return results
 
 
@@ -549,8 +570,8 @@ def compare_allen_binned_rates(data_dir):
                 vals = np.array(results[zoom][model][metric])
                 results[zoom][model][metric] = vals
                 if len(vals) > 0:
-                    print('  {} / {} / {}: n={}  mean={:.3f}'.format(
-                        zoom, model, metric, len(vals), np.mean(vals)))
+                    print('  {} / {} / {}: n={}  median={:.3f} ± {:.3f}'.format(
+                        zoom, model, metric, len(vals), np.median(vals), _mad(vals)))
     return results
 
 

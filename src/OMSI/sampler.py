@@ -348,6 +348,8 @@ def _mcmc_kernel_nb(
     Ns,
     t_arr,
     con_lam,
+    seed,
+    record_sse,
 ):
     """Main numba MCMC loop for continuous-time spike inference.
 
@@ -400,6 +402,10 @@ def _mcmc_kernel_nb(
         Time index array for kernel updates.
     con_lam : int
         If 1, fix firing rate at initial value.
+    seed : int
+        Seed for numba's RNG. Negative leaves RNG state alone.
+    record_sse : int
+        If 1, store residual SSE at end of every sweep.
 
     Returns
     -------
@@ -419,7 +425,15 @@ def _mcmc_kernel_nb(
         Burn-in endpoint and stopping index.
     tau, ge : ndarray
         Final time constants and geometric decay.
+    SSE : ndarray
+        Residual SSE per sweep (zeros unless record_sse).
+    NV : ndarray
+        Valid frame count per sweep (zeros unless record_sse).
     """
+
+    # Numba keeps its own RNG, separate from numpy's -- must seed in here.
+    if seed >= 0:
+        np.random.seed(seed)
 
     dt = 1.0
 
@@ -430,6 +444,8 @@ def _mcmc_kernel_nb(
     Cb   = np.zeros(N_total, dtype=np.float64)
     Cin  = np.zeros(N_total, dtype=np.float64)
     SG   = np.zeros(N_total, dtype=np.float64)
+    SSE  = np.zeros(N_total, dtype=np.float64)
+    NV   = np.zeros(N_total, dtype=np.float64)
     mub  = np.zeros(2, dtype=np.float64)
     Sigb = np.zeros((2, 2), dtype=np.float64)
 
@@ -672,6 +688,10 @@ def _mcmc_kernel_nb(
                 tau, diff_gr, t_arr, T, p, prec,
             )
 
+        # End-of-sweep fit, for log-likelihood traces in convergence diagnostics.
+        if record_sse:
+            SSE[i], NV[i] = _residual_sse(Y, Gs_buf, ge, A_, b_, C_in, isanY)
+
         # Check convergence: compare mean of first vs second half of recent
         # spike count samples. Wait for amplitude burn-in first.
         if auto_stop and i >= check_every and i % check_every == 0:
@@ -706,6 +726,7 @@ def _mcmc_kernel_nb(
         mub, Sigb,
         B_final, stop_idx,
         tau, ge,
+        SSE, NV,
     )
 
 
@@ -722,12 +743,15 @@ def cont_ca_sampler(Y, params=None):
     params : dict, optional
         Sampler configuration. Missing keys filled from defaults. Key entries
         include 'g', 'sn', 'b', 'c1', 'f', 'p', 'Nsamples', 'B', 'marg',
-        'upd_gam', 'auto_stop', and others.
+        'upd_gam', 'auto_stop', and others. 'seed' (int) makes the chain
+        reproducible. 'return_full' (bool) adds the whole chain, burn-in
+        included, under SAMPLES['chain'].
 
     Returns
     -------
     SAMPLES : dict
-        Keys: ss (spike time samples), ns, ld, Am, g, Cb, Cin, sn2, params, sn_mad.
+        Keys: ss (spike time samples), ns, ld, Am, g, Cb, Cin, sn2, params, sn_mad,
+        and chain when return_full is set.
     """
 
     Y = np.atleast_1d(Y).flatten().astype(np.float32)
@@ -938,13 +962,17 @@ def cont_ca_sampler(Y, params=None):
 
     N_total = max_sweeps if auto_stop else int(params['Nsamples']) + B
 
+    seed        = -1 if params.get('seed') is None else int(params['seed'])
+    return_full = bool(params.get('return_full', False))
+
     spiketimes_0 = np.copy(SAM['spiketimes_']).astype(np.float64)
 
     (ss, ns_arr, lam_arr, Am_arr, Gam_arr,
      Cb_arr, Cin_arr, SG_arr,
      mub, Sigb,
      B_final, stop_idx,
-     tau_final, ge_final) = _mcmc_kernel_nb(
+     tau_final, ge_final,
+     SSE_arr, NV_arr) = _mcmc_kernel_nb(
         Y, isanY, T,
         spiketimes_0,
         lam_0, A_, b_, C_in, sg,
@@ -961,6 +989,8 @@ def cont_ca_sampler(Y, params=None):
         Ns,
         t_arr,
         con_lam,
+        seed,
+        int(return_full),
     )
 
     ss_list = list(ss)[B_final:stop_idx]
@@ -983,6 +1013,25 @@ def cont_ca_sampler(Y, params=None):
                          else np.tile(tau_final, (stop_idx - B_final, 1)))
     SAMPLES['params']  = params['init']
     SAMPLES['sn_mad']  = sn_mad
+
+    # Whole chain from sweep 0, burn-in included. B_final/stop_idx mark the
+    # window auto_stop kept.
+    if return_full:
+        SAMPLES['chain'] = {
+            'ss':       list(ss)[:stop_idx],
+            'ns':       ns_arr[:stop_idx],
+            'lam':      lam_arr[:stop_idx],
+            'Am':       Am_arr[:stop_idx],
+            'Cb':       Cb_arr[:stop_idx],
+            'Cin':      Cin_arr[:stop_idx],
+            'sg':       SG_arr[:stop_idx],
+            'tau':      (Gam_arr[:stop_idx, :] if gam_flag
+                         else np.tile(tau_final, (stop_idx, 1))),
+            'sse':      SSE_arr[:stop_idx],
+            'n_valid':  NV_arr[:stop_idx],
+            'B_final':  int(B_final),
+            'stop_idx': int(stop_idx),
+        }
 
     return SAMPLES
 

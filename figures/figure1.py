@@ -12,6 +12,8 @@ _run_cascade_inference
     Run CASCADE spike inference via subprocess.
 _fbeta
     Compute F-beta score from precision and recall arrays.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 run_test
     Run all inference methods on simulated data.
 _best_window_sim
@@ -25,7 +27,7 @@ _with_window_metrics
 plot_figure
     Load results and render the figure.
 plot_running_median
-    Overlay a running-median curve with SEM band on an axes.
+    Overlay a running-median curve with MAD band on an axes.
 print_stats
     Print summary statistics to the terminal.
 
@@ -194,6 +196,25 @@ def _fbeta(precision, recall):
         return np.where(denom > 0, (1 + b2) * p * r / denom, 0.0)
 
 
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
 def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
              run_oasis=True, run_cascade=True):
     """ Run spike inference for all methods on simulated data.
@@ -249,7 +270,9 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
         optim_dict = OMSI.deconv(noisy, params, true_spikes=true_spikes, benchmark=True)
         optim_time = time.time() - t0
         print('  fMCSI took {:.1f}s ({:.3f}s/cell)'.format(optim_time, optim_time/N_CELLS))
-        print('  P={:.3f}  R={:.3f}'.format(np.nanmean(optim_dict["optim_precision"]), np.nanmean(optim_dict["optim_recall"])))
+        print('  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+            np.nanmedian(optim_dict["optim_precision"]), _mad(optim_dict["optim_precision"]),
+            np.nanmedian(optim_dict["optim_recall"]),    _mad(optim_dict["optim_recall"])))
         save = {**shared, **optim_dict, 'optim_time': optim_time}
         np.savez(os.path.join(data_dir, _NPZ_NAMES['fMCSI']), **save)
 
@@ -262,7 +285,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
         )
         matlab_time = time.time() - t0
         trad_prec, trad_rec, trad_F1 = OMSI.compute_accuracy_strict(true_spikes, trad_spikes)
-        print('  MATLAB took {:.1f}s  P={:.3f}  R={:.3f}'.format(matlab_time, np.nanmean(trad_prec), np.nanmean(trad_rec)))
+        print('  MATLAB took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+            matlab_time, np.nanmedian(trad_prec), _mad(trad_prec), np.nanmedian(trad_rec), _mad(trad_rec)))
         save = {
             **shared,
             'tradmat_spikes':    np.array(trad_spikes, dtype=object),
@@ -289,7 +313,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
             oasis_spikes.append(_oasis_spikes_from_s(s, sigmas[i], FS))
         oasis_time = time.time() - t0
         oasis_prec, oasis_rec, oasis_F1 = OMSI.compute_accuracy_strict(true_spikes, oasis_spikes)
-        print('  OASIS took {:.1f}s  P={:.3f}  R={:.3f}'.format(oasis_time, np.nanmean(oasis_prec), np.nanmean(oasis_rec)))
+        print('  OASIS took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+            oasis_time, np.nanmedian(oasis_prec), _mad(oasis_prec), np.nanmedian(oasis_rec), _mad(oasis_rec)))
         save = {
             **shared,
             'oasis_spikes':    np.array(oasis_spikes, dtype=object),
@@ -309,7 +334,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
                 prefix=f'fig1_cascade_{_dev}', device=_dev
             )
             _prec, _rec, _F1 = OMSI.compute_accuracy_strict(true_spikes, _spikes)
-            print('  CASCADE ({}) took {:.1f}s  P={:.3f}  R={:.3f}'.format(_dev.upper(), _time, np.nanmean(_prec), np.nanmean(_rec)))
+            print('  CASCADE ({}) took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+                _dev.upper(), _time, np.nanmedian(_prec), _mad(_prec), np.nanmedian(_rec), _mad(_rec)))
             np.savez(os.path.join(data_dir, _NPZ_NAMES[_key]), **{
                 **shared,
                 'cascade_spikes':    np.array(_spikes, dtype=object),
@@ -711,7 +737,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     for name, res, spk_k in cosmic_spike_keys:
         scores = compute_cosmic(true_spikes, list(res[spk_k]), fs)
         cosmic_arrays.append(scores)
-        print('  {}: mean CosMIC = {:.3f}'.format(name, np.mean(scores)))
+        print('  {}: CosMIC = {:.3f} ± {:.3f}'.format(name, np.nanmedian(scores), _mad(scores)))
     parts = cosmic_dist.violinplot(cosmic_arrays, positions=positions,
                                    showmedians=True, widths=0.65)
     for pc, name in zip(parts['bodies'], labels):
@@ -785,7 +811,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
 
 def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
-    """ Overlay a running-median curve with SEM band on an axes.
+    """ Overlay a running-median curve with MAD band on an axes.
 
     Parameters
     ----------
@@ -798,16 +824,16 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
     n_bins : int, optional
         Number of bins for the running median.
     vertical : bool, optional
-        If True, plot x vs bin_means instead of bin_means vs x.
+        If True, plot x vs bin_medians instead of bin_medians vs x.
     fb : bool, optional
-        If True, fill between mean +/- SEM.
+        If True, fill between median +/- MAD.
     color : str, optional
         Line and fill color.
 
     Returns
     -------
     float
-        Maximum value of bin_means + tuning_err.
+        Maximum value of bin_medians + tuning_err.
     """
     import scipy.stats
     mask = ~np.isnan(x) & ~np.isnan(y)
@@ -815,21 +841,18 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
         return np.nan
     x_use, y_use = x[mask], y[mask]
     bins = np.linspace(np.min(x_use), np.max(x_use), n_bins)
-    bin_means, bin_edges, _ = scipy.stats.binned_statistic(x_use, y_use, np.nanmedian, bins=bins)
-    bin_std, _, _  = scipy.stats.binned_statistic(x_use, y_use, np.nanstd,    bins=bins)
-    hist, _, _     = scipy.stats.binned_statistic(x_use, y_use,
-                                                  lambda v: np.sum(~np.isnan(v)), bins=bins)
-    tuning_err = bin_std / np.sqrt(hist)
+    bin_medians, bin_edges, _ = scipy.stats.binned_statistic(x_use, y_use, np.nanmedian, bins=bins)
+    tuning_err, _, _          = scipy.stats.binned_statistic(x_use, y_use, _mad,         bins=bins)
     centers = bin_edges[:-1] + np.median(np.diff(bins)) / 2
     if not vertical:
-        ax.plot(centers, bin_means, '-', color=color)
+        ax.plot(centers, bin_medians, '-', color=color)
         if fb:
-            ax.fill_between(centers, bin_means - tuning_err, bin_means + tuning_err,
+            ax.fill_between(centers, bin_medians - tuning_err, bin_medians + tuning_err,
                             color=color, alpha=0.2)
     else:
-        ax.plot(bin_means, centers, '-', color=color)
+        ax.plot(bin_medians, centers, '-', color=color)
         if fb:
-            ax.fill_betweenx(centers, bin_means - tuning_err, bin_means + tuning_err,
+            ax.fill_betweenx(centers, bin_medians - tuning_err, bin_medians + tuning_err,
                              color=color, alpha=0.2)
 
     # Do a linear regression and print the slope.
@@ -837,7 +860,7 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
         slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(x_use, y_use)
         print('Linear regression slope: {:.4f}, R-squared: {:.4f}'.format(slope, r_value**2))
 
-    return np.nanmax(bin_means + tuning_err)
+    return np.nanmax(bin_medians + tuning_err)
 
 
 
@@ -886,8 +909,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     print('FIGURE 1 STATISTICS')
     print('='*78)
 
-    print('\n{:<14}  {:>14}  {:>11}  {:>14}  {:>11}'.format('Method', 'F_beta median', 'F_beta IQR', 'CosMIC median', 'CosMIC IQR'))
-    print('-'*70)
+    print('\n{:<14}  {:>20}  {:>20}'.format('Method', 'F_beta (med ± MAD)', 'CosMIC (med ± MAD)'))
+    print('-'*58)
     fb_data = {}
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         prec   = np.array(res[prec_k], dtype=float)
@@ -895,9 +918,10 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
         fb     = _fbeta(prec, rec)
         cosmic = compute_cosmic(true_spikes, list(res[spk_k]), fs)
         fb_data[label] = fb
-        fb_med = np.nanmedian(fb);     fb_iqr = np.subtract(*np.nanpercentile(fb,     [75, 25]))
-        co_med = np.nanmedian(cosmic); co_iqr = np.subtract(*np.nanpercentile(cosmic, [75, 25]))
-        print('{:<14}  {:>14.3f}  {:>11.3f}  {:>14.3f}  {:>11.3f}'.format(label, fb_med, fb_iqr, co_med, co_iqr))
+        fb_med = np.nanmedian(fb);     fb_mad = np.nanmedian(np.abs(fb     - fb_med))
+        co_med = np.nanmedian(cosmic); co_mad = np.nanmedian(np.abs(cosmic - co_med))
+        print('{:<14}  {:>20}  {:>20}'.format(
+            label, '{:.3f} ± {:.3f}'.format(fb_med, fb_mad), '{:.3f} ± {:.3f}'.format(co_med, co_mad)))
 
     print('\n{:<14}  {:>17}  {:>16}'.format('Method', 'Total time (min)', 'Time/cell (sec)'))
     print('-'*52)
