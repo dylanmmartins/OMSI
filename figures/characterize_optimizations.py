@@ -109,6 +109,7 @@ from OMSI.get_init_sample import (
     _get_sn, _estimate_time_constants, _ar_kernel, _block_nnls_deconv,
 )
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'opt'

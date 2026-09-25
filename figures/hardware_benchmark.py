@@ -90,6 +90,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
@@ -1068,8 +1069,9 @@ def main():
     skip = [s.strip() for s in args.skip.split(',') if s.strip()]
 
     if args.mode in ('run', 'all'):
-        run_benchmark(args.data_dir, quick=args.quick, skip=skip,
-                      ray_dir=args.ray_dir, matlab_max_cells=args.matlab_max_cells)
+        with no_power_throttling(verbose=True):
+            run_benchmark(args.data_dir, quick=args.quick, skip=skip,
+                          ray_dir=args.ray_dir, matlab_max_cells=args.matlab_max_cells)
     if args.mode in ('report', 'all'):
         report(args.data_dir)
     if args.mode in ('plot', 'all'):

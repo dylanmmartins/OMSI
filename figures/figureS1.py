@@ -32,6 +32,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 import time
 import numpy as np
@@ -43,6 +44,7 @@ from scipy.signal import find_peaks
 import OMSI
 from OMSI.helpers import compute_cosmic
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 mpl.rcParams['axes.spines.top']  = False
 mpl.rcParams['axes.spines.right'] = False
@@ -118,7 +120,7 @@ def _run_cascade_inference(dff, fs, n_cells, data_dir, prefix='figS1_cascade'):
         np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
         print('  Calling CASCADE subprocess (n_cells={}, fs={})...'.format(n_cells, fs))
         subprocess.run(
-            ['conda', 'run', '-n', 'cascade', 'python', script,
+            [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
              '--mode', 'inference',
              '--input',  input_path,
              '--output', output_path],
@@ -507,13 +509,14 @@ if __name__ == '__main__':
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
     args = parser.parse_args()
 
-    if args.mode == 'test':
-        run_test(
-            data_dir    = args.data_dir,
-            run_oasis   = not args.no_oasis,
-            run_cascade = not args.no_cascade,
-        )
-    elif args.mode == 'plot':
-        plot_figure(data_dir=args.data_dir)
-    else:
-        print_stats(data_dir=args.data_dir)
+    with no_power_throttling(verbose=True):
+        if args.mode == 'test':
+            run_test(
+                data_dir    = args.data_dir,
+                run_oasis   = not args.no_oasis,
+                run_cascade = not args.no_cascade,
+            )
+        elif args.mode == 'plot':
+            plot_figure(data_dir=args.data_dir)
+        else:
+            print_stats(data_dir=args.data_dir)

@@ -89,6 +89,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -110,6 +111,7 @@ from oasis.functions import deconvolve
 
 import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig3')
 _MATLAB_DATA_DIR  = '/home/dylan/Fast2/spike_deconv/figures_output_data_260421/data/fig3'
@@ -506,7 +508,7 @@ def _run_cascade_inference(dff, fs, label, data_dir):
     output_path = os.path.join(data_dir, f'fig3_cascade_{label}_output.npz')
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        ['conda', 'run', '-n', 'cascade', 'python', script,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
          '--mode', 'inference', '--input', input_path, '--output', output_path],
         check=True)
     result = np.load(output_path, allow_pickle=True)
@@ -2257,4 +2259,5 @@ def main():
 
 if __name__ == '__main__':
 
-    main()
+    with no_power_throttling(verbose=True):
+        main()

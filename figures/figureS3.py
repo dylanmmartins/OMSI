@@ -27,6 +27,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 
 import numpy as np
@@ -39,6 +40,7 @@ from matplotlib.patches import Patch
 
 import OMSI
 import OMSI.helpers as helpers
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'figS3')
@@ -95,7 +97,7 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
 
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        ['conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
          '--mode', 'inference',
          '--input',  input_path,
          '--output', output_path,
@@ -329,4 +331,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()

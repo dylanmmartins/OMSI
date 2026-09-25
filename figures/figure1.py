@@ -42,6 +42,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 import time
 import numpy as np
@@ -55,6 +56,7 @@ from oasis.functions import deconvolve as oasis_deconv
 import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig1')
 
@@ -158,7 +160,7 @@ def _run_cascade_inference(dff, fs, n_cells, data_dir, prefix='fig1_cascade', de
 
     print('Calling CASCADE subprocess (n_cells={}, fs={}, device={})...'.format(n_cells, fs, device))
     subprocess.run(
-        ['conda', 'run', '-n', 'cascade', 'python', script,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', script,
          '--mode', 'inference',
          '--input', input_path,
          '--output', output_path,
@@ -966,13 +968,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.mode == 'test':
-        run_test(
-            data_dir    = args.data_dir,
-            run_omsi   = not args.no_omsi,
-            run_matlab  = not args.no_matlab,
-            run_oasis   = not args.no_oasis,
-            run_cascade = not args.no_cascade,
-        )
+        with no_power_throttling(verbose=True):
+            run_test(
+                data_dir    = args.data_dir,
+                run_omsi   = not args.no_omsi,
+                run_matlab  = not args.no_matlab,
+                run_oasis   = not args.no_oasis,
+                run_cascade = not args.no_cascade,
+            )
     elif args.mode == 'plot':
         plot_figure(data_dir=args.data_dir)
     else:
