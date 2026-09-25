@@ -2,7 +2,7 @@
 """
 figures/characterize_optimizations.py
 
-Benchmarks fMCSI optimizer settings and initialization strategies via parameter sweeps on synthetic data.
+Benchmarks OMSI optimizer settings and initialization strategies via parameter sweeps on synthetic data.
 
 Functions
 ---------
@@ -31,11 +31,11 @@ run_init_comparison
 plot_init_comparison
     Plot saved init comparison results.
 _make_foopsi_init
-    Build a FOOPSI-initialized fMCSI sample dict.
-run_fmcsi_init_comparison
-    Run fMCSI with NNLS vs. FOOPSI init and save results.
-plot_fmcsi_init_comparison
-    Plot saved fMCSI init comparison results.
+    Build a FOOPSI-initialized OMSI sample dict.
+run_omsi_init_comparison
+    Run OMSI with NNLS vs. FOOPSI init and save results.
+plot_omsi_init_comparison
+    Plot saved OMSI init comparison results.
 plot_combined_init
     Plot combined init comparison figure.
 _build_tol_grid
@@ -56,6 +56,22 @@ plot_burn_tol_sweep
     Plot saved burn-in tolerance sweep.
 plot_combined_opt
     Plot combined optimization parameter sweep figure.
+run_add_move_sweep
+    Run sweep over add/remove proposal counts and save results.
+_plot_add_move_row
+    Draw add/remove sweep panels into a row of axes.
+plot_add_move_sweep
+    Plot combined_opt with add/remove sweep as extra top row.
+_rel_err_curves
+    Smoothed relative distance of spike-count traces from their plateau.
+_pop_conv_sweeps
+    Sweeps until the median-over-cells error drops below threshold for good.
+_add_move_dur_task
+    Worker: run one chain and return its spike-count trace.
+run_add_move_duration_sweep
+    Sweep recording duration and add/remove count together, save chains.
+plot_add_move_duration
+    Plot sweeps-to-converge vs. duration and minimal add/remove count.
 _dff_snr
     Estimate SNR of a dF/F trace.
 run_snr_filter_sweep
@@ -209,7 +225,7 @@ def _build_T_supp_grid(default_supp, T, n_shorter=8, n_longer=8):
 
 
 def run_T_supp_sweep(data_dir):
-    """Run a sweep over T_supp values, benchmark fMCSI on a synthetic population, and save results.
+    """Run a sweep over T_supp values, benchmark OMSI on a synthetic population, and save results.
 
     Parameters
     ----------
@@ -720,7 +736,7 @@ def plot_init_comparison(data_dir):
 
 
 def _make_foopsi_init(Y_cell, fs, tau=_TAU, p=2):
-    """Build an fMCSI-compatible sample dict initialized from the FOOPSI spike estimate.
+    """Build an OMSI-compatible sample dict initialized from the FOOPSI spike estimate.
 
     Parameters
     ----------
@@ -736,7 +752,7 @@ def _make_foopsi_init(Y_cell, fs, tau=_TAU, p=2):
     Returns
     -------
     dict
-        fMCSI sample dict with FOOPSI-derived spiketimes_, lam_, and C_in fields.
+        OMSI sample dict with FOOPSI-derived spiketimes_, lam_, and C_in fields.
     """
     init_params = {'f': fs, 'p': p, 'defg': [0.6, 0.95]}
     SAM = dict(get_init_sample(Y_cell, init_params))
@@ -760,8 +776,8 @@ def _make_foopsi_init(Y_cell, fs, tau=_TAU, p=2):
     return SAM
 
 
-def run_fmcsi_init_comparison(data_dir):
-    """Run fMCSI with NNLS and FOOPSI inits on a synthetic population and save accuracy results.
+def run_omsi_init_comparison(data_dir):
+    """Run OMSI with NNLS and FOOPSI inits on a synthetic population and save accuracy results.
 
     Parameters
     ----------
@@ -769,7 +785,7 @@ def run_fmcsi_init_comparison(data_dir):
         Directory where the output .npz file is written.
     """
     os.makedirs(data_dir, exist_ok=True)
-    out_path = os.path.join(data_dir, 'fmcsi_init_comparison.npz')
+    out_path = os.path.join(data_dir, 'omsi_init_comparison.npz')
 
     print('Generating synthetic population '
           '(n={}, T={}s, fs={}Hz, tau={}s)...'.format(
@@ -785,7 +801,7 @@ def run_fmcsi_init_comparison(data_dir):
 
     base_params = {'f': _FS, 'p': 2, 'auto_stop': True}
 
-    print('Running fMCSI with NNLS init (full population)...')
+    print('Running OMSI with NNLS init (full population)...')
     p_n = dict(base_params, init=None)
     r_n = OMSI.deconv(dff, params=p_n, true_spikes=true_spikes, benchmark=True)
     nnls_times    = r_n['optim_times_per_cell']
@@ -799,7 +815,7 @@ def run_fmcsi_init_comparison(data_dir):
     else:
         nnls_fb = np.full(_N_CELLS, np.nan)
 
-    print('Running fMCSI with FOOPSI init (full population)...')
+    print('Running OMSI with FOOPSI init (full population)...')
     p_f = dict(base_params, init=foopsi_inits)
     r_f = OMSI.deconv(dff, params=p_f, true_spikes=true_spikes, benchmark=True)
     foopsi_times    = r_f['optim_times_per_cell']
@@ -841,15 +857,15 @@ def run_fmcsi_init_comparison(data_dir):
     print('\nSaved to {}.'.format(out_path))
 
 
-def plot_fmcsi_init_comparison(data_dir):
-    """Plot example traces, timing histograms, and F_beta histograms from a saved fMCSI init comparison.
+def plot_omsi_init_comparison(data_dir):
+    """Plot example traces, timing histograms, and F_beta histograms from a saved OMSI init comparison.
 
     Parameters
     ----------
     data_dir : str
-        Directory containing the fmcsi_init_comparison.npz file.
+        Directory containing the omsi_init_comparison.npz file.
     """
-    out_path = os.path.join(data_dir, 'fmcsi_init_comparison.npz')
+    out_path = os.path.join(data_dir, 'omsi_init_comparison.npz')
     if not os.path.exists(out_path):
         raise FileNotFoundError(f'No data at {out_path}. Run --mode conv-test first.')
 
@@ -960,22 +976,22 @@ def plot_fmcsi_init_comparison(data_dir):
     ax_f.legend(frameon=False, fontsize=6, loc='upper left', reverse=True)
 
     for sfx in ('png', 'svg'):
-        out = os.path.join(data_dir, 'fmcsi_init_comparison.{}'.format(sfx))
+        out = os.path.join(data_dir, 'omsi_init_comparison.{}'.format(sfx))
         fig.savefig(out, dpi=300, bbox_inches='tight')
         print('Saved to {}.'.format(out))
     plt.close(fig)
 
 
 def plot_combined_init(data_dir):
-    """Plot a combined figure merging raw init traces, timing, and fMCSI accuracy comparisons.
+    """Plot a combined figure merging raw init traces, timing, and OMSI accuracy comparisons.
 
     Parameters
     ----------
     data_dir : str
-        Directory containing init_comparison.npz and fmcsi_init_comparison.npz.
+        Directory containing init_comparison.npz and omsi_init_comparison.npz.
     """
     init_path = os.path.join(data_dir, 'init_comparison.npz')
-    conv_path = os.path.join(data_dir, 'fmcsi_init_comparison.npz')
+    conv_path = os.path.join(data_dir, 'omsi_init_comparison.npz')
     for p in (init_path, conv_path):
         if not os.path.exists(p):
             raise FileNotFoundError(f'No data at {p}. Run the corresponding test mode first.')
@@ -1191,7 +1207,7 @@ def _build_tol_grid(default_val, lower_mult, upper_mult, n_below=4, n_above=5):
 
 
 def _run_tol_sweep(dff, true_spikes, param_name, grid, fs, min_sweeps):
-    """Run fMCSI across a grid of tolerance values and collect accuracy/timing rows.
+    """Run OMSI across a grid of tolerance values and collect accuracy/timing rows.
 
     Parameters
     ----------
@@ -1200,13 +1216,13 @@ def _run_tol_sweep(dff, true_spikes, param_name, grid, fs, min_sweeps):
     true_spikes : list of ndarray
         Ground-truth spike times per cell in seconds.
     param_name : str
-        Name of the fMCSI parameter to sweep (e.g. 'conv_tol').
+        Name of the OMSI parameter to sweep (e.g. 'conv_tol').
     grid : list of float
         Values to test for param_name.
     fs : float
         Sampling rate in Hz.
     min_sweeps : int
-        Minimum sweep count passed to fMCSI.
+        Minimum sweep count passed to OMSI.
 
     Returns
     -------
@@ -1431,14 +1447,18 @@ def plot_burn_tol_sweep(data_dir):
                     'burn-in completion threshold', 'burn_tol_sweep')
 
 
-def plot_combined_opt(data_dir):
+def plot_combined_opt(data_dir, add_move=False):
     """Plot a 4x3 combined figure of all optimization parameter sweeps.
 
     Parameters
     ----------
     data_dir : str
         Directory containing T_supp_sweep.npz, conv_tol_sweep.npz,
-        burn_tol_sweep.npz, and snr_threshold_sweep.npz.
+        burn_tol_sweep.npz, and snr_threshold_sweep.npz (plus
+        add_move_sweep.npz if add_move).
+    add_move : bool, optional
+        Prepend a row of F_beta and CosMIC vs. add/remove proposal count and
+        save as combined_opt_add_move instead of combined_opt. Default is False.
     """
     t_supp_path   = os.path.join(data_dir, 'T_supp_sweep.npz')
     conv_tol_path = os.path.join(data_dir, 'conv_tol_sweep.npz')
@@ -1448,7 +1468,12 @@ def plot_combined_opt(data_dir):
         if not os.path.exists(p):
             raise FileNotFoundError(f'No data at {p}.')
 
-    fig, axes = plt.subplots(4, 3, figsize=(7.2, 9.0), dpi=300)
+    if add_move:
+        fig, all_axes = plt.subplots(5, 3, figsize=(7.2, 11.25), dpi=300)
+        _plot_add_move_row(data_dir, all_axes[0])
+        axes = all_axes[1:]
+    else:
+        fig, axes = plt.subplots(4, 3, figsize=(7.2, 9.0), dpi=300)
 
     def _sweeps_panel(ax, x, mns, sns, xlabel):
         """Plot median sweep count with MAD shading on ax."""
@@ -1602,10 +1627,294 @@ def plot_combined_opt(data_dir):
 
     fig.tight_layout()
     for sfx in ('png', 'svg'):
-        out = os.path.join(data_dir, 'combined_opt.{}'.format(sfx))
+        stem = 'combined_opt_add_move' if add_move else 'combined_opt'
+        out = os.path.join(data_dir, '{}.{}'.format(stem, sfx))
         fig.savefig(out, dpi=300, bbox_inches='tight')
         print('Saved to {}.'.format(out))
     plt.close(fig)
+
+
+_ADD_MOVE_DURATION = 120.0
+_ADD_MOVE_N_CELLS  = 50
+_ADD_MOVE_GRID     = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+
+
+def run_add_move_sweep(data_dir):
+
+    os.makedirs(data_dir, exist_ok=True)
+    out_path = os.path.join(data_dir, 'add_move_sweep.npz')
+
+    # Sampler default is ceil(T / 500) pairs per sweep.
+    n_frames    = int(_ADD_MOVE_DURATION * _FS)
+    default_val = int(np.ceil(n_frames / 500))
+    grid        = _ADD_MOVE_GRID
+    print('add_move sweep: {} (default={}, T={} frames, {} cells)'.format(
+        grid, default_val, n_frames, _ADD_MOVE_N_CELLS))
+
+    # Same low-SNR population as the tolerance sweeps.
+    snr = np.clip(_TEST_SNR_FLOOR + np.random.exponential(_TEST_SNR_SCALE, size=_ADD_MOVE_N_CELLS),
+                  _TEST_SNR_FLOOR, _TEST_SNR_MAX)
+    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+        n_cells=_ADD_MOVE_N_CELLS, fs=_FS, duration=_ADD_MOVE_DURATION, tau=_TAU, snr=snr)
+
+    n = len(grid)
+    med_fb, mad_fb = np.full(n, np.nan), np.full(n, np.nan)
+    med_cosmic, mad_cosmic = np.full(n, np.nan), np.full(n, np.nan)
+    med_time, med_nsweeps = np.full(n, np.nan), np.full(n, np.nan)
+
+    for k, val in enumerate(grid):
+        print('\n  [{}/{}] add_move={} ...'.format(k + 1, n, val))
+        params = {
+            'f': _FS, 'p': 2, 'auto_stop': True, 'upd_gam': 0,
+            'conv_tol': _DEFAULT_CONV_TOL, 'burn_tol': _DEFAULT_BURN_TOL,
+            'add_move': int(val),
+        }
+        try:
+            res = OMSI.deconv(dff, params=params, benchmark=True)
+            pred = res['optim_spikes']
+            prec_s, rec_s, _ = helpers.compute_accuracy_strict(true_spikes, pred)
+            fb = np.array([_fbeta(float(prec_s[i]), float(rec_s[i]))
+                           for i in range(len(prec_s))])
+            cosmic = helpers.compute_cosmic(true_spikes, pred, _FS)
+            med_fb[k], mad_fb[k] = float(np.nanmedian(fb)), float(_mad(fb))
+            med_cosmic[k], mad_cosmic[k] = float(np.nanmedian(cosmic)), float(_mad(cosmic))
+            med_time[k] = float(np.median(res['optim_times_per_cell']))
+            med_nsweeps[k] = float(np.median(res['optim_nsamples']))
+            print('    F_beta={:.3f} ± {:.3f}  CosMIC={:.3f} ± {:.3f}  '
+                  'cell={:.3f}s  sweeps={:.1f}'.format(
+                      med_fb[k], mad_fb[k], med_cosmic[k], mad_cosmic[k],
+                      med_time[k], med_nsweeps[k]))
+        except Exception as exc:
+            print('    FAILED: {}'.format(exc))
+
+    np.savez(
+        out_path,
+        add_move=np.array(grid), med_fb=med_fb, mad_fb=mad_fb,
+        med_cosmic=med_cosmic, mad_cosmic=mad_cosmic,
+        med_time=med_time, med_nsweeps=med_nsweeps,
+        default_val=np.array([default_val]),
+    )
+    print('\nSaved to {}.'.format(out_path))
+
+
+def _plot_add_move_row(data_dir, axes):
+
+    path = os.path.join(data_dir, 'add_move_sweep.npz')
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'No data at {path}. Run --mode add-move-test first.')
+
+    d = np.load(path)
+    x = d['add_move'].astype(float)
+    default_val = float(d['default_val'][0])
+
+    for ax, med, mad, ylabel in [
+        (axes[0], d['med_fb'],     d['mad_fb'],     '$F_\\beta$'),
+        (axes[1], d['med_cosmic'], d['mad_cosmic'], 'CosMIC'),
+    ]:
+        valid = np.isfinite(med) & np.isfinite(mad)
+        xv, y, ye = x[valid], med[valid], mad[valid]
+        ax.fill_between(xv, np.clip(y - ye, 0, 1), np.clip(y + ye, 0, 1),
+                        color=_COLOR, alpha=0.25, linewidth=0)
+        ax.plot(xv, y, '.-', color=_COLOR, zorder=3)
+        ax.axvline(default_val, color='k', linestyle='--',
+                   linewidth=0.8, alpha=0.6)
+        ax.set_xlabel('spike add/remove proposals per sweep')
+        ax.set_ylabel(ylabel)
+        ax.set_xscale('log', base=2)
+        ax.set_xlim(x.min(), x.max())
+        ax.set_ylim(0, 1)
+
+    for ax in axes[2:]:
+        ax.axis('off')
+
+
+def plot_add_move_sweep(data_dir):
+
+    plot_combined_opt(data_dir, add_move=True)
+
+
+# Duration x add_move sweep. Durations are chosen so n_frames = 500 * 2^k,
+# making the sampler default ceil(T / 500) exactly 2, 4, 8, 16, 32.
+_ADM_FRAMES    = [1000, 2000, 4000, 8000, 16000]
+_ADM_GRID      = [1, 2, 4, 8, 16, 32, 64, 128]
+_ADM_N_CELLS   = 100
+_ADM_SEED      = 7          # Seeds the population, the data, and every chain.
+_ADM_SWEEPS    = 2000       # Fixed chain length; auto_stop is off.
+_ADM_CONV_THR  = 0.10       # Converged when median-over-cells |count - plateau| / plateau < 10%.
+_ADM_SMOOTH    = 10         # Moving-average window on each spike-count trace.
+_ADM_FLOOR     = 25         # Sweeps; best-case floor when judging "reached plateau".
+_ADM_PLATEAU_SLACK = 2.0    # "Reached plateau" = within 2x of the best add_move.
+
+
+def _rel_err_curves(ns, ref):
+
+    k = _ADM_SMOOTH
+    c = np.cumsum(np.insert(np.asarray(ns, dtype=float), 0, 0.0, axis=-1), axis=-1)
+    sm = (c[..., k:] - c[..., :-k]) / k
+    return np.abs(sm - ref[..., None]) / np.maximum(ref[..., None], 1.0)
+
+
+def _pop_conv_sweeps(err):
+
+    med = np.median(err, axis=0)
+    bad = np.where(med > _ADM_CONV_THR)[0]
+    return 0 if len(bad) == 0 else int(bad[-1] + _ADM_SMOOTH)
+
+
+def _add_move_dur_task(args):
+
+    from OMSI.sampler import cont_ca_sampler
+    y, add_move, seed = args
+    params = {
+        'f': _FS, 'p': 2, 'upd_gam': 0, 'auto_stop': False,
+        'B': 0, 'Nsamples': _ADM_SWEEPS, 'add_move': int(add_move),
+        'return_full': True, 'seed': int(seed),
+    }
+    # 'seed' only reaches the numba kernel; the init draws from numpy's RNG first.
+    np.random.seed(int(seed))
+    t0 = time.time()
+    res = cont_ca_sampler(y, params)
+    elapsed = time.time() - t0
+    ns = np.asarray(res['chain']['ns'], dtype=np.int32)
+    out = np.full(_ADM_SWEEPS, -1, dtype=np.int32)
+    out[:min(len(ns), _ADM_SWEEPS)] = ns[:_ADM_SWEEPS]
+    return out, elapsed
+
+
+def run_add_move_duration_sweep(data_dir, n_workers=None):
+
+    from multiprocessing import Pool
+    os.makedirs(data_dir, exist_ok=True)
+    out_path = os.path.join(data_dir, 'add_move_duration.npz')
+
+    nT, nA, nC = len(_ADM_FRAMES), len(_ADM_GRID), _ADM_N_CELLS
+    ns_all = np.full((nT, nA, nC, _ADM_SWEEPS), -1, dtype=np.int32)
+    times = np.full((nT, nA, nC), np.nan)
+
+    # One long recording, cropped to each duration, so every duration scores the same cells.
+    np.random.seed(_ADM_SEED)
+    snr = np.clip(_TEST_SNR_FLOOR + np.random.exponential(_TEST_SNR_SCALE, size=nC),
+                  _TEST_SNR_FLOOR, _TEST_SNR_MAX)
+    # +0.5 frame so int(fs * duration) inside the generator can't round down.
+    dff_full, _, _, _, _, _ = generate_synthetic_data(
+        n_cells=nC, fs=_FS, duration=(max(_ADM_FRAMES) + 0.5) / _FS, tau=_TAU, snr=snr)
+    assert dff_full.shape[1] == max(_ADM_FRAMES), dff_full.shape
+
+    with Pool(n_workers) as pool:
+        for i, n_frames in enumerate(_ADM_FRAMES):
+            dff = dff_full[:, :n_frames]
+            # Chain seed depends on the cell only, so every add_move and duration reuses
+            # the same random stream for that cell.
+            tasks = [(dff[c], am, _ADM_SEED + c)
+                     for am in _ADM_GRID for c in range(nC)]
+            print('\n[{}/{}] T={} frames (default add_move={}): {} chains'.format(
+                i + 1, nT, n_frames, int(np.ceil(n_frames / 500)), len(tasks)))
+            t0 = time.time()
+            for j, (ns, el) in enumerate(pool.imap(_add_move_dur_task, tasks)):
+                a, c = divmod(j, nC)
+                ns_all[i, a, c] = ns
+                times[i, a, c] = el
+            print('  done in {:.0f}s'.format(time.time() - t0))
+            np.savez(out_path, frames=np.array(_ADM_FRAMES[:i + 1]),
+                     grid=np.array(_ADM_GRID), ns=ns_all[:i + 1], times=times[:i + 1],
+                     snr=snr)
+    print('\nSaved to {}.'.format(out_path))
+
+
+def plot_add_move_duration(data_dir):
+
+    path = os.path.join(data_dir, 'add_move_duration.npz')
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'No data at {path}. Run --mode add-move-dur-test first.')
+    d = np.load(path)
+    frames, grid, ns, times = d['frames'], d['grid'], d['ns'], d['times']
+    nT, nA, nC, nS = ns.shape
+    rng = np.random.RandomState(0)
+
+    tail = ns[..., -nS // 4:]
+    ref = np.median(np.median(tail, axis=-1), axis=1)            # (nT, nC)
+
+    err = _rel_err_curves(ns, ref[:, None, :])                   # (nT, nA, nC, steps)
+    conv = np.array([[_pop_conv_sweeps(err[i, a]) for a in range(nA)] for i in range(nT)])
+
+    n_boot = 200
+    boot_idx = rng.randint(0, nC, (n_boot, nC))
+    conv_b = np.array([[[_pop_conv_sweeps(err[i, a][idx]) for idx in boot_idx]
+                        for a in range(nA)] for i in range(nT)])      # (nT, nA, n_boot)
+    lo_c, hi_c = np.percentile(conv_b, 25, axis=-1), np.percentile(conv_b, 75, axis=-1)
+
+    cmap = plt.get_cmap('viridis')
+    colors = [cmap(v) for v in np.linspace(0.05, 0.9, nT)]
+    default = np.ceil(frames / 500).astype(int)
+    a_def = np.array([int(np.where(grid == v)[0][0]) for v in default])
+    a_fixed = int(np.where(grid == 8)[0][0])
+    x = frames / _FS
+
+    fig, axes = plt.subplots(1, 4, figsize=(11, 2.4), constrained_layout=True)
+    ax_a, ax_b, ax_c, ax_d = axes
+
+    for i in range(nT):
+        ax_a.fill_between(grid, lo_c[i], hi_c[i], color=colors[i], alpha=0.15, linewidth=0)
+        ax_a.plot(grid, conv[i], '-', color=colors[i],
+                  label='{:g} s'.format(round(x[i])))
+        ax_a.plot(grid[a_def[i]], conv[i, a_def[i]], '*', color=colors[i], mec='k',
+                  mew=0.5, ms=8, zorder=4)
+    ax_a.set_xscale('log', base=2)
+    ax_a.set_xlabel('add/remove proposals per sweep')
+    ax_a.set_ylabel('sweeps to converge')
+    ax_a.legend(frameon=False, fontsize=5, title='duration', title_fontsize=5)
+
+    idx_sc = (np.arange(nT), a_def)
+    for series, series_lo, series_hi, col, lab in [
+            (conv[:, a_fixed], lo_c[:, a_fixed], hi_c[:, a_fixed], '#C44E52', 'fixed (8)'),
+            (conv[idx_sc], lo_c[idx_sc], hi_c[idx_sc], _COLOR, '$\\lceil T/500\\rceil$')]:
+        ax_b.fill_between(x, series_lo, series_hi, color=col, alpha=0.2, linewidth=0)
+        ax_b.plot(x, series, '.-', color=col, label=lab)
+    ax_b.set_xscale('log', base=2)
+    ax_b.set_xlabel('recording duration (s)')
+    ax_b.set_ylabel('sweeps to converge')
+    ax_b.set_ylim(bottom=0)
+    ax_b.legend(frameon=False, fontsize=6, title='add/remove', title_fontsize=6)
+
+    t_sweep = times / nS
+    for v, col, lab in [(t_sweep[:, a_fixed], '#C44E52', 'fixed (8)'),
+                        (t_sweep[idx_sc], _COLOR, '$\\lceil T/500\\rceil$')]:
+        ax_c.plot(x, np.median(v, axis=-1) * 1e3, '.-', color=col, label=lab)
+    ax_c.set_xscale('log', base=2)
+    ax_c.set_yscale('log')
+    ax_c.set_xlabel('recording duration (s)')
+    ax_c.set_ylabel('time per sweep (ms)')
+
+    # (d) smallest add_move reaching plateau: within slack x of the best setting
+    def smallest(c):
+        thr = _ADM_PLATEAU_SLACK * max(c.min(), _ADM_FLOOR)
+        return grid[int(np.argmax(c <= thr))]
+
+    best = np.array([smallest(conv[i]) for i in range(nT)], dtype=float)
+    boots = np.array([[smallest(conv_b[i, :, b]) for b in range(n_boot)] for i in range(nT)],
+                     dtype=float)
+    lo_b, hi_b = np.percentile(boots, 25, axis=1), np.percentile(boots, 75, axis=1)
+    ax_d.errorbar(x, best, yerr=[best - lo_b, hi_b - best], fmt='o', color='k', ms=3,
+                  lw=0.8, capsize=2, label='smallest reaching plateau')
+    xx = np.array([x.min(), x.max()])
+    ax_d.plot(xx, xx * _FS / 500, '--', color=_COLOR, lw=0.9, label='$T/500$')
+    ax_d.set_xscale('log', base=2)
+    ax_d.set_yscale('log', base=2)
+    ax_d.set_xlabel('recording duration (s)')
+    ax_d.set_ylabel('minimal add/remove per sweep')
+    ax_d.legend(frameon=False, fontsize=6)
+
+    for ax, letter in zip(axes, 'abcd'):
+        ax.text(-0.25, 1.05, letter, transform=ax.transAxes, fontsize=9, fontweight='bold')
+
+    for sfx in ('png', 'svg'):
+        out = os.path.join(data_dir, 'add_move_duration.{}'.format(sfx))
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print('Saved to {}.'.format(out))
+    plt.close(fig)
+
 
 
 def _dff_snr(fluo):
@@ -1629,7 +1938,7 @@ def _dff_snr(fluo):
 
 
 def run_snr_filter_sweep(data_dir):
-    """Run fMCSI without SNR pre-filtering and save per-cell accuracy vs. SNR.
+    """Run OMSI without SNR pre-filtering and save per-cell accuracy vs. SNR.
 
     Parameters
     ----------
@@ -1763,7 +2072,7 @@ _SNR_N_LEVELS       = 18
 
 
 def run_snr_threshold_sweep(data_dir):
-    """Run fMCSI across a range of fixed SNR levels and save accuracy results.
+    """Run OMSI across a range of fixed SNR levels and save accuracy results.
 
     Parameters
     ----------
@@ -1929,9 +2238,9 @@ def print_snr_stats(fig4_data_dir):
     Parameters
     ----------
     fig4_data_dir : str
-        Root directory containing the ground_truth_traces_fmcsi/ subdirectory.
+        Root directory containing the ground_truth_traces_omsi/ subdirectory.
     """
-    traces_dir = os.path.join(fig4_data_dir, 'ground_truth_traces_fmcsi')
+    traces_dir = os.path.join(fig4_data_dir, 'ground_truth_traces_omsi')
     if not os.path.isdir(traces_dir):
         print('Traces directory not found: {}'.format(traces_dir))
         return
@@ -1972,7 +2281,7 @@ def print_snr_stats(fig4_data_dir):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(
-        description='T_supp sensitivity and init comparison benchmarks for fMCSI'
+        description='T_supp sensitivity and init comparison benchmarks for OMSI'
     )
     parser.add_argument(
         '--mode', required=True,
@@ -1994,6 +2303,10 @@ if __name__ == '__main__':
             'snr-thresh-test',
             'snr-thresh-plot',
             'snr-stats',
+            'add-move-test',
+            'add-move-plot',
+            'add-move-dur-test',
+            'add-move-dur-plot',
         ],
     )
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
@@ -2005,38 +2318,45 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    with no_power_throttling(verbose=True):
-        if args.mode == 'test':
-            run_T_supp_sweep(args.data_dir)
-        elif args.mode == 'plot':
-            plot_T_supp_sweep(args.data_dir)
-        elif args.mode == 'init-test':
-            run_init_comparison(args.data_dir)
-        elif args.mode == 'init-plot':
-            plot_init_comparison(args.data_dir)
-        elif args.mode == 'conv-test':
-            run_fmcsi_init_comparison(args.data_dir)
-        elif args.mode == 'conv-plot':
-            plot_fmcsi_init_comparison(args.data_dir)
-        elif args.mode == 'combined-plot':  ### THIS ONE
-            plot_combined_init(args.data_dir)
-        elif args.mode == 'tol-conv-test':
-            run_conv_tol_sweep(args.data_dir)
-        elif args.mode == 'tol-conv-plot':
-            plot_conv_tol_sweep(args.data_dir)
-        elif args.mode == 'tol-burn-test':
-            run_burn_tol_sweep(args.data_dir)
-        elif args.mode == 'tol-burn-plot':
-            plot_burn_tol_sweep(args.data_dir)
-        elif args.mode == 'combined-opt-plot': ### AND THIS ONE
-            plot_combined_opt(args.data_dir)
-        elif args.mode == 'snr-filter-test':
-            run_snr_filter_sweep(args.data_dir)
-        elif args.mode == 'snr-filter-plot':
-            plot_snr_filter_sweep(args.data_dir)
-        elif args.mode == 'snr-thresh-test':
-            run_snr_threshold_sweep(args.data_dir)
-        elif args.mode == 'snr-thresh-plot':
-            plot_snr_threshold_sweep(args.data_dir)
-        elif args.mode == 'snr-stats':
-            print_snr_stats(args.fig4_data_dir)
+    if args.mode == 'test':
+        run_T_supp_sweep(args.data_dir)
+    elif args.mode == 'plot':
+        plot_T_supp_sweep(args.data_dir)
+    elif args.mode == 'init-test':
+        run_init_comparison(args.data_dir)
+    elif args.mode == 'init-plot':
+        plot_init_comparison(args.data_dir)
+    elif args.mode == 'conv-test':
+        run_omsi_init_comparison(args.data_dir)
+    elif args.mode == 'conv-plot':
+        plot_omsi_init_comparison(args.data_dir)
+    elif args.mode == 'combined-plot':  ### THIS ONE
+        plot_combined_init(args.data_dir)
+    elif args.mode == 'tol-conv-test':
+        run_conv_tol_sweep(args.data_dir)
+    elif args.mode == 'tol-conv-plot':
+        plot_conv_tol_sweep(args.data_dir)
+    elif args.mode == 'tol-burn-test':
+        run_burn_tol_sweep(args.data_dir)
+    elif args.mode == 'tol-burn-plot':
+        plot_burn_tol_sweep(args.data_dir)
+    elif args.mode == 'combined-opt-plot': ### AND THIS ONE
+        plot_combined_opt(args.data_dir)
+    elif args.mode == 'snr-filter-test':
+        run_snr_filter_sweep(args.data_dir)
+    elif args.mode == 'snr-filter-plot':
+        plot_snr_filter_sweep(args.data_dir)
+    elif args.mode == 'snr-thresh-test':
+        run_snr_threshold_sweep(args.data_dir)
+    elif args.mode == 'snr-thresh-plot':
+        plot_snr_threshold_sweep(args.data_dir)
+    elif args.mode == 'add-move-test':
+        run_add_move_sweep(args.data_dir)
+    elif args.mode == 'add-move-plot':
+        plot_add_move_sweep(args.data_dir)
+    elif args.mode == 'add-move-dur-test':
+        run_add_move_duration_sweep(args.data_dir)
+    elif args.mode == 'add-move-dur-plot':
+        plot_add_move_duration(args.data_dir)
+    elif args.mode == 'snr-stats':
+        print_snr_stats(args.fig4_data_dir)
