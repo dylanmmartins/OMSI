@@ -56,6 +56,7 @@ from scipy.ndimage import gaussian_filter1d
 import numba
 
 from . import helpers
+from ._win_perf import no_power_throttling
 from .sampler import cont_ca_sampler
 from .make_mean_sample import make_mean_sample
 
@@ -301,6 +302,7 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
     }
 
 
+@no_power_throttling() # on Windows, keep the OS from throttling Ray workers
 def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     """Initialize Ray, dispatch one _process_cell task per cell, collect results.
 

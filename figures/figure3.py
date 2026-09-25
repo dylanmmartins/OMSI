@@ -110,6 +110,7 @@ from oasis.functions import deconvolve
 
 import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig3')
 _MATLAB_DATA_DIR  = '/home/dylan/Fast2/spike_deconv/figures_output_data_260421/data/fig3'
@@ -2257,4 +2258,5 @@ def main():
 
 if __name__ == '__main__':
 
-    main()
+    with no_power_throttling(verbose=True):
+        main()

@@ -88,6 +88,7 @@ import OMSI
 import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from oasis.functions import deconvolve as oasis_deconv
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig4')
 
@@ -1291,4 +1292,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()

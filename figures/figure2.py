@@ -106,6 +106,7 @@ import OMSI
 import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 _MATLAB_PRECOMPUTED_DIR    = '/home/dylan/Fast2/spike_deconv/sweeping_benchmarks/all_other_methods'
 _CASCADE_DURATION_ALT_DIR  = '/home/dylan/Fast2/spike_deconv/sweeping_benchmarks/cascade'
@@ -2331,41 +2332,42 @@ if __name__ == '__main__':
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
     args = parser.parse_args()
 
-    if args.mode == 'test':
-        run_test(
-            data_dir    = args.data_dir,
-            run_omsi   = not args.no_omsi,
-            run_matlab  = not args.no_matlab,
-            run_oasis   = not args.no_oasis,
-            run_cascade = not args.no_cascade,
-        )
-    elif args.mode == 'noise-cells':
-        os.makedirs(args.data_dir, exist_ok=True)
-        print('=== Noise sensitivity cell-level benchmark (cells_only) ===')
-        benchmark_noise_sensitivity(
-            args.data_dir,
-            run_oasis   = not args.no_oasis,
-            run_matlab  = not args.no_matlab,
-            run_mine    = not args.no_omsi,
-            run_cascade = not args.no_cascade,
-            cells_only  = True,
-        )
-    elif args.mode == 'cascade-samplerate':
-        os.makedirs(args.data_dir, exist_ok=True)
-        print('=== CASCADE 7.5 Hz vs 30 Hz comparison ===')
-        benchmark_cascade_sample_rate(args.data_dir, run_cascade=not args.no_cascade)
-    elif args.mode == 'fs-sensitivity':
-        os.makedirs(args.data_dir, exist_ok=True)
-        print('=== Frame-rate sensitivity benchmark (fs only) ===')
-        benchmark_params(
-            args.data_dir,
-            run_oasis   = not args.no_oasis,
-            run_matlab  = not args.no_matlab,
-            run_mine    = not args.no_omsi,
-            run_cascade = not args.no_cascade,
-            experiments = ('fs',),
-        )
-    elif args.mode == 'print':
-        print_stats(data_dir=args.data_dir)
-    else:
-        plot_figure(data_dir=args.data_dir)
+    with no_power_throttling(verbose=True):
+        if args.mode == 'test':
+            run_test(
+                data_dir    = args.data_dir,
+                run_omsi   = not args.no_omsi,
+                run_matlab  = not args.no_matlab,
+                run_oasis   = not args.no_oasis,
+                run_cascade = not args.no_cascade,
+            )
+        elif args.mode == 'noise-cells':
+            os.makedirs(args.data_dir, exist_ok=True)
+            print('=== Noise sensitivity cell-level benchmark (cells_only) ===')
+            benchmark_noise_sensitivity(
+                args.data_dir,
+                run_oasis   = not args.no_oasis,
+                run_matlab  = not args.no_matlab,
+                run_mine    = not args.no_omsi,
+                run_cascade = not args.no_cascade,
+                cells_only  = True,
+            )
+        elif args.mode == 'cascade-samplerate':
+            os.makedirs(args.data_dir, exist_ok=True)
+            print('=== CASCADE 7.5 Hz vs 30 Hz comparison ===')
+            benchmark_cascade_sample_rate(args.data_dir, run_cascade=not args.no_cascade)
+        elif args.mode == 'fs-sensitivity':
+            os.makedirs(args.data_dir, exist_ok=True)
+            print('=== Frame-rate sensitivity benchmark (fs only) ===')
+            benchmark_params(
+                args.data_dir,
+                run_oasis   = not args.no_oasis,
+                run_matlab  = not args.no_matlab,
+                run_mine    = not args.no_omsi,
+                run_cascade = not args.no_cascade,
+                experiments = ('fs',),
+            )
+        elif args.mode == 'print':
+            print_stats(data_dir=args.data_dir)
+        else:
+            plot_figure(data_dir=args.data_dir)

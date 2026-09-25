@@ -93,6 +93,7 @@ from OMSI.get_init_sample import (
     _get_sn, _estimate_time_constants, _ar_kernel, _block_nnls_deconv,
 )
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'opt'
@@ -2004,37 +2005,38 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    if args.mode == 'test':
-        run_T_supp_sweep(args.data_dir)
-    elif args.mode == 'plot':
-        plot_T_supp_sweep(args.data_dir)
-    elif args.mode == 'init-test':
-        run_init_comparison(args.data_dir)
-    elif args.mode == 'init-plot':
-        plot_init_comparison(args.data_dir)
-    elif args.mode == 'conv-test':
-        run_fmcsi_init_comparison(args.data_dir)
-    elif args.mode == 'conv-plot':
-        plot_fmcsi_init_comparison(args.data_dir)
-    elif args.mode == 'combined-plot':  ### THIS ONE
-        plot_combined_init(args.data_dir)
-    elif args.mode == 'tol-conv-test':
-        run_conv_tol_sweep(args.data_dir)
-    elif args.mode == 'tol-conv-plot':
-        plot_conv_tol_sweep(args.data_dir)
-    elif args.mode == 'tol-burn-test':
-        run_burn_tol_sweep(args.data_dir)
-    elif args.mode == 'tol-burn-plot':
-        plot_burn_tol_sweep(args.data_dir)
-    elif args.mode == 'combined-opt-plot': ### AND THIS ONE
-        plot_combined_opt(args.data_dir)
-    elif args.mode == 'snr-filter-test':
-        run_snr_filter_sweep(args.data_dir)
-    elif args.mode == 'snr-filter-plot':
-        plot_snr_filter_sweep(args.data_dir)
-    elif args.mode == 'snr-thresh-test':
-        run_snr_threshold_sweep(args.data_dir)
-    elif args.mode == 'snr-thresh-plot':
-        plot_snr_threshold_sweep(args.data_dir)
-    elif args.mode == 'snr-stats':
-        print_snr_stats(args.fig4_data_dir)
+    with no_power_throttling(verbose=True):
+        if args.mode == 'test':
+            run_T_supp_sweep(args.data_dir)
+        elif args.mode == 'plot':
+            plot_T_supp_sweep(args.data_dir)
+        elif args.mode == 'init-test':
+            run_init_comparison(args.data_dir)
+        elif args.mode == 'init-plot':
+            plot_init_comparison(args.data_dir)
+        elif args.mode == 'conv-test':
+            run_fmcsi_init_comparison(args.data_dir)
+        elif args.mode == 'conv-plot':
+            plot_fmcsi_init_comparison(args.data_dir)
+        elif args.mode == 'combined-plot':  ### THIS ONE
+            plot_combined_init(args.data_dir)
+        elif args.mode == 'tol-conv-test':
+            run_conv_tol_sweep(args.data_dir)
+        elif args.mode == 'tol-conv-plot':
+            plot_conv_tol_sweep(args.data_dir)
+        elif args.mode == 'tol-burn-test':
+            run_burn_tol_sweep(args.data_dir)
+        elif args.mode == 'tol-burn-plot':
+            plot_burn_tol_sweep(args.data_dir)
+        elif args.mode == 'combined-opt-plot': ### AND THIS ONE
+            plot_combined_opt(args.data_dir)
+        elif args.mode == 'snr-filter-test':
+            run_snr_filter_sweep(args.data_dir)
+        elif args.mode == 'snr-filter-plot':
+            plot_snr_filter_sweep(args.data_dir)
+        elif args.mode == 'snr-thresh-test':
+            run_snr_threshold_sweep(args.data_dir)
+        elif args.mode == 'snr-thresh-plot':
+            plot_snr_threshold_sweep(args.data_dir)
+        elif args.mode == 'snr-stats':
+            print_snr_stats(args.fig4_data_dir)

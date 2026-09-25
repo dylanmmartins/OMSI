@@ -43,6 +43,7 @@ from scipy.signal import find_peaks
 import OMSI
 from OMSI.helpers import compute_cosmic
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 mpl.rcParams['axes.spines.top']  = False
 mpl.rcParams['axes.spines.right'] = False
@@ -507,13 +508,14 @@ if __name__ == '__main__':
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
     args = parser.parse_args()
 
-    if args.mode == 'test':
-        run_test(
-            data_dir    = args.data_dir,
-            run_oasis   = not args.no_oasis,
-            run_cascade = not args.no_cascade,
-        )
-    elif args.mode == 'plot':
-        plot_figure(data_dir=args.data_dir)
-    else:
-        print_stats(data_dir=args.data_dir)
+    with no_power_throttling(verbose=True):
+        if args.mode == 'test':
+            run_test(
+                data_dir    = args.data_dir,
+                run_oasis   = not args.no_oasis,
+                run_cascade = not args.no_cascade,
+            )
+        elif args.mode == 'plot':
+            plot_figure(data_dir=args.data_dir)
+        else:
+            print_stats(data_dir=args.data_dir)

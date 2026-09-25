@@ -131,6 +131,7 @@ import OMSI.helpers as helpers
 from OMSI.sampler import cont_ca_sampler
 from OMSI.get_init_sample import get_init_sample
 from OMSI.deconv import spikes_from_samples, default_lag_s
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'convergence')
@@ -1544,4 +1545,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()

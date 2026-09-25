@@ -39,6 +39,7 @@ from matplotlib.patches import Patch
 
 import OMSI
 import OMSI.helpers as helpers
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'figS3')
@@ -329,4 +330,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()

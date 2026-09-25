@@ -47,6 +47,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib as mpl
+from OMSI._win_perf import no_power_throttling
 
 mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
@@ -629,4 +630,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()
