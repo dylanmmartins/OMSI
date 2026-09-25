@@ -69,6 +69,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -662,7 +663,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
             np.savez(in_path, dff=dff_2d, fs=np.float32(fs))
             try:
                 subprocess.run(
-                    ['conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
+                    [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
                      '--mode', 'inference',
                      '--model', model_name,
                      '--input',  in_path,
