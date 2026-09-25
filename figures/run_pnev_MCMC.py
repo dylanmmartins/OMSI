@@ -658,7 +658,11 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         spks = all_spikes_raw[i][0]
         if spks.size > 0:
 
-            times = spks.flatten() / fs
+            # cont_ca_sampler reports times in 1-based frame units: a spike at
+            # continuous time t first shows in sample ceil(t), and sample k is
+            # frame k-1 in Python. Shift by one frame so times match the
+            # 0-based frame clock used for ground truth.
+            times = np.clip(spks.flatten() - 1.0, 0.0, None) / fs
             final_spikes.append(times)
         else:
             final_spikes.append(np.array([]))

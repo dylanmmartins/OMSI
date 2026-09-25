@@ -8,12 +8,20 @@ Functions
 ---------
 _get_sn
     Estimate noise std from high-frequency end of the power spectral density.
+_otsu_1d
+    Otsu threshold splitting a 1D sample into two classes.
+_amplitude_given_spikes
+    Spike amplitude from the conditional regression of the trace on the spikes.
+_init_score
+    BIC-style score of an initial spike set (lower is better).
 _estimate_time_constants
     Fit AR(p) time constants from autocorrelation via Yule-Walker equations.
 _ar_kernel
     Compute the AR(p) impulse response, truncated at 1% of peak.
 _block_nnls_deconv
     Block-wise NNLS deconvolution with cross-block spillover correction.
+_noise_constrained_nnls
+    Sparsest NNLS spike signal whose residual matches the noise level.
 _foopsi_deconv
     AR(1) FOOPSI deconvolution via L-BFGS-B with L1 spike penalty.
 get_init_sample
@@ -25,7 +33,7 @@ DMM, Feb 2026
 
 import numpy as np
 from scipy.optimize import nnls as scipy_nnls, minimize as _sp_minimize
-from scipy.linalg import toeplitz as sp_toeplitz
+from scipy.linalg import toeplitz as sp_toeplitz, solve_triangular
 from scipy.signal import lfilter
 
 
@@ -57,10 +65,110 @@ def _get_sn(y, range_ff):
     ind = (ff > range_ff[0]) & (ff <= range_ff[1])
     if not np.any(ind):
         return float(np.std(y))
-    return float(np.sqrt(np.exp(np.mean(np.log(psd[ind] / 2.0)))))
+    # Periodogram bins of white noise are exponential, so the log-mean-exp
+    # (geometric mean) is exp(-euler_gamma) times the mean power. Undo that bias.
+    return float(np.sqrt(np.exp(np.mean(np.log(psd[ind] / 2.0)) + np.euler_gamma)))
 
 
-def _estimate_time_constants(y, p, sn, lags=20):
+def _otsu_1d(x):
+    """ Otsu threshold splitting a 1D sample into two classes.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Values to split.
+
+    Returns
+    -------
+    float
+        Threshold between the two classes.
+    """
+
+    xs = np.sort(np.asarray(x, dtype=float))
+    n = len(xs)
+    csum = np.cumsum(xs)
+    total = csum[-1]
+    i = np.arange(1, n)
+    w0, w1 = i / n, 1.0 - i / n
+    mu0 = csum[:-1] / i
+    mu1 = (total - csum[:-1]) / (n - i)
+    best = int(np.argmax(w0 * w1 * (mu0 - mu1) ** 2))
+    return 0.5 * (xs[best] + xs[best + 1])
+
+
+def _amplitude_given_spikes(Y, centers, h, ge, T):
+    """ Spike amplitude from the conditional regression of the trace on the spikes.
+
+    Mirrors the theta | s step of the block-Gibbs sampler in Pnevmatikakis et al.
+    (2013): with the spike train s fixed, y = A * (G^-1 s) + b + c1 * v + noise is
+    linear in theta = [A, b, c1], so A is the least-squares coefficient on the
+    AR-filtered spike train (baseline and initial-calcium columns included). The
+    half-normal prior is wide, so it is dropped and A is only constrained positive.
+
+    Parameters
+    ----------
+    Y : np.ndarray
+        Fluorescence trace.
+    centers : np.ndarray
+        Spike positions in frames.
+    h : np.ndarray
+        Unit impulse response of the fitted AR model.
+    ge : np.ndarray
+        Decay of the initial calcium condition, shape (T,).
+    T : int
+        Number of frames.
+
+    Returns
+    -------
+    float or None
+        Amplitude in impulse-response units, or None if it is not positive.
+    """
+
+    imp = np.zeros(T)
+    idx = np.clip(np.round(centers).astype(int), 0, T - 1)
+    np.add.at(imp, idx, 1.0)
+    x = np.convolve(imp, h)[:T]
+    X = np.column_stack([x, np.ones(T), ge])
+    coef, *_ = np.linalg.lstsq(X, Y, rcond=None)
+    return float(coef[0]) if coef[0] > 0 else None
+
+
+def _init_score(Y, centers, h, sn, T):
+    """ BIC-style score of an initial spike set (lower is better).
+
+    Places one impulse per spike at its rounded frame, convolves with the kernel,
+    fits amplitude and baseline by least squares, and penalizes spike count.
+
+    Parameters
+    ----------
+    Y : np.ndarray
+        Fluorescence trace.
+    centers : np.ndarray
+        Spike positions in frames.
+    h : np.ndarray
+        Impulse response of the fitted AR model.
+    sn : float
+        Noise standard deviation.
+    T : int
+        Number of frames.
+
+    Returns
+    -------
+    float
+        Squared error in noise units plus log(T) per spike.
+    """
+
+    imp = np.zeros(T)
+    idx = np.clip(np.round(centers).astype(int), 0, T - 1)
+    np.add.at(imp, idx, 1.0)
+    x = np.convolve(imp, h)[:T]
+    X = np.column_stack([x, np.ones(T)])
+    coef, *_ = np.linalg.lstsq(X, Y, rcond=None)
+    sse = float(np.sum((Y - X @ coef) ** 2))
+    return sse / max(sn, 1e-12) ** 2 + len(centers) * np.log(T)
+
+
+def _estimate_time_constants(y, p, sn, lags=5):
     """ Fit AR(p) time constants from autocorrelation via Yule-Walker equations.
 
     The Toeplitz matrix is what autocorrelation looks like under the AR model,
@@ -89,11 +197,13 @@ def _estimate_time_constants(y, p, sn, lags=20):
     for k in range(lags + 2):
         xc[k] = np.dot(yn[k:], yn[:len(yn) - k])
     xc /= len(y)
-    col = xc[1:lags + 1]
-    row = xc[1:p + 1]
+    # Rows are lags 0..lags-1 and the target is lags 1..lags, as in
+    # constrained_foopsi. White noise only adds to lag 0, the diagonal here.
+    col = xc[0:lags]
+    row = xc[0:p]
     A = sp_toeplitz(col, row) - (sn ** 2) * np.eye(lags, p)
     try:
-        g = np.linalg.pinv(A) @ xc[2:lags + 2]
+        g = np.linalg.pinv(A) @ xc[1:lags + 1]
     except Exception:
         g = np.array([0.0])
     return g
@@ -133,13 +243,18 @@ def _ar_kernel(g, K):
     return h
 
 
-def _block_nnls_deconv(y_corr, h, T, block_size=400):
+def _block_nnls_deconv(y_corr, h, T, block_size=400, lam=0.0):
     """ Block-wise NNLS deconvolution with cross-block spillover correction.
 
     Processes the trace in chunks to keep memory manageable on long recordings.
     Tracks the tail of each block's calcium response that bleeds into the next
     block and subtracts it before solving -- otherwise spikes near block
     boundaries would be undercounted.
+
+    With lam > 0 each block solves min ||y - H s||^2 + lam * sum(s), s >= 0. H is
+    lower triangular with unit diagonal, so sum(s) = w^T H s with w = H^-T 1, and
+    the penalty folds into the target: ||(y - lam/2 * w) - H s||^2 + const. That
+    keeps the L1 problem a plain NNLS.
 
     Parameters
     ----------
@@ -151,6 +266,8 @@ def _block_nnls_deconv(y_corr, h, T, block_size=400):
         Number of frames.
     block_size : int
         Frames per block.
+    lam : float, optional
+        L1 penalty weight on spike amplitudes.
 
     Returns
     -------
@@ -161,6 +278,7 @@ def _block_nnls_deconv(y_corr, h, T, block_size=400):
     K = len(h)
     sp = np.zeros(T)
     spillover = np.zeros(T + K)
+    w_cache = {}
 
     for start in range(0, T, block_size):
         end = min(start + block_size, T)
@@ -171,6 +289,10 @@ def _block_nnls_deconv(y_corr, h, T, block_size=400):
         H_block = sp_toeplitz(h_col, np.zeros(B))
 
         y_block = y_corr[start:end] - spillover[start:end]
+        if lam > 0:
+            if B not in w_cache:
+                w_cache[B] = solve_triangular(H_block.T, np.ones(B), lower=False)
+            y_block = y_block - 0.5 * lam * w_cache[B]
 
         sp_block, _ = scipy_nnls(H_block, y_block)
         sp[start:end] = sp_block
@@ -181,6 +303,65 @@ def _block_nnls_deconv(y_corr, h, T, block_size=400):
             spillover[end:end + tail_len] += tail[:tail_len]
 
     return sp
+
+
+def _noise_constrained_nnls(y_corr, h, T, sn, block_size=400, n_iter=12):
+    """ Sparsest NNLS spike signal whose residual matches the noise level.
+
+    NNLS counterpart of the noise-constrained deconvolution that initializes the
+    sampler in Pnevmatikakis et al. (2013) (constrained_foopsi):
+
+        min sum(s)  s.t.  ||y - h * s||^2 <= T * sn^2,  s >= 0.
+
+    Its Lagrangian is the L1-penalized NNLS solved by _block_nnls_deconv, so the
+    multiplier is found by bisection on log(lam) until the residual reaches the
+    noise level. Plain NNLS drives the residual below the noise and explains the
+    remainder with small spurious events; the constraint stops it there.
+
+    Parameters
+    ----------
+    y_corr : np.ndarray
+        Baseline- and initial-calcium-corrected fluorescence trace.
+    h : np.ndarray
+        AR impulse response kernel.
+    T : int
+        Number of frames.
+    sn : float
+        Noise standard deviation.
+    block_size : int, optional
+        Frames per block.
+    n_iter : int, optional
+        Bisection steps on log(lam).
+
+    Returns
+    -------
+    sp : np.ndarray
+        Nonnegative spike amplitude vector, shape (T,).
+    """
+
+    target = T * sn ** 2
+
+    def _rss(sp):
+        return float(np.sum((y_corr - np.convolve(sp, h)[:T]) ** 2))
+
+    sp0 = _block_nnls_deconv(y_corr, h, T, block_size)
+    if _rss(sp0) >= target:
+        return sp0
+
+    # Penalty large enough to zero every spike: lam >= 2 * max(H^T y).
+    lam_hi = 2.0 * float(np.max(np.correlate(y_corr, h, mode='full')[len(h) - 1:]))
+    if lam_hi <= 0:
+        return sp0
+    lo, hi = np.log(lam_hi) - 12.0, np.log(lam_hi)
+    best = sp0
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        sp = _block_nnls_deconv(y_corr, h, T, block_size, lam=np.exp(mid))
+        if _rss(sp) > target:
+            hi = mid
+        else:
+            lo, best = mid, sp
+    return best
 
 
 def _foopsi_deconv(y, g_decay, lam):
@@ -239,7 +420,11 @@ def get_init_sample(Y, params):
     params : dict
         Sampler parameters. Relevant keys: 'p' (AR order), 'g' (AR coefficients),
         'sn' (noise std), 'b' (baseline), 'c1' (initial calcium), 'f' (frame rate),
-        'bas_nonneg' (enforce nonnegative baseline), 'init_method' ('foopsi' or default).
+        'bas_nonneg' (enforce nonnegative baseline), 'init_method' ('foopsi' or default),
+        'ar_lags' (extra autocovariance lags for the AR fit, default 5 as in
+        constrained_foopsi), 'init_sparse' (noise-constrained NNLS, default False),
+        'init_filter' (drop low-mass NNLS events when that explains the trace
+        better, default True), 'init_amp' ('regress' (default) or 'mass').
 
     Returns
     -------
@@ -269,7 +454,7 @@ def get_init_sample(Y, params):
         else:
             p = options['p']
             sn_tmp = _get_sn(Y, [0.25, 0.5])
-            g = _estimate_time_constants(Y, p, sn_tmp, lags=20)
+            g = _estimate_time_constants(Y, p, sn_tmp, lags=params.get('ar_lags', 5))
 
             roots = np.roots(np.concatenate([[1.0], -g]))
             roots = np.real(roots).clip(0.01, 0.999)
@@ -317,7 +502,10 @@ def get_init_sample(Y, params):
         else:
             K  = min(T, max(50, int(np.ceil(5 * tau_frames))))
             h  = _ar_kernel(g, K)
-            sp = _block_nnls_deconv(y_corr, h, T, block_size=min(400, T))
+            if params.get('init_sparse', False):
+                sp = _noise_constrained_nnls(y_corr, h, T, sn, block_size=min(400, T))
+            else:
+                sp = _block_nnls_deconv(y_corr, h, T, block_size=min(400, T))
 
         c = lfilter([1.0], np.concatenate([[1.0], -g]), sp)
 
@@ -328,9 +516,35 @@ def get_init_sample(Y, params):
     s_in = (sp > 0.15 * sp_max) if sp_max > 0 else np.zeros(T, dtype=bool)
     indices = np.where(s_in)[0]
 
-    # Jitter spike positions slightly within their frame for sub-frame precision;
-    # reflect any that land just outside recording bounds back in.
-    spiketimes_ = dt * (indices.astype(float) + np.random.rand(len(indices)) - 0.5)
+    # One spike event can smear over neighboring frames when the assumed kernel
+    # is faster than the real one. Merge contiguous supra-threshold frames into a
+    # single event so a smear is not counted as several spikes, and so the event
+    # mass (summed NNLS response) rather than the per-frame value sets amplitude.
+    if len(indices) > 0:
+        breaks = np.where(np.diff(indices) > 1)[0] + 1
+        groups = np.split(indices, breaks)
+        masses = np.array([sp[grp].sum() for grp in groups])
+        centers = np.array([np.sum(grp * sp[grp]) / sp[grp].sum() for grp in groups])
+    else:
+        masses = np.array([])
+        centers = np.array([])
+
+    # NNLS also fits noise with small events. Event masses can be bimodal (noise
+    # vs. real spikes), in which case starting from the upper group only is right,
+    # but when masses are unimodal an Otsu split just clips the largest events.
+    # Score both candidates on how well they explain the trace (least-squares
+    # amplitude and baseline, BIC-style penalty per spike) and keep the better.
+    if params.get('init_filter', True) and len(masses) >= 4:
+        keep = masses > _otsu_1d(masses)
+        if 0 < keep.sum() < len(masses):
+            h_init = _ar_kernel(g, min(T, max(50, int(np.ceil(5 * tau_frames)))))
+            score_all = _init_score(Y, centers, h_init, sn, T)
+            score_hi  = _init_score(Y, centers[keep], h_init, sn, T)
+            if score_hi < score_all:
+                masses, centers = masses[keep], centers[keep]
+
+    # Centroid gives sub-frame position; reflect any that land outside bounds.
+    spiketimes_ = np.abs(dt * centers)
     oob = spiketimes_ >= T * dt
     spiketimes_[oob] = 2.0 * T * dt - spiketimes_[oob]
 
@@ -338,12 +552,15 @@ def get_init_sample(Y, params):
     SAM['lam_'] = len(spiketimes_) / (T * dt)
     SAM['spiketimes_'] = spiketimes_
 
-    sp_in = sp[s_in]
-    if len(sp_in) > 0:
-        # Amplitude guess: median of detected spike amplitudes, but at least
-        # 1/4 of the max so we don't undershoot on sparse data.
-        SAM['A_'] = max(float(np.median(sp_in)), float(np.max(sp_in)) / 4.0)
-    else:
+    SAM['A_'] = None
+    if params.get('init_amp', 'regress') == 'regress' and len(centers) > 0:
+        h_amp = _ar_kernel(g, min(T, max(50, int(np.ceil(5 * tau_frames)))))
+        SAM['A_'] = _amplitude_given_spikes(Y, centers, h_amp, ge, T)
+    if SAM['A_'] is None and len(masses) > 0:
+        # Lower quartile of the event masses. Bursts are integer multiples of the
+        # unit amplitude, so the lower part of the distribution tracks one spike.
+        SAM['A_'] = float(np.percentile(masses, 25))
+    if SAM['A_'] is None:
         SAM['A_'] = sn
 
     if len(g) == 2:
