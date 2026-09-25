@@ -49,7 +49,7 @@ _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'da
 
 # (display name, source NPZ file, spike-array key inside that NPZ)
 _METHODS = [
-    ('OMSI',    'fixed_benchmark_fMCSI.npz',       'optim_spikes'),
+    ('OMSI',    'fixed_benchmark_OMSI.npz',       'optim_spikes'),
     ('CaImAn',  'fixed_benchmark_MATLAB.npz',      'tradmat_spikes'),
     ('CASCADE', 'fixed_benchmark_CASCADE_GPU.npz', 'cascade_spikes'),
     ('OASIS',   'fixed_benchmark_OASIS.npz',       'oasis_spikes'),

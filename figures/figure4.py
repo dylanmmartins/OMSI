@@ -130,13 +130,13 @@ def _snr_from_fluo(fluo):
     return (float(np.percentile(fv, 99)) - float(np.percentile(fv, 8))) / (mad + 1e-9)
 
 _METHODS = {
-    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
+    'omsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'matlab':      {'label': 'CaImAn',  'color': '#DD8452'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
-_METHOD_ORDER  = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
-_TRACE_METHODS = ['fmcsi', 'oasis', 'matlab', 'cascade_loo']
+_METHOD_ORDER  = ['omsi', 'matlab', 'oasis', 'cascade_loo']
+_TRACE_METHODS = ['omsi', 'oasis', 'matlab', 'cascade_loo']
 
 _CASCADE_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'run_cascade_subprocess.py')
@@ -534,7 +534,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     ground_truth_dir : str
         Root directory of the CASCADE Ground_truth data.
     model : str
-        Method to run ('fmcsi', 'matlab', 'oasis', or 'cascade_loo').
+        Method to run ('omsi', 'matlab', 'oasis', or 'cascade_loo').
 
     Returns
     -------
@@ -597,7 +597,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     probs_list  = []
     spikes_list = []
 
-    if model == 'fmcsi':
+    if model == 'omsi':
         params = _build_params(fs, tau)
 
         # Batch into one deconv call so Ray parallelizes across cells rather
@@ -759,7 +759,7 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
 
     os.makedirs(data_dir, exist_ok=True)
     if methods is None:
-        methods = ['fmcsi', 'oasis', 'matlab', 'cascade_loo']
+        methods = ['omsi', 'oasis', 'matlab', 'cascade_loo']
 
     ds_folders = sorted(
         d for d in os.listdir(ground_truth_dir)
@@ -930,7 +930,7 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
         Selected cell data dicts.
     """
 
-    _REQUIRED = ['fmcsi', 'oasis', 'matlab']
+    _REQUIRED = ['omsi', 'oasis', 'matlab']
 
     try:
         sets = [
@@ -955,7 +955,7 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
         sensor = _get_sensor(ds)
         if sensor not in by_sensor:
             continue
-        ref_path = os.path.join(_traces_dir(data_dir, 'fmcsi'),
+        ref_path = os.path.join(_traces_dir(data_dir, 'omsi'),
                                 f'{ds}_traces.npz')
         try:
             ref_npz = np.load(ref_path, allow_pickle=False)
@@ -1071,7 +1071,7 @@ def _plot_raster(ax, cells, window=60.0):
         bottom_to_top.append((
             _METHODS['cascade_loo']['label'], 'cascade_loo',
             _METHODS['cascade_loo']['color']))
-    for m in ['oasis', 'matlab', 'fmcsi']:
+    for m in ['oasis', 'matlab', 'omsi']:
         bottom_to_top.append(
             (_METHODS[m]['label'], m, _METHODS[m]['color']))
     bottom_to_top.append(('Ground Truth', None, '#111111'))
@@ -1248,7 +1248,7 @@ def plot_figure(data_dir):
     legend_handles = [
         plt.Line2D([0], [0], color=_METHODS[m]['color'], marker='.', linestyle='-',
                    label=_METHODS[m]['label'])
-        for m in ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
+        for m in ['omsi', 'matlab', 'oasis', 'cascade_loo']
     ]
     fig.legend(handles=legend_handles, loc='upper center', ncol=4,
                bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)
@@ -1272,7 +1272,7 @@ def main():
     parser.add_argument('--ground-truth-dir', default='/home/dylan/Documents/Github/Cascade/Ground_truth',
                         help='Path to CASCADE Ground_truth/ folder (test mode)')
     parser.add_argument('--method', nargs='+',
-                        choices=['fmcsi', 'matlab', 'oasis', 'cascade_loo'],
+                        choices=['omsi', 'matlab', 'oasis', 'cascade_loo'],
                         default=None,
                         help='Method(s) to run in test mode '
                              '(default: all four)')

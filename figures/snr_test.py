@@ -271,7 +271,7 @@ def _real_trace_stats(figures_dir):
     """
 
     fig3_dir = os.path.join(figures_dir, 'data', 'fig3')
-    fig4_dir = os.path.join(figures_dir, 'data', 'fig4', 'ground_truth_traces_fmcsi')
+    fig4_dir = os.path.join(figures_dir, 'data', 'fig4', 'ground_truth_traces_omsi')
 
     print('Scoring Allen traces...')
     allen = np.array([gate_statistic(t) for t in _load_fig3_traces(fig3_dir)])

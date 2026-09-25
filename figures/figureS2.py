@@ -114,13 +114,13 @@ _DEFAULT_OUT_DIR  = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'figS2')
 
 _METHODS = {
-    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
+    'omsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'matlab':      {'label': 'CaImAn',  'color': '#DD8452'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
-_METHOD_ORDER  = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
-_TRACE_METHODS = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
+_METHOD_ORDER  = ['omsi', 'matlab', 'oasis', 'cascade_loo']
+_TRACE_METHODS = ['omsi', 'matlab', 'oasis', 'cascade_loo']
 
 SENSORS = ['GCaMP8m']
 
@@ -256,25 +256,25 @@ def _select_sensor_cells(data_dir, all_records, sensor):
         Cell data dicts containing dF/F, spike times, and metadata.
     """
 
-    fmcsi_recs = [r for r in all_records.get('fmcsi', [])
+    omsi_recs = [r for r in all_records.get('omsi', [])
                   if _get_sensor(r['dataset']) == sensor]
-    if not fmcsi_recs:
+    if not omsi_recs:
         return []
 
-    fmcsi_sorted = sorted(fmcsi_recs, key=lambda r: float(r.get('cosmic', 0.0)))
-    n            = len(fmcsi_sorted)
+    omsi_sorted = sorted(omsi_recs, key=lambda r: float(r.get('cosmic', 0.0)))
+    n            = len(omsi_sorted)
     target_pcts  = [0.60, 0.40, 0.20]
     selected     = []
 
     for pct in target_pcts:
         idx = int(round(pct * (n - 1)))
         idx = max(0, min(n - 1, idx))
-        rec = fmcsi_sorted[idx]
+        rec = omsi_sorted[idx]
         ds  = rec['dataset']
 
-        ds_fmcsi_recs = [r for r in all_records.get('fmcsi', [])
+        ds_omsi_recs = [r for r in all_records.get('omsi', [])
                          if r['dataset'] == ds]
-        local_idx = ds_fmcsi_recs.index(rec)
+        local_idx = ds_omsi_recs.index(rec)
 
         dff = None; true_spikes = None; fs = None; kurtosis = None; snr = None
         pred_spikes = {}
@@ -362,7 +362,7 @@ def _plot_single_raster(ax, cell, window=30.0,
 
 
     row_specs = []
-    for mk in ['cascade_loo', 'oasis', 'matlab', 'fmcsi']:
+    for mk in ['cascade_loo', 'oasis', 'matlab', 'omsi']:
         if mk in cell['pred_spikes']:
             row_specs.append((_METHODS[mk]['label'], mk, _METHODS[mk]['color']))
     row_specs.append(('Ground Truth', None, '#111111'))
@@ -502,7 +502,7 @@ def _plot_kurtosis_hist(ax, all_records, sensor, selected_cells):
         Selected cells to mark with vertical lines.
     """
 
-    recs  = [r for r in all_records.get('fmcsi', [])
+    recs  = [r for r in all_records.get('omsi', [])
              if _get_sensor(r['dataset']) == sensor]
     kurts = np.array([float(r.get('kurtosis', np.nan)) for r in recs],
                      dtype=float)
@@ -603,7 +603,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, out_dir=_DEFAULT_OUT_DIR):
     legend_handles = [
         plt.Line2D([0], [0], color=_METHODS[m]['color'], marker='.', linestyle='-',
                    label=_METHODS[m]['label'])
-        for m in ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
+        for m in ['omsi', 'matlab', 'oasis', 'cascade_loo']
     ]
     fig.legend(handles=legend_handles, loc='upper center', ncol=4,
                bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)

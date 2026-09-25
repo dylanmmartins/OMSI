@@ -112,7 +112,10 @@ def get_next_spikes(curr_spikes, n_spikes, curr_calcium, calcium_signal,
         )
         logC_ = logC + delta_ll
 
-        ratio = np.exp((logC_ - logC) / calcium_noise_var)
+        # logC is -SSR, so under Gaussian noise the log-likelihood difference is
+        # (logC_ - logC) / (2 * var). Proposal is symmetric (reflected Gaussian), so the
+        # Metropolis ratio is just the likelihood ratio.
+        ratio = np.exp((logC_ - logC) / (2 * calcium_noise_var))
 
         if np.random.rand() < ratio:
 

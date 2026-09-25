@@ -2,7 +2,7 @@
 """
 figures/convergence_benchmark.py
 
-Checks fMCSI's auto-stop rule against conventional multi-chain MCMC diagnostics.
+Checks OMSI's auto-stop rule against conventional multi-chain MCMC diagnostics.
 
 For each cell, runs several long fixed-length reference chains from deliberately
 different spike-train starts, then computes rank-normalized split R-hat, bulk and
@@ -935,7 +935,7 @@ def _synthetic_tasks(n_cells, duration, seed):
         dff, true_spikes, _, _, _, _ = generate_synthetic_data(
             n_cells=n_cells, fs=cond['fs'], duration=duration,
             tau=cond['tau'], snr=cond['snr'])
-        # Same params as the figure 2 fMCSI runs.
+        # Same params as the figure 2 OMSI runs.
         params = {'f': cond['fs'], 'p': 2}
         for i in range(n_cells):
             tasks.append({'group': group, 'gi': gi, 'cell_idx': i, 'dff': dff[i],
@@ -1499,7 +1499,7 @@ def main():
     """Parse command-line arguments and dispatch."""
 
     parser = argparse.ArgumentParser(
-        description='fMCSI auto-stop rule vs conventional MCMC convergence diagnostics')
+        description='OMSI auto-stop rule vs conventional MCMC convergence diagnostics')
     parser.add_argument('--mode', required=True, choices=['test', 'plot', 'print'],
                         help='"test" runs chains and saves per-cell results; '
                              '"plot" generates the figure; '

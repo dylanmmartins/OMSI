@@ -715,7 +715,7 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
             plane_dirs = [datadir]
         else:
             raise FileNotFoundError(
-                '[fMCSI] No suite2p plane directories found under {}.\n'.format(datadir) +
+                '[OMSI] No suite2p plane directories found under {}.\n'.format(datadir) +
                 'Expected: <datadir>/suite2p/plane*/ or <datadir>/plane*/ '
                 'or F.npy directly in <datadir>.'
             )
@@ -725,7 +725,7 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
                       if any(os.path.basename(p) == 'plane{}'.format(i) for i in planes)]
         if not plane_dirs:
             raise FileNotFoundError(
-                '[fMCSI] No plane directories match --plane {} under {}.'.format(
+                '[OMSI] No plane directories match --plane {} under {}.'.format(
                     planes, search_root)
             )
 
@@ -742,7 +742,7 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
 
         for req in [f_path, fneu_path]:
             if not os.path.isfile(req):
-                raise FileNotFoundError('[fMCSI] Required file not found: {}'.format(req))
+                raise FileNotFoundError('[OMSI] Required file not found: {}'.format(req))
 
         F    = np.load(f_path,    allow_pickle=True).astype(np.float32)
         Fneu = np.load(fneu_path, allow_pickle=True).astype(np.float32)
@@ -822,7 +822,7 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=Non
     )
     if not candidates:
         raise FileNotFoundError(
-            '[fMCSI] No .hdf5 or .h5 files found in {}. '.format(datadir) +
+            '[OMSI] No .hdf5 or .h5 files found in {}. '.format(datadir) +
             'CaImAn saves results via cnmf.save("path.hdf5").'
         )
     if len(candidates) > 1:
@@ -880,7 +880,7 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=Non
 def _build_parser():
 
     parser = argparse.ArgumentParser(
-        prog='fMCSI',
+        prog='OMSI',
         description=(
             'Optimized MCMC spike deconvolution.\n\n'
             'Provide one source flag (--suite2p, --caiman, or --array) to '
@@ -891,16 +891,16 @@ def _build_parser():
             Examples
             --------
             # suite2p output directory (frame rate auto-read from ops.npy)
-            python -m fMCSI.deconv --suite2p -dir /data/mouse1/suite2p
+            python -m OMSI.deconv --suite2p -dir /data/mouse1/suite2p
 
             # suite2p, explicit frame rate, two planes, save elsewhere
-            python -m fMCSI.deconv --suite2p -dir /data/mouse1 -hz 30 --plane 0 1 --outdir /results
+            python -m OMSI.deconv --suite2p -dir /data/mouse1 -hz 30 --plane 0 1 --outdir /results
 
             # CaImAn HDF5 file
-            python -m fMCSI.deconv --caiman -dir /data/mouse1 -hz 30
+            python -m OMSI.deconv --caiman -dir /data/mouse1 -hz 30
 
             # Raw numpy arrays (pass paths as positional arguments)
-            python -m fMCSI.deconv --array -dir /data/mouse1 -hz 30
+            python -m OMSI.deconv --array -dir /data/mouse1 -hz 30
         """),
     )
 
@@ -970,7 +970,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.datadir):
-        parser.error('[fMCSI] Data directory not found: {}'.format(args.datadir))
+        parser.error('[OMSI] Data directory not found: {}'.format(args.datadir))
 
     hz       = args.sample_rate
     save_mat = args.mat
@@ -1014,7 +1014,7 @@ def main(argv=None):
                   + (', Fneu.npy: {}.'.format(fneu.shape) if fneu is not None else '.'))
         else:
             parser.error(
-                '[fMCSI] --array requires F.npy or dFF.npy in {}.'.format(args.datadir)
+                '[OMSI] --array requires F.npy or dFF.npy in {}.'.format(args.datadir)
             )
 
         if hz is None or hz <= 0:

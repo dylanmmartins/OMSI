@@ -2,7 +2,7 @@
 """
 figures/figure3.py
 
-Allen Institute data benchmark comparing fMCSI, OASIS, CASCADE, and CaImAn MCMC.
+Allen Institute data benchmark comparing OMSI, OASIS, CASCADE, and CaImAn MCMC.
 
 To run inference:
     $ python figure3.py --mode test --data-dir /path/to/results --allen-data-dir /path/to/allen/data
@@ -40,20 +40,20 @@ _run_cascade_inference
     Run CASCADE spike inference via subprocess and return probs and spike times.
 _run_and_save_allen_group
     Run all inference methods on one Allen dataset group and save results.
-_run_and_save_fmcsi_group
-    Run fMCSI and OASIS on one Allen dataset group and save results.
+_run_and_save_omsi_group
+    Run OMSI and OASIS on one Allen dataset group and save results.
 test_figure
     Run full benchmark across all Allen dataset groups.
-test_fmcsi
-    Run fMCSI-only benchmark across all Allen dataset groups.
+test_omsi
+    Run OMSI-only benchmark across all Allen dataset groups.
 _load_and_preprocess_raw
     Preprocess raw Allen H5 files into dF/F arrays and spike times.
 _build_cascade_lookup
     Build a label-to-filepath lookup for CASCADE trace NPZ files.
-_build_fmcsi_records_lookup
-    Build a label-to-filepath lookup for newer fMCSI records NPZ files.
-_build_fmcsi_traces_lookup
-    Build a label-to-filepath lookup for newer fMCSI traces NPZ files.
+_build_omsi_records_lookup
+    Build a label-to-filepath lookup for newer OMSI records NPZ files.
+_build_omsi_traces_lookup
+    Build a label-to-filepath lookup for newer OMSI traces NPZ files.
 _peaks_from_prob
     Find spike times from a probability trace via peak detection.
 _best_window
@@ -81,7 +81,7 @@ plot_figure
 print_stats
     Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
 main
-    Parse CLI arguments and dispatch to test, fmcsi, plot, or print mode.
+    Parse CLI arguments and dispatch to test, omsi, plot, or print mode.
 
 
 DMM, March 2026
@@ -122,12 +122,12 @@ mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size'] = 7
 
 model_colors = {
-    'fMCSI': '#4C72B0',
+    'OMSI': '#4C72B0',
     'MATLAB': '#DD8452',
     'OASIS':     '#55A868',
     'CASCADE':   '#8172B3',
 }
-_MODEL_ORDER = ['fMCSI', 'MATLAB', 'OASIS', 'CASCADE']
+_MODEL_ORDER = ['OMSI', 'MATLAB', 'OASIS', 'CASCADE']
 
 USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
 BETA = 0.5
@@ -562,7 +562,7 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     print("  Event ground truth: {} events from {} spikes ({:.1f}% isolated).".format(
         n_events_total, n_spikes_total, 100*n_events_total/max(n_spikes_total,1)))
 
-    print("  Running fMCSI...")
+    print("  Running OMSI...")
     t0      = time.time()
     tau_rise = 0.05
     g_rise   = float(np.exp(-1.0 / (tau_rise * fs)))
@@ -584,11 +584,11 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     prec_my_e, rec_my_e, f1_my_e     = compute_accuracy_window(true_events,  my_spikes, tolerance=0.1)
     cosmic_my                         = OMSI.helpers.compute_cosmic(true_spikes, my_spikes_shifted, fs)
 
-    print("    [fMCSI] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+    print("    [OMSI] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
         np.nanmedian(f1_my), _mad(f1_my), np.nanmedian(f1_my_w), _mad(f1_my_w)))
     for i in range(n_cells):
         all_results.append({
-            'model': 'fMCSI', 'tau': tau, 'cell_id': int(good_idx[i]),
+            'model': 'OMSI', 'tau': tau, 'cell_id': int(good_idx[i]),
             'time': time_my / n_cells,
             'f1': f1_my[i], 'precision': prec_my[i], 'recall': rec_my[i],
             'f1_window': f1_my_w[i], 'precision_window': prec_my_w[i],
@@ -742,8 +742,8 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         print("  WARNING: CASCADE subprocess failed for {}: {}.".format(label, exc))
 
 
-def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
-    """Run fMCSI and OASIS on one Allen dataset group and save results.
+def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
+    """Run OMSI and OASIS on one Allen dataset group and save results.
 
     Parameters
     ----------
@@ -781,7 +781,7 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
     true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
                    for sp in true_spikes]
 
-    print("  Running fMCSI...")
+    print("  Running OMSI...")
     t0       = time.time()
     tau_rise = 0.05
     g_rise   = float(np.exp(-1.0 / (tau_rise * fs)))
@@ -807,13 +807,13 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
     cosmic_my                       = OMSI.helpers.compute_cosmic(
         true_spikes, my_spikes_shifted, fs)
 
-    print("    [fMCSI] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+    print("    [OMSI] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
         np.nanmedian(f1_my), _mad(f1_my), np.nanmedian(f1_my_w), _mad(f1_my_w)))
 
     all_results = []
     for i in range(n_cells):
         all_results.append({
-            'model': 'fMCSI', 'tau': tau, 'cell_id': int(good_idx[i]),
+            'model': 'OMSI', 'tau': tau, 'cell_id': int(good_idx[i]),
             'time': time_my / n_cells,
             'f1': f1_my[i], 'precision': prec_my[i], 'recall': rec_my[i],
             'f1_window': f1_my_w[i], 'precision_window': prec_my_w[i],
@@ -860,7 +860,7 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
             'cosmic': cosmic_oasis[i],
         })
 
-    traces_path = os.path.join(data_dir, f'allen_data_results_fmcsi_{label}_traces.npz')
+    traces_path = os.path.join(data_dir, f'allen_data_results_omsi_{label}_traces.npz')
     np.savez(
         traces_path,
         dff=dff, true_spikes=np.array(true_spikes, dtype=object),
@@ -871,11 +871,11 @@ def _run_and_save_fmcsi_group(dff, true_spikes, fs, tau, label, data_dir):
         cosmic_my=cosmic_my,
         cosmic_oasis=cosmic_oasis,
     )
-    print("  Saved fMCSI+OASIS traces: {}.".format(traces_path))
+    print("  Saved OMSI+OASIS traces: {}.".format(traces_path))
 
-    npz_path = os.path.join(data_dir, f'allen_data_results_fmcsi_{label}.npz')
+    npz_path = os.path.join(data_dir, f'allen_data_results_omsi_{label}.npz')
     _save_records(all_results, npz_path)
-    print("  Saved fMCSI+OASIS results: {}.".format(npz_path))
+    print("  Saved OMSI+OASIS results: {}.".format(npz_path))
 
 
 def test_figure(data_dir, allen_data_dir, run_matlab=False):
@@ -918,8 +918,8 @@ def test_figure(data_dir, allen_data_dir, run_matlab=False):
                 label, data_dir, run_matlab=run_matlab)
 
 
-def test_fmcsi(data_dir, allen_data_dir):
-    """Run fMCSI-only benchmark across all Allen dataset groups.
+def test_omsi(data_dir, allen_data_dir):
+    """Run OMSI-only benchmark across all Allen dataset groups.
 
     Parameters
     ----------
@@ -943,7 +943,7 @@ def test_fmcsi(data_dir, allen_data_dir):
                                    ('fast', fast_data_groups)]:
         if not data_groups:
             continue
-        print("\n--- Processing {} cell groups (fMCSI only) ---".format(indicator.upper()))
+        print("\n--- Processing {} cell groups (OMSI only) ---".format(indicator.upper()))
         for (experiment_name, fs_rounded, n_frames), gd in data_groups.items():
             if experiment_name in _EXCLUDED_DATASETS:
                 print("\n  Skipping excluded dataset: {}.".format(experiment_name))
@@ -951,7 +951,7 @@ def test_fmcsi(data_dir, allen_data_dir):
             print("\n  Group {}  {} frames @ {}Hz ({} cells).".format(
                 experiment_name, n_frames, fs_rounded, gd['dff'].shape[0]))
             label = f"{experiment_name}_{indicator}_tau_{n_frames}frames_{fs_rounded}hz"
-            _run_and_save_fmcsi_group(
+            _run_and_save_omsi_group(
                 gd['dff'], gd['spikes_list'], gd['fs'], gd['tau'],
                 label, data_dir)
 
@@ -1099,26 +1099,26 @@ def _build_cascade_lookup(data_dir):
     return lookup
 
 
-def _build_fmcsi_records_lookup(data_dir):
-    """Build a label-to-filepath lookup for newer fMCSI records NPZ files.
+def _build_omsi_records_lookup(data_dir):
+    """Build a label-to-filepath lookup for newer OMSI records NPZ files.
 
     Parameters
     ----------
     data_dir : str
-        Directory containing allen_data_results_fmcsi_*.npz files.
+        Directory containing allen_data_results_omsi_*.npz files.
 
     Returns
     -------
     dict
-        Mapping from label string to fMCSI records NPZ file path.
+        Mapping from label string to OMSI records NPZ file path.
     """
     lookup = {}
     for fpath in _glob.glob(
-            os.path.join(data_dir, 'allen_data_results_fmcsi_*.npz')):
+            os.path.join(data_dir, 'allen_data_results_omsi_*.npz')):
         name = os.path.basename(fpath)
         if '_traces.npz' in name:
             continue
-        orig = name.replace('allen_data_results_fmcsi_', '').replace('.npz', '')
+        orig = name.replace('allen_data_results_omsi_', '').replace('.npz', '')
         group = os.path.join(data_dir, f'allen_data_results_{orig}.npz')
         if not os.path.exists(group) or \
                 os.path.getmtime(fpath) > os.path.getmtime(group):
@@ -1126,24 +1126,24 @@ def _build_fmcsi_records_lookup(data_dir):
     return lookup
 
 
-def _build_fmcsi_traces_lookup(data_dir):
-    """Build a label-to-filepath lookup for newer fMCSI traces NPZ files.
+def _build_omsi_traces_lookup(data_dir):
+    """Build a label-to-filepath lookup for newer OMSI traces NPZ files.
 
     Parameters
     ----------
     data_dir : str
-        Directory containing allen_data_results_fmcsi_*_traces.npz files.
+        Directory containing allen_data_results_omsi_*_traces.npz files.
 
     Returns
     -------
     dict
-        Mapping from label string to fMCSI traces NPZ file path.
+        Mapping from label string to OMSI traces NPZ file path.
     """
     lookup = {}
     for fpath in _glob.glob(
-            os.path.join(data_dir, 'allen_data_results_fmcsi_*_traces.npz')):
+            os.path.join(data_dir, 'allen_data_results_omsi_*_traces.npz')):
         name = os.path.basename(fpath)
-        orig = name.replace('allen_data_results_fmcsi_', '').replace('_traces.npz', '')
+        orig = name.replace('allen_data_results_omsi_', '').replace('_traces.npz', '')
         group = os.path.join(data_dir, f'allen_data_results_{orig}_traces.npz')
         if not os.path.exists(group) or \
                 os.path.getmtime(fpath) > os.path.getmtime(group):
@@ -1238,7 +1238,7 @@ def _best_window(raw_trace, fs, true_spk, det_spikes_list,
 def _load_raster_trace_data(data_dir, label_map, file_path_map,
                              cascade_lookup, n_cells=5,
                              window=60.0, min_spikes=15,
-                             fmcsi_traces_lookup=None,
+                             omsi_traces_lookup=None,
                              matlab_data_dir=None):
     """Load per-cell trace data for raster and trace visualization panels.
 
@@ -1258,8 +1258,8 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
         Visualization window duration in seconds (default 60.0).
     min_spikes : int, optional
         Minimum spikes in window for a cell to be considered (default 15).
-    fmcsi_traces_lookup : dict, optional
-        fMCSI traces file lookup from _build_fmcsi_traces_lookup.
+    omsi_traces_lookup : dict, optional
+        OMSI traces file lookup from _build_omsi_traces_lookup.
     matlab_data_dir : str, optional
         Directory with CaImAn MCMC trace NPZ files.
 
@@ -1280,9 +1280,9 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                 continue
 
             df = None
-            if fmcsi_traces_lookup and file_label in fmcsi_traces_lookup:
+            if omsi_traces_lookup and file_label in omsi_traces_lookup:
                 try:
-                    df = np.load(fmcsi_traces_lookup[file_label], allow_pickle=True)
+                    df = np.load(omsi_traces_lookup[file_label], allow_pickle=True)
                 except Exception:
                     df = None
 
@@ -1350,7 +1350,7 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                     return _peaks_from_prob(probs_arr[idx], fs)
                 return np.array([])
 
-            fmcsi_src = df if df is not None else d
+            omsi_src = df if df is not None else d
             n = my_probs.shape[0]
             for i in range(min(n, len(true_spikes_arr))):
                 raw_trace = raw[i]
@@ -1358,7 +1358,7 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                 spk       = np.atleast_1d(np.asarray(true_spikes_arr[i], dtype=float))
                 if len(spk) < 3:
                     continue
-                my_spk    = _load_spk('my_spikes',    my_probs,    i, src=fmcsi_src)
+                my_spk    = _load_spk('my_spikes',    my_probs,    i, src=omsi_src)
                 trad_spk  = _load_spk('trad_spikes',  trad_probs,  i)
                 oasis_spk = _load_spk('oasis_spikes', oasis_probs, i)
                 cas_spk   = np.array([])
@@ -1448,7 +1448,7 @@ def _plot_combined_raster_trace(ax, cells, window=60.0):
         ('CASCADE',      'cas_spikes',   model_colors['CASCADE'],   0),
         ('OASIS',        'oasis_spikes', model_colors['OASIS'],     1),
         ('CaImAn',    'trad_spikes',  model_colors['MATLAB'], 2),
-        ('OMSI',    'my_spikes',    model_colors['fMCSI'], 3),
+        ('OMSI',    'my_spikes',    model_colors['OMSI'], 3),
         ('Ground Truth', 'true_spikes',  '#111111',                 4),
     ]
     label_x = -4.0
@@ -1656,7 +1656,7 @@ def _plot_fbeta_violin(ax, alldata):
         if len(vals) >= 2:
             positions.append(i); violin_data.append(vals)
             violin_colors.append(model_colors.get(model_name, 'k'))
-            tick_labels.append('CaImAn' if model_name == 'MATLAB' else ('OMSI' if model_name == 'fMCSI' else model_name))
+            tick_labels.append('CaImAn' if model_name == 'MATLAB' else model_name)
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
                               showmedians=True, widths=0.65)
@@ -1689,7 +1689,7 @@ def _plot_cosmic_violin(ax, alldata):
         if len(vals) >= 2:
             positions.append(i); violin_data.append(vals)
             violin_colors.append(model_colors.get(model_name, 'k'))
-            tick_labels.append('CaImAn' if model_name == 'MATLAB' else ('OMSI' if model_name == 'fMCSI' else model_name))
+            tick_labels.append('CaImAn' if model_name == 'MATLAB' else model_name)
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
                               showmedians=True, widths=0.65)
@@ -1704,7 +1704,7 @@ def _plot_cosmic_violin(ax, alldata):
     ax.tick_params(axis='both', labelsize=6)
 
 
-def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
+def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                                         matlab_data_dir=None):
     """Recompute precision, recall, F-beta, and CosMIC from saved trace NPZ files.
 
@@ -1714,8 +1714,8 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
         Benchmark result records; updated in-place with recomputed metrics.
     data_dir : str
         Directory containing trace NPZ files.
-    fmcsi_traces_lookup : dict
-        fMCSI traces file lookup from _build_fmcsi_traces_lookup.
+    omsi_traces_lookup : dict
+        OMSI traces file lookup from _build_omsi_traces_lookup.
     matlab_data_dir : str, optional
         Directory containing CaImAn MCMC trace NPZ files.
     """
@@ -1761,7 +1761,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
     for fpath in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_*_traces.npz')):
         basename = os.path.basename(fpath)
-        if 'allen_data_results_fmcsi_'   in basename: continue
+        if 'allen_data_results_omsi_'   in basename: continue
         if 'allen_data_results_cascade_' in basename: continue
         orig  = basename.replace('allen_data_results_', '').replace('_traces.npz', '')
         label = clean_label(normalize_label(orig))
@@ -1780,21 +1780,21 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
                        for sp in true_spikes]
 
         df = None
-        if orig in fmcsi_traces_lookup:
+        if orig in omsi_traces_lookup:
             try:
-                df = np.load(fmcsi_traces_lookup[orig], allow_pickle=True)
+                df = np.load(omsi_traces_lookup[orig], allow_pickle=True)
             except Exception:
                 df = None
 
         src_my = df if (df is not None and 'my_probs' in df) else d
         if 'my_probs' in src_my:
             recs = [r for r in alldata
-                    if r.get('model') == 'fMCSI' and r.get('label') == label]
+                    if r.get('model') == 'OMSI' and r.get('label') == label]
             if recs:
                 rest = _from_probs(
                     true_spikes, true_events, src_my['my_probs'], fs, sigma=1.5)
                 _apply(recs, *rest)
-                updated['fMCSI'] += len(recs)
+                updated['OMSI'] += len(recs)
 
         src_oa = df if (df is not None and 'oasis_probs' in df) else d
         if 'oasis_probs' in src_oa:
@@ -1817,16 +1817,16 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
                 _apply(recs, *rest)
                 updated['MATLAB'] += len(recs)
 
-    for orig, fmcsi_path in fmcsi_traces_lookup.items():
+    for orig, omsi_path in omsi_traces_lookup.items():
         group_fpath = os.path.join(
             data_dir, f'allen_data_results_{orig}_traces.npz')
         if os.path.exists(group_fpath):
             continue
         label = clean_label(normalize_label(orig))
         try:
-            df = np.load(fmcsi_path, allow_pickle=True)
+            df = np.load(omsi_path, allow_pickle=True)
         except Exception as exc:
-            print("  Warning: could not load {}: {}.".format(fmcsi_path, exc)); continue
+            print("  Warning: could not load {}: {}.".format(omsi_path, exc)); continue
         if 'true_spikes' not in df:
             continue
         true_spikes = list(df['true_spikes'])
@@ -1837,12 +1837,12 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
 
         if 'my_probs' in df:
             recs = [r for r in alldata
-                    if r.get('model') == 'fMCSI' and r.get('label') == label]
+                    if r.get('model') == 'OMSI' and r.get('label') == label]
             if recs:
                 rest = _from_probs(
                     true_spikes, true_events, df['my_probs'], fs, sigma=1.5)
                 _apply(recs, *rest)
-                updated['fMCSI'] += len(recs)
+                updated['OMSI'] += len(recs)
 
         if 'oasis_probs' in df:
             recs = [r for r in alldata
@@ -1880,7 +1880,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
         for fpath in _glob.glob(
                 os.path.join(matlab_data_dir, 'allen_data_results_*_traces.npz')):
             basename = os.path.basename(fpath)
-            if 'allen_data_results_fmcsi_'   in basename: continue
+            if 'allen_data_results_omsi_'   in basename: continue
             if 'allen_data_results_cascade_' in basename: continue
             orig  = basename.replace('allen_data_results_', '').replace('_traces.npz', '')
             label = clean_label(normalize_label(orig))
@@ -1933,35 +1933,35 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         Clean label to normalized label.
     file_path_map : dict
         Clean label to original dataset basename.
-    fmcsi_traces_lookup : dict
-        fMCSI traces file lookup from _build_fmcsi_traces_lookup.
+    omsi_traces_lookup : dict
+        OMSI traces file lookup from _build_omsi_traces_lookup.
     """
     alldata       = []
     label_map     = {}
     file_path_map = {}
 
-    fmcsi_records_lookup = _build_fmcsi_records_lookup(data_dir)
-    fmcsi_traces_lookup  = _build_fmcsi_traces_lookup(data_dir)
+    omsi_records_lookup = _build_omsi_records_lookup(data_dir)
+    omsi_traces_lookup  = _build_omsi_traces_lookup(data_dir)
 
-    fmcsi_data_cache = {}
-    for orig_basename, fmcsi_path in fmcsi_records_lookup.items():
+    omsi_data_cache = {}
+    for orig_basename, omsi_path in omsi_records_lookup.items():
         if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
             print("Skipping excluded dataset: {}.".format(orig_basename))
             continue
         try:
-            fmcsi_data_cache[orig_basename] = _load_records(fmcsi_path)
+            omsi_data_cache[orig_basename] = _load_records(omsi_path)
         except Exception as exc:
-            print("Warning: could not load {}: {}.".format(fmcsi_path, exc))
-            fmcsi_data_cache[orig_basename] = []
-    if fmcsi_data_cache:
-        print("Found {} newer fMCSI records file(s); they will override group-file data for models they contain.".format(
-            len(fmcsi_data_cache)))
+            print("Warning: could not load {}: {}.".format(omsi_path, exc))
+            omsi_data_cache[orig_basename] = []
+    if omsi_data_cache:
+        print("Found {} newer OMSI records file(s); they will override group-file data for models they contain.".format(
+            len(omsi_data_cache)))
 
     for fpath in _glob.glob(os.path.join(data_dir, 'allen_data_results_*.npz')):
         basename = os.path.basename(fpath)
         is_cascade = 'allen_data_results_cascade_' in fpath
 
-        if 'allen_data_results_fmcsi_' in fpath:
+        if 'allen_data_results_omsi_' in fpath:
             continue
         try:
             data = _load_records(fpath)
@@ -1981,9 +1981,9 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         file_path_map.setdefault(label, orig_basename)
         geno = get_genotype(orig_basename)
 
-        if not is_cascade and orig_basename in fmcsi_data_cache:
-            fmcsi_models = {r.get('model') for r in fmcsi_data_cache[orig_basename]}
-            data = [d for d in data if d.get('model') not in fmcsi_models]
+        if not is_cascade and orig_basename in omsi_data_cache:
+            omsi_models = {r.get('model') for r in omsi_data_cache[orig_basename]}
+            data = [d for d in data if d.get('model') not in omsi_models]
         data = [d for d in data if d.get('model') != 'MATLAB']
         for d in data:
             d['label']    = label
@@ -1994,7 +1994,7 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         for fpath in _glob.glob(
                 os.path.join(matlab_data_dir, 'allen_data_results_*.npz')):
             basename   = os.path.basename(fpath)
-            if 'allen_data_results_fmcsi_'   in fpath: continue
+            if 'allen_data_results_omsi_'   in fpath: continue
             if 'allen_data_results_cascade_' in fpath: continue
             try:
                 mdata = _load_records(fpath)
@@ -2020,7 +2020,7 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
                 d['genotype'] = geno
             alldata.extend(mdata)
 
-    for orig_basename, fmcsi_recs in fmcsi_data_cache.items():
+    for orig_basename, omsi_recs in omsi_data_cache.items():
         if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
             continue
         norm_label = normalize_label(orig_basename)
@@ -2028,16 +2028,16 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         label_map.setdefault(label, norm_label)
         file_path_map.setdefault(label, orig_basename)
         geno = get_genotype(orig_basename)
-        for d in fmcsi_recs:
+        for d in omsi_recs:
             d['label']    = label
             d['genotype'] = geno
-        alldata.extend(fmcsi_recs)
+        alldata.extend(omsi_recs)
 
     if not alldata:
-        return alldata, label_map, file_path_map, fmcsi_traces_lookup
+        return alldata, label_map, file_path_map, omsi_traces_lookup
 
     print("Recomputing all metrics from traces (CosMIC, precision, recall, F_beta)...")
-    _recompute_all_metrics_from_traces(alldata, data_dir, fmcsi_traces_lookup,
+    _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                                         matlab_data_dir=matlab_data_dir)
 
     for d in alldata:
@@ -2052,7 +2052,7 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     n_unique = len(set((d['label'], d['cell_id']) for d in alldata))
     print("Loaded {} records, {} unique cells.".format(len(alldata), n_unique))
 
-    return alldata, label_map, file_path_map, fmcsi_traces_lookup
+    return alldata, label_map, file_path_map, omsi_traces_lookup
 
 
 def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
@@ -2065,7 +2065,7 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     matlab_data_dir : str, optional
         Directory containing CaImAn MCMC result files.
     """
-    alldata, label_map, file_path_map, fmcsi_traces_lookup = _load_all_results(
+    alldata, label_map, file_path_map, omsi_traces_lookup = _load_all_results(
         data_dir, matlab_data_dir)
     if not alldata:
         print("No data found in data_dir. Run with --mode test first.")
@@ -2077,7 +2077,7 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     example_cells = _load_raster_trace_data(
         data_dir, label_map, file_path_map, cascade_lookup,
         n_cells=5, window=60.0, min_spikes=15,
-        fmcsi_traces_lookup=fmcsi_traces_lookup,
+        omsi_traces_lookup=omsi_traces_lookup,
         matlab_data_dir=matlab_data_dir)
 
     taus    = sorted(set(d['tau'] for d in alldata))
@@ -2119,7 +2119,7 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     _plot_f1_violin(ax_f1, alldata, taus, f1_key=f1_key)
 
     legend_handles = [
-        plt.Line2D([0], [0], color=model_colors['fMCSI'],   marker='.', linestyle='-', label='OMSI'),
+        plt.Line2D([0], [0], color=model_colors['OMSI'],   marker='.', linestyle='-', label='OMSI'),
         plt.Line2D([0], [0], color=model_colors['MATLAB'],  marker='.', linestyle='-', label='CaImAn'),
         plt.Line2D([0], [0], color=model_colors['OASIS'],   marker='.', linestyle='-', label='OASIS'),
         plt.Line2D([0], [0], color=model_colors['CASCADE'], marker='.', linestyle='-', label='CASCADE'),
@@ -2220,8 +2220,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Figure 3 -- Allen data benchmark'
     )
-    parser.add_argument('--mode', required=True, choices=['test', 'fmcsi', 'plot', 'print'],
-                        help='test: run all inference; fmcsi: re-run fMCSI only; '
+    parser.add_argument('--mode', required=True, choices=['test', 'omsi', 'plot', 'print'],
+                        help='test: run all inference; omsi: re-run OMSI only; '
                              'plot: make figure; print: print stats')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for output data/figures')
@@ -2242,10 +2242,10 @@ def main():
             allen_data_dir=args.allen_data_dir,
             run_matlab=not args.no_matlab,
         )
-    elif args.mode == 'fmcsi':
+    elif args.mode == 'omsi':
         if not args.allen_data_dir:
-            parser.error('--allen-data-dir is required for fmcsi mode')
-        test_fmcsi(
+            parser.error('--allen-data-dir is required for omsi mode')
+        test_omsi(
             data_dir=args.data_dir,
             allen_data_dir=args.allen_data_dir,
         )

@@ -75,13 +75,13 @@ BETA = 0.5
 _TARGET_SENSORS = ['GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m']
 
 _METHODS = {
-    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
+    'omsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'matlab':      {'label': 'MATLAB',  'color': '#DD8452'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
-_METHOD_ORDER = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
-_METHOD_GRID  = [('fmcsi', 'matlab'), ('oasis', 'cascade_loo')]
+_METHOD_ORDER = ['omsi', 'matlab', 'oasis', 'cascade_loo']
+_METHOD_GRID  = [('omsi', 'matlab'), ('oasis', 'cascade_loo')]
 
 
 def _sensor_colors():

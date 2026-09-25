@@ -75,7 +75,7 @@ BETA     = 0.5
 USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
 
 COLORS = {
-    'fMCSI':      '#4C72B0',
+    'OMSI':      '#4C72B0',
     'MATLAB':      '#DD8452',
     'OASIS':       '#55A868',
     'CASCADE_GPU': '#8172B3',
@@ -83,7 +83,7 @@ COLORS = {
 }
 
 _NPZ_NAMES = {
-    'fMCSI':      'fixed_benchmark_fMCSI.npz',
+    'OMSI':      'fixed_benchmark_OMSI.npz',
     'MATLAB':      'fixed_benchmark_MATLAB.npz',
     'OASIS':       'fixed_benchmark_OASIS.npz',
     'CASCADE_GPU': 'fixed_benchmark_CASCADE_GPU.npz',
@@ -215,7 +215,7 @@ def _mad(x, axis=None):
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
-def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
+def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
              run_oasis=True, run_cascade=True):
     """ Run spike inference for all methods on simulated data.
 
@@ -223,8 +223,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
     ----------
     data_dir : str, optional
         Directory for reading/writing result files.
-    run_fmcsi : bool, optional
-        Whether to run fMCSI inference.
+    run_omsi : bool, optional
+        Whether to run OMSI inference.
     run_matlab : bool, optional
         Whether to run MATLAB/CaImAn inference.
     run_oasis : bool, optional
@@ -263,18 +263,18 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
         'kurtosis':      kurtosis,
     }
 
-    if run_fmcsi:
+    if run_omsi:
 
-        print('\nRunning fMCSI...')
+        print('\nRunning OMSI...')
         t0 = time.time()
         optim_dict = OMSI.deconv(noisy, params, true_spikes=true_spikes, benchmark=True)
         optim_time = time.time() - t0
-        print('  fMCSI took {:.1f}s ({:.3f}s/cell)'.format(optim_time, optim_time/N_CELLS))
+        print('  OMSI took {:.1f}s ({:.3f}s/cell)'.format(optim_time, optim_time/N_CELLS))
         print('  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
             np.nanmedian(optim_dict["optim_precision"]), _mad(optim_dict["optim_precision"]),
             np.nanmedian(optim_dict["optim_recall"]),    _mad(optim_dict["optim_recall"])))
         save = {**shared, **optim_dict, 'optim_time': optim_time}
-        np.savez(os.path.join(data_dir, _NPZ_NAMES['fMCSI']), **save)
+        np.savez(os.path.join(data_dir, _NPZ_NAMES['OMSI']), **save)
 
     if run_matlab:
 
@@ -406,7 +406,7 @@ def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
     Parameters
     ----------
     mine_res : np.lib.npyio.NpzFile
-        fMCSI results.
+        OMSI results.
     oasis_res : np.lib.npyio.NpzFile
         OASIS results.
     cascade_res : np.lib.npyio.NpzFile
@@ -523,7 +523,7 @@ def _plot_raster(ax, cells, window=60.0):
         ('CASCADE',       'cascade_spikes', COLORS['CASCADE_GPU'], 0),
         ('OASIS',        'oasis_spikes',    COLORS['OASIS'],       1),
         ('CaImAn',       'trad_spikes',     COLORS['MATLAB'],      2),
-        ('OMSI',        'my_spikes',       COLORS['fMCSI'],       3),
+        ('OMSI',        'my_spikes',       COLORS['OMSI'],       3),
         ('Ground Truth', 'true_spikes',     '#111111',             4),
     ]
     label_x = -4.0
@@ -624,7 +624,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
                 f'{name} results not found at {path}. Run --mode test first.'
             )
 
-    MINE_RESULTS        = np.load(paths['fMCSI'],       allow_pickle=True)
+    MINE_RESULTS        = np.load(paths['OMSI'],       allow_pickle=True)
     MATLAB_RESULTS      = np.load(paths['MATLAB'],      allow_pickle=True)
     OASIS_RESULTS       = np.load(paths['OASIS'],       allow_pickle=True)
     CASCADE_GPU_RESULTS = np.load(paths['CASCADE_GPU'], allow_pickle=True)
@@ -641,14 +641,14 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
     if USE_STRICT_ACCURACY:
         METHOD_INFO = [
-            ('fMCSI',       MINE_RESULTS,        'optim_F1',    'optim_recall',    'optim_precision',    None, float(MINE_RESULTS['optim_time'])),
+            ('OMSI',       MINE_RESULTS,        'optim_F1',    'optim_recall',    'optim_precision',    None, float(MINE_RESULTS['optim_time'])),
             ('MATLAB',      MATLAB_RESULTS,      'tradmat_F1',  'tradmat_recall',  'tradmat_precision',  None, float(MATLAB_RESULTS['tradmat_time'])),
             ('OASIS',       OASIS_RESULTS,       'oasis_F1',    'oasis_recall',    'oasis_precision',    None, float(OASIS_RESULTS['oasis_time'])),
             ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_F1',  'cascade_recall',  'cascade_precision',  None, float(CASCADE_GPU_RESULTS['cascade_time'])),
         ]
     else:
         METHOD_INFO = [
-            ('fMCSI',       MINE_RESULTS,        'optim_F1_window',    'optim_recall_window',    'optim_precision_window',    None, float(MINE_RESULTS['optim_time'])),
+            ('OMSI',       MINE_RESULTS,        'optim_F1_window',    'optim_recall_window',    'optim_precision_window',    None, float(MINE_RESULTS['optim_time'])),
             ('MATLAB',      MATLAB_RESULTS,      'tradmat_F1_window',  'tradmat_recall_window',  'tradmat_precision_window',  None, float(MATLAB_RESULTS['tradmat_time'])),
             ('OASIS',       OASIS_RESULTS,       'oasis_F1_window',    'oasis_recall_window',    'oasis_precision_window',    None, float(OASIS_RESULTS['oasis_time'])),
             ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_F1_window',  'cascade_recall_window',  'cascade_precision_window',  None, float(CASCADE_GPU_RESULTS['cascade_time'])),
@@ -657,7 +657,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     labels    = [name for name, *_ in METHOD_INFO]
     positions = list(range(len(labels)))
     _display  = {
-        'fMCSI': 'OMSI',
         'MATLAB': 'CaImAn',
         'OASIS': 'OASIS',
         'CASCADE_GPU': 'CASCADE',
@@ -727,7 +726,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     true_spikes = list(MINE_RESULTS['true_spikes'])
     fs = float(MINE_RESULTS['f'])
     cosmic_spike_keys = [
-        ('fMCSI',       MINE_RESULTS,        'optim_spikes'),
+        ('OMSI',       MINE_RESULTS,        'optim_spikes'),
         ('MATLAB',      MATLAB_RESULTS,      'tradmat_spikes'),
         ('OASIS',       OASIS_RESULTS,       'oasis_spikes'),
         ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_spikes'),
@@ -779,7 +778,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     true_spikes_arr = list(MINE_RESULTS['true_spikes'])
     n_true_spikes   = np.array([len(np.atleast_1d(s)) for s in true_spikes_arr], dtype=float)
     my_tpc          = np.array(MINE_RESULTS['optim_times_per_cell'], dtype=float)
-    time_per_spike.scatter(n_true_spikes[my_tpc>0], my_tpc[my_tpc>0], s=2, c=COLORS['fMCSI'], alpha=0.6)
+    time_per_spike.scatter(n_true_spikes[my_tpc>0], my_tpc[my_tpc>0], s=2, c=COLORS['OMSI'], alpha=0.6)
     time_per_spike.set_xlabel('# true spikes')
     time_per_spike.set_ylabel('time per cell (sec)')
     time_per_spike.set_xlim([0, 1000])
@@ -795,7 +794,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     )
 
     legend_handles = [
-        plt.Line2D([0], [0], color=COLORS['fMCSI'],      marker='.', linestyle='-', label='OMSI'),
+        plt.Line2D([0], [0], color=COLORS['OMSI'],      marker='.', linestyle='-', label='OMSI'),
         plt.Line2D([0], [0], color=COLORS['MATLAB'],      marker='.', linestyle='-', label='CaImAn'),
         plt.Line2D([0], [0], color=COLORS['OASIS'],       marker='.', linestyle='-', label='OASIS'),
         plt.Line2D([0], [0], color=COLORS['CASCADE_GPU'], marker='.', linestyle='-', label='CASCADE'),
@@ -877,7 +876,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
         if not os.path.exists(path):
             raise FileNotFoundError(f'{name} results not found at {path}. Run --mode test first.')
 
-    MINE_RESULTS        = np.load(paths['fMCSI'],       allow_pickle=True)
+    MINE_RESULTS        = np.load(paths['OMSI'],       allow_pickle=True)
     MATLAB_RESULTS      = np.load(paths['MATLAB'],      allow_pickle=True)
     OASIS_RESULTS       = np.load(paths['OASIS'],       allow_pickle=True)
     CASCADE_GPU_RESULTS = np.load(paths['CASCADE_GPU'], allow_pickle=True)
@@ -925,28 +924,28 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
 
     print('\n{:<14}  {:>17}  {:>16}'.format('Method', 'Total time (min)', 'Time/cell (sec)'))
     print('-'*52)
-    fmcsi_total_s = None
+    omsi_total_s = None
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         if label == 'OMSI':
-            fmcsi_total_s = total_t
+            omsi_total_s = total_t
         total_min = total_t / 60.0
         tpc_sec   = total_t / n_cells
         print('{:<14}  {:>17.3f}  {:>16.3f}'.format(label, total_min, tpc_sec))
 
-    print('\n{:<14}  {:>30}'.format('Method', '% diff from fMCSI total time'))
+    print('\n{:<14}  {:>30}'.format('Method', '% diff from OMSI total time'))
     print('-'*50)
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         if label == 'OMSI':
             print('{:<14}  {:>30}'.format(label, '(reference)'))
             continue
-        pct = (total_t - fmcsi_total_s) / total_t * 100.0
+        pct = (total_t - omsi_total_s) / total_t * 100.0
         sign = '+' if pct >= 0 else ''
         print('{:<14}  {}{:>28.1f}%'.format(label, sign, pct))
 
     matlab_t = float(MATLAB_RESULTS['tradmat_time'])
-    if fmcsi_total_s and fmcsi_total_s > 0:
-        oom = np.log10(matlab_t / fmcsi_total_s)
-        print('\nOrder-of-magnitude difference (fMCSI vs MATLAB): {:.2f}  (MATLAB is ~{:.1f}x slower, 10^{:.2f})'.format(oom, 10**oom, oom))
+    if omsi_total_s and omsi_total_s > 0:
+        oom = np.log10(matlab_t / omsi_total_s)
+        print('\nOrder-of-magnitude difference (OMSI vs MATLAB): {:.2f}  (MATLAB is ~{:.1f}x slower, 10^{:.2f})'.format(oom, 10**oom, oom))
 
 
 if __name__ == '__main__':
@@ -960,7 +959,7 @@ if __name__ == '__main__':
                              '"print" prints summary statistics to terminal')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for reading/writing result files')
-    parser.add_argument('--no-fmcsi',   action='store_true', help='Skip fMCSI')
+    parser.add_argument('--no-omsi',   action='store_true', help='Skip OMSI')
     parser.add_argument('--no-matlab',  action='store_true', help='Skip MATLAB')
     parser.add_argument('--no-oasis',   action='store_true', help='Skip OASIS')
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
@@ -969,7 +968,7 @@ if __name__ == '__main__':
     if args.mode == 'test':
         run_test(
             data_dir    = args.data_dir,
-            run_fmcsi   = not args.no_fmcsi,
+            run_omsi   = not args.no_omsi,
             run_matlab  = not args.no_matlab,
             run_oasis   = not args.no_oasis,
             run_cascade = not args.no_cascade,

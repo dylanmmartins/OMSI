@@ -60,7 +60,7 @@ N_CELLS  = 100
 BETA     = 0.5
 
 COLORS = {
-    'fMCSI':   '#4C72B0',
+    'OMSI':   '#4C72B0',
     'MATLAB':  '#DD8452',
     'OASIS':   '#55A868',
     'CASCADE': '#8172B3',
