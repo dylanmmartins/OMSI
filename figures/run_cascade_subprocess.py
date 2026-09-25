@@ -8,6 +8,8 @@ Functions
 ---------
 _patched_il_init
     Keras InputLayer patch for batch_shape compatibility.
+_check_ruamel
+    Fail with an actionable message when ruamel.yaml is missing.
 _probs_to_spikes
     Convert CASCADE probability trace to spike times.
 mode_inference
@@ -108,14 +110,33 @@ def _probs_to_spikes(probs, fs, height=0.5):
     return peaks / fs
 
 
+def _check_ruamel():
+
+    try:
+        import ruamel.yaml  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    print('[cascade-subprocess] ruamel.yaml is missing from this environment.\n'
+          '  CASCADE needs it, and its own auto-install is broken on pip 10+,\n'
+          '  so the traceback you would otherwise see points at pip, not here.\n'
+          '  Fix with:  conda run -n {} pip install "ruamel.yaml<0.18"'.format(
+              os.environ.get('CONDA_DEFAULT_ENV', 'cascade')),
+          file=sys.stderr)
+    sys.exit(2)
+
+
 def mode_inference(args):
     """ Run CASCADE forward inference on dF/F traces and save results.
 
     Parameters
     ----------
     args : argparse.Namespace
-        Parsed CLI arguments with fields: input, output, model.
+        Parsed CLI arguments with fields: input, output, model, and
+        optionally max_cells_per_call.
     """
+    _check_ruamel()
     import cascade2p.cascade as cascade
 
     data = np.load(args.input, allow_pickle=True)
@@ -127,11 +148,31 @@ def mode_inference(args):
     print('[cascade-subprocess] inference  n_cells={}  fs={:.1f}  model={}'.format(
         n_cells, fs, model_name))
 
-    t0 = time.time()
     import os
     model_folder = os.path.join(os.path.dirname(os.path.dirname(cascade.__file__)), "Pretrained_models")
-    probs = cascade.predict(model_name, dff, model_folder=model_folder, verbosity=1)
-    elapsed = time.time() - t0
+
+    max_per_call = getattr(args, 'max_cells_per_call', None)
+    if max_per_call and n_cells > max_per_call:
+
+        n_chunks = int(np.ceil(n_cells / max_per_call))
+        chunks = np.array_split(dff, n_chunks, axis=0)
+        print('[cascade-subprocess] n_cells={} exceeds max_cells_per_call={}; '
+              'splitting into {} calls of ~{} cells.'.format(
+                  n_cells, max_per_call, n_chunks, chunks[0].shape[0]))
+        probs_parts = []
+        elapsed = 0.0
+        for ci, chunk in enumerate(chunks):
+            t0 = time.time()
+            part = cascade.predict(model_name, chunk, model_folder=model_folder, verbosity=1)
+            elapsed += time.time() - t0
+            print('[cascade-subprocess]   chunk {}/{} ({} cells) done.'.format(
+                ci + 1, n_chunks, chunk.shape[0]))
+            probs_parts.append(part)
+        probs = np.concatenate(probs_parts, axis=0)
+    else:
+        t0 = time.time()
+        probs = cascade.predict(model_name, dff, model_folder=model_folder, verbosity=1)
+        elapsed = time.time() - t0
     print('[cascade-subprocess] Finished in {:.1f}s.'.format(elapsed))
 
     spikes = []
@@ -156,6 +197,7 @@ def mode_loo_predict(args):
     args : argparse.Namespace
         Parsed CLI arguments with fields: raster_cells, loo_models_dir, output.
     """
+    _check_ruamel()
     import cascade2p.cascade as cascade
 
     if not os.path.exists(args.raster_cells):
@@ -213,6 +255,12 @@ def main():
                         help='CASCADE model name (inference mode, optional)')
     parser.add_argument('--device', default='gpu', choices=['cpu', 'gpu'],
                         help='Hardware device for inference: cpu or gpu (default: gpu)')
+    parser.add_argument('--max-cells-per-call', dest='max_cells_per_call',
+                        type=int, default=None,
+                        help='Inference mode, optional: split into multiple cascade.predict() '
+                             'calls of at most this many cells, to avoid a single call\'s input '
+                             'tensor exceeding GPU memory. Times are summed across calls. '
+                             'Default: no splitting (unchanged single-call behavior).')
 
     parser.add_argument('--raster-cells', dest='raster_cells',
                         help='Path to raster_cells.npz (loo-predict mode)')

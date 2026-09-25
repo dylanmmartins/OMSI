@@ -78,6 +78,7 @@ DMM, March 2026
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import time
 import numpy as np
@@ -149,7 +150,7 @@ def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
     return np.where(s > thresh)[0] / fs
 
 
-def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
+def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu', max_cells_per_call=None):
     """
     Run CASCADE spike inference in a subprocess.
 
@@ -167,6 +168,12 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
         Filename prefix for the temporary .npz files.
     device : str, optional
         Compute device passed to CASCADE ('gpu' or 'cpu').
+    max_cells_per_call : int or None, optional
+        When set, forwarded to run_cascade_subprocess.py as
+        --max-cells-per-call: splits the call into multiple cascade.predict()
+        calls of at most this many cells each (summing their times), so a
+        single call's input tensor doesn't exceed GPU memory for very large
+        inputs. Default None: unchanged single-call behavior.
 
     Returns
     -------
@@ -183,17 +190,27 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
     output_path = os.path.join(data_dir, f'{prefix}_output.npz')
 
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
-    subprocess.run(
-        ['conda', 'run', '-n', 'cascade', 'python', script,
-         '--mode', 'inference', '--input', input_path, '--output', output_path,
-         '--device', device],
-        check=True
-    )
+    cmd = [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', script,
+           '--mode', 'inference', '--input', input_path, '--output', output_path,
+           '--device', device]
+    if max_cells_per_call:
+        cmd += ['--max-cells-per-call', str(max_cells_per_call)]
+    subprocess.run(cmd, check=True)
     result = np.load(output_path, allow_pickle=True)
     cascade_probs  = result['cascade_probs']
     cascade_spikes = list(result['cascade_spikes'])
     cascade_time   = float(result['cascade_time'])
     return cascade_probs, cascade_spikes, cascade_time
+
+
+class _MetricTuple(tuple):
+    """ Tuple of mean metrics that also carries the per-cell values.
+
+    Behaves exactly like the plain tuple returned previously, so existing
+    unpacking is unchanged. The per-cell arrays, keyed by metric name, are in
+    the per_cell attribute.
+    """
+    per_cell = None
 
 
 def _metrics(true_spk, pred_spk, true_ev, fs_):
@@ -221,10 +238,17 @@ def _metrics(true_spk, pred_spk, true_ev, fs_):
     prec_w, rec_w, f1_w = helpers.compute_accuracy_window(true_spk, pred_spk)
     prec_e, rec_e, f1_e = helpers.compute_accuracy_window(true_ev,  pred_spk)
     cosmic = helpers.compute_cosmic(true_spk, pred_spk, fs_)
-    return (np.mean(prec),   np.mean(rec),   np.mean(f1),
-            np.mean(prec_w), np.mean(rec_w), np.mean(f1_w),
-            np.mean(prec_e), np.mean(rec_e), np.mean(f1_e),
-            np.mean(cosmic))
+    out = _MetricTuple((np.mean(prec),   np.mean(rec),   np.mean(f1),
+                        np.mean(prec_w), np.mean(rec_w), np.mean(f1_w),
+                        np.mean(prec_e), np.mean(rec_e), np.mean(f1_e),
+                        np.mean(cosmic)))
+    out.per_cell = {
+        'F1': f1, 'Precision': prec, 'Recall': rec,
+        'F1_window': f1_w, 'Precision_window': prec_w, 'Recall_window': rec_w,
+        'F1_event': f1_e, 'Precision_event': prec_e, 'Recall_event': rec_e,
+        'COSMIC': cosmic,
+    }
+    return out
 
 
 def _row(exp, model, tau_, fs_, time_, m, sweeps=0, n_cells=None, duration=None,
@@ -277,8 +301,42 @@ def _row(exp, model, tau_, fs_, time_, m, sweeps=0, n_cells=None, duration=None,
         d['Duration'] = duration
     if mean_kurtosis is not None:
         d['Mean_Kurtosis'] = mean_kurtosis
+    per_cell = getattr(m, 'per_cell', None)
+    if per_cell:
+        # JSON string keeps the columnar record table (float or string
+        # columns only) intact. Read back with _per_cell_metrics.
+        d['PerCell'] = json.dumps(
+            {k: [round(float(x), 6) for x in np.asarray(v, dtype=float).ravel()]
+             for k, v in per_cell.items()})
     d.update(extra)
     return d
+
+
+def _per_cell_metrics(tbl):
+    """
+    Decode the per-cell metrics stored in a record table's PerCell column.
+
+    Parameters
+    ----------
+    tbl : dict
+        Columnar table as returned by _load_records.
+
+    Returns
+    -------
+    list of dict or None
+        One dict per row mapping metric name to an ndarray over cells, or an
+        empty dict for rows without per-cell data (older files, precomputed
+        records). None when the table has no PerCell column at all.
+    """
+    if 'PerCell' not in tbl:
+        return None
+    out = []
+    for v in tbl['PerCell']:
+        if isinstance(v, str) and v:
+            out.append({k: np.array(x, dtype=float) for k, x in json.loads(v).items()})
+        else:
+            out.append({})
+    return out
 
 def _save_records(records, path):
     """
@@ -856,7 +914,7 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
     duration = 300
     tau_values = [0.2, 0.5, 0.8, 1.2, 2.0]
     fixed_fs   = 30.0
-    fs_values  = [7.5, 10, 20, 30, 50, 100]
+    fs_values  = [7.5, 8.7, 10, 14, 20, 24, 30, 39, 50, 71, 100]
     fixed_tau  = 1.2
 
     results = []
@@ -1335,24 +1393,224 @@ def benchmark_cascade_sample_rate(data_dir, run_cascade=True):
     print('  Saved: {}'.format(out_path))
 
 
+def _median_mad(vals):
+
+    v = np.asarray(vals, dtype=float)
+    v = v[np.isfinite(v)]
+    if len(v) == 0:
+        return np.nan, np.nan
+    med = np.median(v)
+    mad = np.median(np.abs(v - med))
+    return med, mad
+
+
+def _fmt_median_mad(vals, width=14):
+
+    med, mad = _median_mad(vals)
+    if np.isnan(med):
+        return 'n/a'.ljust(width)
+    return '{:.3f} +/- {:.3f}'.format(med, mad).ljust(width)
+
+
+def print_summary(data_dir=_DEFAULT_DATA_DIR):
+
+    prec_col = 'Precision' if USE_STRICT_ACCURACY else 'Precision_window'
+    rec_col  = 'Recall'    if USE_STRICT_ACCURACY else 'Recall_window'
+    fb_col   = 'F1'        if USE_STRICT_ACCURACY else 'F1_window'
+    models_order = ['fMCSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
+
+    header = '{:<14} {:<12} {:>8}  {:<14} {:<14} {:<14} {:<14} {:<12}'.format(
+        'Experiment', 'Model', 'Var', 'Fbeta', 'Precision', 'Recall', 'CosMIC', 'Time (s)')
+
+    def _fmt_time(vals):
+        """Format a time value/array: plain if a single measurement, median +/- MAD if several."""
+        v = np.asarray(vals, dtype=float)
+        v = v[np.isfinite(v)]
+        if len(v) == 0:
+            return 'n/a'.ljust(12)
+        if len(v) == 1:
+            return '{:.3g}'.format(v[0]).ljust(12)
+        return _fmt_median_mad(v, width=12)
+
+    def _print_rows(rows):
+        """Print one summary line per (Model, variable) using per-cell arrays."""
+        print(header)
+        print('-' * len(header))
+        for exp, var_label, var_val, model, fb, p, r, cos, t in rows:
+            print('{:<14} {:<12} {:>8}  {} {} {} {} {}'.format(
+                exp, model, var_label.format(var_val),
+                _fmt_median_mad(fb), _fmt_median_mad(p),
+                _fmt_median_mad(r), _fmt_median_mad(cos), _fmt_time(t)))
+
+    def _rows_from_row_table(path, exp_name, var_col, var_fmt='{:g}'):
+        """
+        Build (exp, var_label, var_val, model, fb, p, r, cos, time) rows from
+        a table written via _row (PerCell column present when re-run since
+        the per-cell change; older/injected rows fall back to the single
+        mean). Time is always the row's single stored wall-clock value.
+        """
+        out = []
+        if not os.path.exists(path):
+            return out
+        tbl = _load_records(path)
+        if _tbl_len(tbl) == 0 or 'Model' not in tbl:
+            return out
+        sub = _tbl_filter(tbl, 'Experiment', exp_name) if 'Experiment' in tbl else tbl
+        if _tbl_len(sub) == 0:
+            return out
+        sub = _tbl_sort(sub, var_col)
+        per_cell = _per_cell_metrics(sub)
+        for model in models_order:
+            mmask = sub['Model'] == model
+            if mmask.sum() == 0:
+                continue
+            idx = np.where(mmask)[0]
+            for i in idx:
+                pc = per_cell[i] if per_cell is not None else {}
+                if pc:
+                    fb, p, r, cos = pc[fb_col], pc[prec_col], pc[rec_col], pc['COSMIC']
+                else:
+                    fb  = [sub[fb_col][i]]
+                    p   = [sub[prec_col][i]]
+                    r   = [sub[rec_col][i]]
+                    cos = [sub['COSMIC'][i]]
+                t = [sub['Time'][i]] if 'Time' in sub else [np.nan]
+                out.append((exp_name, var_fmt, sub[var_col][i], model, fb, p, r, cos, t))
+        return out
+
+    print('\n=== Sweeps (accuracy at each MCMC sweep count; OASIS/CASCADE are single baselines) ===')
+    rows = _rows_from_row_table(os.path.join(data_dir, 'benchmark_sweeps_partial.npz'),
+                                'Sweeps', 'Sweeps', 'sweeps={:g}')
+    _print_rows(rows) if rows else print('  No data. Run --mode test first.')
+
+    print('\n=== Tau sensitivity ===')
+    rows = _rows_from_row_table(os.path.join(data_dir, 'benchmark_params_partial.npz'),
+                                'Tau_Sensitivity', 'Tau', 'tau={:g}s')
+    _print_rows(rows) if rows else print('  No data. Run --mode test first.')
+
+    print('\n=== Frame-rate sensitivity ===')
+    rows = _rows_from_row_table(os.path.join(data_dir, 'benchmark_params_partial.npz'),
+                                'Fs_Sensitivity', 'Fs', 'fs={:g}Hz')
+    _print_rows(rows) if rows else print('  No data. Run --mode test first.')
+
+    print('\n=== Noise sensitivity ===')
+    print('  (CosMIC has no per-cell record for this benchmark; shown as the stored mean, no spread)')
+    cells_path = os.path.join(data_dir, 'benchmark_noise_sensitivity_cells.npz')
+    agg_path   = os.path.join(data_dir, 'benchmark_noise_sensitivity_partial.npz')
+    if os.path.exists(cells_path):
+        cells = _load_records(cells_path)
+        agg   = _load_records(agg_path) if os.path.exists(agg_path) else {}
+        rows = []
+        for model in models_order:
+            mmask = cells['Model'] == model
+            if mmask.sum() == 0:
+                continue
+            for snr_val in sorted(set(cells['SNR'][mmask].astype(float)), reverse=True):
+                smask = mmask & (cells['SNR'].astype(float) == snr_val)
+                p_c = cells[prec_col][smask].astype(float)
+                r_c = cells[rec_col][smask].astype(float)
+                fb_c = _fbeta(p_c, r_c)
+                cos = [np.nan]
+                t = [np.nan]
+                if agg and 'Model' in agg:
+                    amask = (agg['Model'] == model) & (agg['SNR'].astype(float) == snr_val)
+                    if amask.sum() > 0:
+                        if 'COSMIC' in agg:
+                            cos = [agg['COSMIC'][amask][0]]
+                        if 'Time' in agg:
+                            t = [agg['Time'][amask][0]]
+                rows.append(('Noise_Sensitivity', 'SNR={:g}', snr_val, model, fb_c, p_c, r_c, cos, t))
+        _print_rows(rows) if rows else print('  No data. Run --mode test first.')
+    else:
+        print('  No data. Run --mode test (or --mode noise-cells) first.')
+
+    print('\n=== Firing-rate sensitivity (median +/- MAD pooled across all cells) ===')
+    print('  (Time is per-cell here, unlike the other sections above -- OASIS/CASCADE')
+    print('   only time the whole batch, so their per-cell Time is n/a)')
+    fr_path = os.path.join(data_dir, 'firing_rate_sensitivity_partial.npz')
+    if os.path.exists(fr_path):
+        tbl = _load_records(fr_path)
+        if _tbl_len(tbl) > 0 and 'model' in tbl:
+            fr_prec = 'precision' if USE_STRICT_ACCURACY else 'precision_window'
+            fr_rec  = 'recall'    if USE_STRICT_ACCURACY else 'recall_window'
+            fr_fb   = 'f1'        if USE_STRICT_ACCURACY else 'f1_window'
+            rows = []
+            for model in models_order:
+                mmask = tbl['model'] == model
+                if mmask.sum() == 0:
+                    continue
+                rows.append(('Firing_Rate', '{}', '', model,
+                            tbl[fr_fb][mmask].astype(float), tbl[fr_prec][mmask].astype(float),
+                            tbl[fr_rec][mmask].astype(float), tbl['cosmic'][mmask].astype(float),
+                            tbl['time'][mmask].astype(float)))
+            _print_rows(rows) if rows else print('  No data. Run --mode test first.')
+        else:
+            print('  No data. Run --mode test first.')
+    else:
+        print('  No data. Run --mode test first.')
+
+    print('\n=== CASCADE: 7.5 Hz vs 30 Hz (per-cell Fbeta and CosMIC; no Precision/Recall or Time stored) ===')
+    cr_path = os.path.join(data_dir, 'cascade_7p5_vs_30hz_data.npz')
+    if os.path.exists(cr_path):
+        d = np.load(cr_path, allow_pickle=True)
+        hdr = '{:<14} {:>8}  {:<14} {:<14}'.format('Experiment', 'Var', 'Fbeta', 'CosMIC')
+        print(hdr)
+        print('-' * len(hdr))
+        for suffix, label in [('7', '7.5 Hz'), ('30', '30 Hz')]:
+            if f'fb_{suffix}' in d.files:
+                print('{:<14} {:>8}  {} {}'.format(
+                    'Cascade_SR', label,
+                    _fmt_median_mad(d[f'fb_{suffix}']), _fmt_median_mad(d[f'cosmic_{suffix}'])))
+    else:
+        print('  No data. Run --mode cascade-samplerate first.')
+
+    print('\n=== Compute time: cell-count scaling (fixed 300s recordings; single run per point) ===')
+    scale_path = os.path.join(data_dir, 'benchmark_scalability_partial.npz')
+    if os.path.exists(scale_path):
+        scale_tbl = _load_records(scale_path)
+    else:
+        scale_tbl = {}
+        print('  No data. Run --mode test first.')
+    if scale_tbl and 'Model' in scale_tbl:
+        thdr = '{:<12} {:>10}  {:<12}'.format('Model', 'Var', 'Time (s)')
+        cell_sub = _tbl_filter(scale_tbl, 'Experiment', 'Cell_Scaling')
+        if _tbl_len(cell_sub) > 0:
+            print(thdr)
+            print('-' * len(thdr))
+            for model in models_order:
+                mmask = cell_sub['Model'] == model
+                if mmask.sum() == 0:
+                    continue
+                sub = _tbl_sort({k: v[mmask] for k, v in cell_sub.items()}, 'N_Cells')
+                for i in range(_tbl_len(sub)):
+                    print('{:<12} {:>10}  {}'.format(
+                        model, 'n={:g}'.format(sub['N_Cells'][i]), _fmt_time([sub['Time'][i]])))
+        else:
+            print('  No cell-count scaling data.')
+
+        print('\n=== Compute time: recording-duration scaling (fixed 100 cells; single run per point) ===')
+        dur_sub = _tbl_filter(scale_tbl, 'Experiment', 'Duration_Scaling')
+        if _tbl_len(dur_sub) > 0:
+            print(thdr)
+            print('-' * len(thdr))
+            for model in models_order:
+                mmask = dur_sub['Model'] == model
+                if mmask.sum() == 0:
+                    continue
+                sub = _tbl_sort({k: v[mmask] for k, v in dur_sub.items()}, 'Duration')
+                for i in range(_tbl_len(sub)):
+                    print('{:<12} {:>10}  {}'.format(
+                        model, 'dur={:g}s'.format(sub['Duration'][i]), _fmt_time([sub['Time'][i]])))
+        else:
+            print('  No duration-scaling data.')
+
+    print('\nNote: MAD is unscaled (median(|x - median(x)|)); multiply by 1.4826 for a')
+    print('normal-consistent estimate comparable to standard deviation.')
+
+
 def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
              run_oasis=True, run_cascade=True):
-    """
-    Run all benchmark functions and save results to data_dir.
 
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory for result files.
-    run_fmcsi : bool, optional
-        Whether to run fMCSI.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    """
     os.makedirs(data_dir, exist_ok=True)
 
     ext = None
@@ -1367,40 +1625,26 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
 
     print('=== Sweeps benchmark ===')
     benchmark_sweeps(data_dir, **kw_shared,
-                     matlab_records=ext['sweeps'] if ext else None)
+                     matlab_records=(ext['sweeps'] or None) if ext else None)
     print('\n=== Scalability benchmark ===')
     benchmark_scalability(data_dir, **kw_shared,
-                          matlab_records=ext['scalability'] if ext else None)
+                          matlab_records=(ext['scalability'] or None) if ext else None)
     print('\n=== Parameter sensitivity benchmark ===')
     benchmark_params(data_dir, **kw_shared,
-                     matlab_records=ext['params'] if ext else None)
+                     matlab_records=(ext['params'] or None) if ext else None)
     print('\n=== Noise sensitivity benchmark ===')
     benchmark_noise_sensitivity(data_dir, **kw_shared,
-                                matlab_records=ext['noise_sensitivity'] if ext else None)
+                                matlab_records=(ext['noise_sensitivity'] or None) if ext else None)
     print('\n=== Firing-rate sensitivity benchmark ===')
     benchmark_firing_rate_sensitivity(data_dir, **kw_shared,
-                                      matlab_records=ext['firing_rate'] if ext else None)
+                                      matlab_records=(ext['firing_rate'] or None) if ext else None)
     print('\n=== CASCADE 7.5 Hz vs 30 Hz comparison ===')
     benchmark_cascade_sample_rate(data_dir, run_cascade=run_cascade)
     print('\nTest mode complete.')
 
 
 def _fbeta(prec, rec):
-    """
-    Compute F-beta score from precision and recall.
 
-    Parameters
-    ----------
-    prec : array-like
-        Precision values.
-    rec : array-like
-        Recall values.
-
-    Returns
-    -------
-    ndarray
-        F-beta scores, zero where denominator is zero.
-    """
     p  = np.asarray(prec, dtype=float)
     r  = np.asarray(rec,  dtype=float)
     b2 = BETA ** 2
@@ -1410,25 +1654,7 @@ def _fbeta(prec, rec):
 
 
 def _fit_scaling(x, y):
-    """
-    Fit linear and polynomial models to timing data.
 
-    Parameters
-    ----------
-    x : array-like
-        Independent variable (e.g. sweep count, cell count).
-    y : array-like
-        Dependent variable (compute time).
-
-    Returns
-    -------
-    r2_lin : float
-        R-squared of the linear fit.
-    r2_poly : float
-        R-squared of the degree-2 polynomial fit.
-    conclusion : str
-        'Linear' if linear fit is adequate, otherwise 'Polynomial'.
-    """
     if len(x) < 3:
         return np.nan, np.nan, 'N/A'
     x, y = np.array(x, float), np.array(y, float)
@@ -1696,6 +1922,33 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         combined = _tbl_concat([combined, ext_tbl])
         print('Injected {} CaImAn MCMC records from external files.'.format(len(ext_records)))
 
+    extra_gpu_path = os.path.join(data_dir, 'benchmark_scalability_cascade_gpu_extra.npz')
+    if os.path.exists(extra_gpu_path):
+        try:
+            extra_gpu_tbl = _load_records(extra_gpu_path)
+            keep_rows = []
+            for i in range(_tbl_len(extra_gpu_tbl)):
+                exp   = str(extra_gpu_tbl['Experiment'][i])
+                model = str(extra_gpu_tbl['Model'][i])
+                if model != 'CASCADE_GPU' or exp not in ('Cell_Scaling', 'Duration_Scaling'):
+                    continue  # this file should only ever hold these, but don't trust it blindly
+                xcol = 'N_Cells' if exp == 'Cell_Scaling' else 'Duration'
+                xval = float(extra_gpu_tbl[xcol][i])
+                already_real = (
+                    (combined.get('Model', np.array([])) == model) &
+                    (combined.get('Experiment', np.array([])) == exp) &
+                    (combined.get(xcol, np.array([])).astype(float) == xval)
+                ) if combined else np.array([], dtype=bool)
+                if np.any(already_real):
+                    continue  # the real benchmark already has this point -- prefer it
+                keep_rows.append({k: extra_gpu_tbl[k][i] for k in extra_gpu_tbl})
+            if keep_rows:
+                combined = _tbl_concat([combined, _records_to_tbl(keep_rows)])
+                print('Injected {} CASCADE (GPU) point(s) from {}.'.format(
+                    len(keep_rows), extra_gpu_path))
+        except Exception as exc:
+            print('Warning: could not load {}: {}'.format(extra_gpu_path, exc))
+
     dur_cascade_tbl = {}
     for _ext in ('.npz', '.json'):
         _alt_sc_path = os.path.join(_CASCADE_DURATION_ALT_DIR,
@@ -1844,7 +2097,9 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         subset = _tbl_sort(_tbl_filter(m_rows, 'Experiment', 'Duration_Scaling'), 'Duration')
         if _tbl_len(subset) > 0:
             last_dur  = float(subset['Duration'][-1]) / 60.
-            last_time = float(subset['Time'][-1])    / 60.
+            if last_dur >= 120.:
+                continue  # real data already reaches the extrapolation target
+            last_time = float(subset['Time'][-1]) / 60.
             axA['duration'].plot([last_dur, 120.], [last_time, t_extrap],
                                  '-', color=color)
         axA['duration'].plot(120., t_extrap, '.', color=color)
@@ -2033,8 +2288,10 @@ if __name__ == '__main__':
         description='Figure 2: scaling and sensitivity benchmarks'
     )
     parser.add_argument('--mode', required=True,
-                        choices=['test', 'plot', 'noise-cells', 'cascade-samplerate'],
+                        choices=['test', 'plot', 'print', 'noise-cells', 'cascade-samplerate'],
                         help='"test" runs all benchmarks; "plot" generates the figure; '
+                             '"print" prints median +/- MAD accuracy tables from existing result '
+                             'files without touching them; '
                              '"noise-cells" runs only the noise sensitivity benchmark and writes '
                              'benchmark_noise_sensitivity_cells.npz without touching other result files; '
                              '"cascade-samplerate" runs only the CASCADE 7.5Hz-vs-30Hz comparison '
@@ -2070,5 +2327,7 @@ if __name__ == '__main__':
         os.makedirs(args.data_dir, exist_ok=True)
         print('=== CASCADE 7.5 Hz vs 30 Hz comparison ===')
         benchmark_cascade_sample_rate(args.data_dir, run_cascade=not args.no_cascade)
+    elif args.mode == 'print':
+        print_summary(data_dir=args.data_dir)
     else:
         plot_figure(data_dir=args.data_dir)

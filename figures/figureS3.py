@@ -23,6 +23,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 
 import numpy as np
@@ -91,7 +92,7 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
 
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        ['conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
          '--mode', 'inference',
          '--input',  input_path,
          '--output', output_path,

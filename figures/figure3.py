@@ -85,6 +85,7 @@ DMM, March 2026
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -483,7 +484,7 @@ def _run_cascade_inference(dff, fs, label, data_dir):
     output_path = os.path.join(data_dir, f'fig3_cascade_{label}_output.npz')
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        ['conda', 'run', '-n', 'cascade', 'python', script,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
          '--mode', 'inference', '--input', input_path, '--output', output_path],
         check=True)
     result = np.load(output_path, allow_pickle=True)
