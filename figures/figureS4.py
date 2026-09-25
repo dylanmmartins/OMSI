@@ -16,10 +16,12 @@ _load_records
     Load scalar records from an NPZ file into a list of dicts.
 _fbeta
     Compute vectorised F-beta score from arrays of precision and recall.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _load_all_records
     Load and annotate benchmark records for all methods.
 _plot_method_panel
-    Plot mean +/- std of kurtosis vs F-beta for each target sensor.
+    Plot median +/- MAD of kurtosis vs F-beta for each target sensor.
 plot_figure
     Assemble and save figure S4.
 main
@@ -40,6 +42,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.colors as mcolors
 import matplotlib as mpl
 from matplotlib.lines import Line2D
+from OMSI._win_perf import no_power_throttling
 
 mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
@@ -73,13 +76,13 @@ BETA = 0.5
 _TARGET_SENSORS = ['GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m']
 
 _METHODS = {
-    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
+    'omsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'matlab':      {'label': 'MATLAB',  'color': '#DD8452'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
-_METHOD_ORDER = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
-_METHOD_GRID  = [('fmcsi', 'matlab'), ('oasis', 'cascade_loo')]
+_METHOD_ORDER = ['omsi', 'matlab', 'oasis', 'cascade_loo']
+_METHOD_GRID  = [('omsi', 'matlab'), ('oasis', 'cascade_loo')]
 
 
 def _sensor_colors():
@@ -149,6 +152,25 @@ def _fbeta(precision, recall):
         return np.where(denom > 0, (1 + b2) * p * r / denom, 0.0)
 
 
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
 def _load_all_records(data_dir):
     """Load and annotate benchmark records for all methods.
 
@@ -201,7 +223,7 @@ def _load_all_records(data_dir):
 
 
 def _plot_method_panel(ax, records, method_key, sensor_colors):
-    """Plot mean +/- std of kurtosis vs F-beta for each target sensor.
+    """Plot median +/- MAD of kurtosis vs F-beta for each target sensor.
 
     Parameters
     ----------
@@ -227,8 +249,8 @@ def _plot_method_panel(ax, records, method_key, sensor_colors):
         if len(kurts) < 2:
             continue
 
-        mk  = np.mean(kurts);  sk = np.std(kurts)
-        mf  = np.mean(fbs);    sf = np.std(fbs)
+        mk  = np.median(kurts);  sk = _mad(kurts)
+        mf  = np.median(fbs);    sf = _mad(fbs)
         col = sensor_colors[sensor]
 
         ax.plot([mk - sk, mk + sk], [mf, mf], '-', color=col, lw=1.4)
@@ -326,4 +348,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()

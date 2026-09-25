@@ -43,14 +43,15 @@ import scipy.io
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Environment variables that override discovery, checked before anything else.
 _MATLAB_ENV = 'MATLAB_EXECUTABLE'
 _CVX_ENV    = 'CVX_HOME'
 _CAIMAN_ENV = 'CAIMAN_MATLAB_HOME'
 
-
+# MATLAB wrapper. Placeholders are substituted by plain string replacement so
+# the MATLAB brace syntax does not have to be escaped.
 _WRAPPER_TEMPLATE = """
 try
-    __MAX_COMP_THREADS_LINE__
     cd('__WORK_DIR__');
     addpath(genpath(pwd));
 
@@ -153,6 +154,18 @@ end
 
 
 def _release_sort_key(path):
+    """ Sort key that orders MATLAB install paths newest release first.
+
+    Parameters
+    ----------
+    path : str
+        Path containing a release tag such as R2025b.
+
+    Returns
+    -------
+    tuple
+        (year, update letter) descending-friendly key, (0, '') when unparsed.
+    """
 
     match = re.search(r'R(\d{4})([ab])', path)
     if not match:
@@ -161,6 +174,21 @@ def _release_sort_key(path):
 
 
 def find_matlab(explicit=None):
+    """ Locate a MATLAB executable, newest release first.
+
+    Order: explicit argument, MATLAB_EXECUTABLE, PATH, then the standard
+    install directory for the current OS.
+
+    Parameters
+    ----------
+    explicit : str, optional
+        Path supplied by the caller. Returned as-is when it exists.
+
+    Returns
+    -------
+    str or None
+        Path to a MATLAB executable, or None when none was found.
+    """
 
     if explicit and os.path.exists(explicit):
         return explicit
@@ -200,6 +228,22 @@ def find_matlab(explicit=None):
 
 
 def find_toolbox(env_var, folder_name, extra_candidates=()):
+    """ Locate a MATLAB toolbox directory from env var or common install paths.
+
+    Parameters
+    ----------
+    env_var : str
+        Environment variable checked first.
+    folder_name : str
+        Directory name to look for, e.g. 'cvx'.
+    extra_candidates : iterable of str, optional
+        Additional absolute paths to check before the generic ones.
+
+    Returns
+    -------
+    str
+        Absolute path to the toolbox, or empty string when not found.
+    """
 
     from_env = os.environ.get(env_var, '').strip()
     if from_env and os.path.isdir(from_env):
@@ -207,6 +251,8 @@ def find_toolbox(env_var, folder_name, extra_candidates=()):
 
     home = os.path.expanduser('~')
 
+    # Parent folders people actually keep toolboxes in. OneDrive-redirected
+    # Documents and the Desktop are both common on Windows.
     parents = [
         os.path.join(home, 'Documents', 'MATLAB'),
         os.path.join(home, 'Documents'),
@@ -235,9 +281,30 @@ def find_toolbox(env_var, folder_name, extra_candidates=()):
 
 
 def _matlab_invocations(script_stem, exe=None):
+    """ Argument lists to try, modern batch mode first.
+
+    -batch arrived in R2019a. Older releases need -r with an explicit exit,
+    and Windows needs -wait so the call blocks. When the release is readable
+    from the executable path and is R2019a or later, only -batch is offered:
+    a non-zero exit then means the MATLAB script itself failed, and retrying
+    with -r would just open a second session that hangs.
+
+    Parameters
+    ----------
+    script_stem : str
+        Wrapper script name without the .m extension.
+    exe : str, optional
+        MATLAB executable path, used to read the release tag.
+
+    Returns
+    -------
+    list of list of str
+        Argument lists to append to the executable, in order of preference.
+    """
 
     batch = ['-batch', script_stem]
 
+    # Known release of R2019a or later: -batch is supported, so never retry.
     match = re.search(r'R(\d{4})([ab])', exe or '')
     if match and (int(match.group(1)), match.group(2)) >= (2019, 'a'):
         return [batch]
@@ -379,6 +446,23 @@ end
 
 
 def _write_shims(shim_dir):
+    """ Write base-MATLAB stand-ins for the Statistics Toolbox functions used.
+
+    cont_ca_sampler needs range, prctile, gamrnd, and normrnd, all of which
+    ship with the Statistics and Machine Learning Toolbox. The wrapper adds
+    this directory to the end of the path, so a real toolbox installation
+    still wins and these are used only when it is missing or unlicensed.
+
+    Parameters
+    ----------
+    shim_dir : str
+        Directory to write the .m files into. Created if absent.
+
+    Returns
+    -------
+    str
+        The directory written to.
+    """
 
     os.makedirs(shim_dir, exist_ok=True)
     for name, body in _SHIMS.items():
@@ -389,17 +473,35 @@ def _write_shims(shim_dir):
 
 
 def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
-                   shim_dir, max_comp_threads=None):
+                   shim_dir):
+    """ Fill the MATLAB wrapper template and write it next to the input file.
+
+    Forward slashes are used throughout: MATLAB accepts them on Windows too,
+    and they avoid escape trouble inside single-quoted MATLAB strings.
+
+    Parameters
+    ----------
+    path : str
+        Destination .m file.
+    work_dir : str
+        Directory MATLAB changes into before running.
+    input_mat : str
+        Input .mat filename.
+    output_mat : str
+        Output .mat filename.
+    cvx_root : str
+        cvx directory, or empty string.
+    caiman_root : str
+        CaImAn-MATLAB directory, or empty string.
+    shim_dir : str
+        Directory holding the Statistics Toolbox stand-ins.
+    """
 
     def _posix(p):
         """Normalise a path for embedding in a MATLAB string literal."""
         return p.replace('\\', '/').replace("'", "''")
 
-    max_threads_line = ('maxNumCompThreads({});'.format(int(max_comp_threads))
-                        if max_comp_threads else '% max_comp_threads not set -- using MATLAB default')
-
     code = _WRAPPER_TEMPLATE
-    code = code.replace('__MAX_COMP_THREADS_LINE__', max_threads_line)
     code = code.replace('__WORK_DIR__',    _posix(work_dir))
     code = code.replace('__INPUT_MAT__',   _posix(input_mat))
     code = code.replace('__OUTPUT_MAT__',  _posix(output_mat))
@@ -413,7 +515,42 @@ def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
 
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
-                        verbose=True, max_comp_threads=None):
+                        verbose=True):
+    """ Run MCMC spike inference via MATLAB subprocess.
+
+    Parameters
+    ----------
+    dff : np.ndarray
+        dF/F traces, shape (n_cells, n_frames) or (n_frames,).
+    fs : float, optional
+        Sampling rate in Hz.
+    tau : float, optional
+        Calcium indicator decay time constant in seconds.
+    n_sweeps : int or str, optional
+        Number of MCMC sweeps, or 'auto' to use 500.
+    true_spikes : list of np.ndarray, optional
+        Ground-truth spike times (unused, reserved for future use).
+    sparsity_scale : float, optional
+        Sparsity prior scale parameter.
+    work_dir : str, optional
+        Directory for the .mat and wrapper files. Defaults to this file's
+        directory, so results do not depend on where Python was launched.
+    matlab_exe : str, optional
+        MATLAB executable. Discovered automatically when omitted.
+    verbose : bool, optional
+        Print progress and discovery details.
+
+    Returns
+    -------
+    final_spikes : list of np.ndarray
+        Inferred spike times in seconds for each cell.
+    model_traces : np.ndarray
+        Reconstructed calcium traces, shape (n_cells, n_frames).
+    all_probs : np.ndarray
+        Posterior spike probability traces, shape (n_cells, n_frames).
+    sweeps_per_cell : np.ndarray
+        Number of MCMC sweeps run for each cell.
+    """
 
     if dff.ndim == 1:
         dff = dff[np.newaxis, :]
@@ -461,11 +598,13 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         'sparsity_scale': float(sparsity_scale),
     })
 
+    # Shims live outside work_dir so the wrapper's genpath(pwd) cannot pull
+    # them in ahead of a real Statistics Toolbox.
     shim_dir = _write_shims(os.path.join(tempfile.gettempdir(),
                                          'omsi_matlab_shims'))
 
     _write_wrapper(wrapper_script, work_dir, input_mat, output_mat,
-                   cvx_root, caiman_root, shim_dir, max_comp_threads=max_comp_threads)
+                   cvx_root, caiman_root, shim_dir)
 
     # Stale output from an earlier run would otherwise be read back as if it
     # were this run's result.

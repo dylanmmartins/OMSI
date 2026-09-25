@@ -16,6 +16,8 @@ _bin_ground_truth
     Bin ground-truth spike times into per-frame counts at a given sample rate.
 _corr_and_residual
     Compute Pearson correlation and RMSE residual between two rate traces.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _load_cascade_samplerate_group
     Load true spikes and continuous CASCADE output for one sample rate.
 compare_cascade_samplerate
@@ -32,8 +34,8 @@ _load_records
     Load a list of result dicts from a compressed NPZ file.
 _build_cascade_lookup
     Build a label-to-filepath lookup for CASCADE trace NPZ files.
-_build_fmcsi_traces_lookup
-    Build a label-to-filepath lookup for newer fMCSI traces NPZ files.
+_build_omsi_traces_lookup
+    Build a label-to-filepath lookup for newer OMSI traces NPZ files.
 _load_allen_group_traces
     Load per-cell continuous rate traces and ground truth for every Allen group.
 compare_allen_binned_rates
@@ -72,11 +74,11 @@ _DEFAULT_FIG3_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__))
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
 
 COLORS = {
-    'fMCSI':   '#4C72B0',
+    'OMSI':   '#4C72B0',
     'OASIS':   '#55A868',
     'CASCADE': '#8172B3',
 }
-_MODEL_ORDER = ['fMCSI', 'OASIS', 'CASCADE']
+_MODEL_ORDER = ['OMSI', 'OASIS', 'CASCADE']
 
 _CASCADE_CMP_COLOR_7P5 = 'tab:red'
 _CASCADE_CMP_COLOR_30  = 'tab:cyan'
@@ -138,6 +140,25 @@ def _corr_and_residual(binned_gt, pred):
         corr = float(np.corrcoef(a, b)[0, 1])
     residual = float(np.sqrt(np.mean((a - b) ** 2))) if len(a) > 0 else np.nan
     return corr, residual
+
+
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _load_cascade_samplerate_group(data_dir, fs):
@@ -208,8 +229,8 @@ def compare_cascade_samplerate(data_dir):
             corrs[i], resids[i] = _corr_and_residual(binned_gt, cascade_probs[i])
         results[f'corr_{suffix}']  = corrs
         results[f'resid_{suffix}'] = resids
-        print('  {} Hz: mean corr={:.3f}  mean resid={:.4f}'.format(
-            fs, np.nanmean(corrs), np.nanmean(resids)))
+        print('  {} Hz: corr={:.3f} ± {:.3f}  resid={:.4f} ± {:.4f}'.format(
+            fs, np.nanmedian(corrs), _mad(corrs), np.nanmedian(resids), _mad(resids)))
     return results
 
 
@@ -387,25 +408,25 @@ def _build_cascade_lookup(data_dir):
     return lookup
 
 
-def _build_fmcsi_traces_lookup(data_dir):
+def _build_omsi_traces_lookup(data_dir):
     """
-    Build a label-to-filepath lookup for newer fMCSI traces NPZ files.
+    Build a label-to-filepath lookup for newer OMSI traces NPZ files.
 
     Parameters
     ----------
     data_dir : str
-        Directory containing allen_data_results_fmcsi_*_traces.npz files.
+        Directory containing allen_data_results_omsi_*_traces.npz files.
 
     Returns
     -------
     dict
-        Mapping from label string to fMCSI traces NPZ file path.
+        Mapping from label string to OMSI traces NPZ file path.
     """
     lookup = {}
     for fpath in _glob.glob(
-            os.path.join(data_dir, 'allen_data_results_fmcsi_*_traces.npz')):
+            os.path.join(data_dir, 'allen_data_results_omsi_*_traces.npz')):
         name  = os.path.basename(fpath)
-        orig  = name.replace('allen_data_results_fmcsi_', '').replace('_traces.npz', '')
+        orig  = name.replace('allen_data_results_omsi_', '').replace('_traces.npz', '')
         group = os.path.join(data_dir, f'allen_data_results_{orig}_traces.npz')
         if not os.path.exists(group) or \
                 os.path.getmtime(fpath) > os.path.getmtime(group):
@@ -426,17 +447,17 @@ def _load_allen_group_traces(data_dir):
     -------
     list of dict
         One entry per cell with keys 'label', 'zoom', 'fs', 'true_spikes',
-        'oasis_prob', 'fmcsi_prob', 'cascade_prob' (cascade_prob is None if
+        'oasis_prob', 'omsi_prob', 'cascade_prob' (cascade_prob is None if
         no CASCADE output was found for that cell).
     """
     cascade_lookup      = _build_cascade_lookup(data_dir)
-    fmcsi_traces_lookup = _build_fmcsi_traces_lookup(data_dir)
+    omsi_traces_lookup = _build_omsi_traces_lookup(data_dir)
 
     cells = []
     for fpath in sorted(_glob.glob(
             os.path.join(data_dir, 'allen_data_results_*_traces.npz'))):
         basename = os.path.basename(fpath)
-        if 'allen_data_results_fmcsi_'   in basename: continue
+        if 'allen_data_results_omsi_'   in basename: continue
         if 'allen_data_results_cascade_' in basename: continue
 
         orig = basename.replace('allen_data_results_', '').replace('_traces.npz', '')
@@ -456,9 +477,9 @@ def _load_allen_group_traces(data_dir):
             continue
 
         df = None
-        if orig in fmcsi_traces_lookup:
+        if orig in omsi_traces_lookup:
             try:
-                df = np.load(fmcsi_traces_lookup[orig], allow_pickle=True)
+                df = np.load(omsi_traces_lookup[orig], allow_pickle=True)
             except Exception:
                 df = None
 
@@ -495,7 +516,7 @@ def _load_allen_group_traces(data_dir):
                 'label': label, 'zoom': zoom, 'fs': fs,
                 'true_spikes': spk,
                 'oasis_prob':  oasis_probs[i],
-                'fmcsi_prob':  my_probs[i],
+                'omsi_prob':  my_probs[i],
                 'cascade_prob': cascade_prob,
             })
     return cells
@@ -529,10 +550,10 @@ def compare_allen_binned_rates(data_dir):
     for c in cells:
         if c['zoom'] not in results:
             continue
-        n_frames  = len(c['fmcsi_prob'])
+        n_frames  = len(c['omsi_prob'])
         binned_gt = _bin_ground_truth(c['true_spikes'], c['fs'], n_frames)
 
-        for model, prob in [('fMCSI',   c['fmcsi_prob']),
+        for model, prob in [('OMSI',   c['omsi_prob']),
                             ('OASIS',   c['oasis_prob']),
                             ('CASCADE', c['cascade_prob'])]:
             if prob is None:
@@ -549,8 +570,8 @@ def compare_allen_binned_rates(data_dir):
                 vals = np.array(results[zoom][model][metric])
                 results[zoom][model][metric] = vals
                 if len(vals) > 0:
-                    print('  {} / {} / {}: n={}  mean={:.3f}'.format(
-                        zoom, model, metric, len(vals), np.mean(vals)))
+                    print('  {} / {} / {}: n={}  median={:.3f} ± {:.3f}'.format(
+                        zoom, model, metric, len(vals), np.median(vals), _mad(vals)))
     return results
 
 
@@ -580,7 +601,7 @@ def _plot_binned_violin(ax, data_by_model, ylabel, ylim_bottom=None):
             positions.append(i)
             violin_data.append(vals)
             violin_colors.append(COLORS.get(model, 'k'))
-            tick_labels.append('OMSI' if model == 'fMCSI' else model)
+            tick_labels.append(model)
     if violin_data:
         parts = ax.violinplot(violin_data, positions=positions,
                               showmedians=True, widths=0.65)
@@ -627,7 +648,7 @@ def _plot_allen_binned_grid(results, out_dir):
         axes[row, 1].set_ylim(0.0, row_top)
 
     legend_handles = [
-        plt.Line2D([0], [0], color=COLORS['fMCSI'],   marker='.', linestyle='-', label='OMSI'),
+        plt.Line2D([0], [0], color=COLORS['OMSI'],   marker='.', linestyle='-', label='OMSI'),
         plt.Line2D([0], [0], color=COLORS['OASIS'],   marker='.', linestyle='-', label='OASIS'),
         plt.Line2D([0], [0], color=COLORS['CASCADE'], marker='.', linestyle='-', label='CASCADE'),
     ]

@@ -55,7 +55,7 @@ def _save(config: dict) -> None:
     """ Write config dict back to internals.yaml. """
 
     with open(_CONFIG_FILE, 'w') as fh:
-        fh.write('# fMCSI user path configuration -- auto-generated, do not commit\n')
+        fh.write('# OMSI user path configuration -- auto-generated, do not commit\n')
         fh.write('# Delete this file to re-run path setup prompts.\n')
         for key, value in config.items():
             fh.write('{}: {}\n'.format(key, value))
@@ -87,7 +87,7 @@ def _pick_directory(prompt: str) -> str:
         root.attributes('-topmost', True)
 
         messagebox.showinfo(
-            'fMCSI -- first-time path setup',
+            'OMSI -- first-time path setup',
             '{}\n\nClick OK, then choose a folder.'.format(prompt),
             parent=root,
         )
@@ -103,10 +103,10 @@ def _pick_directory(prompt: str) -> str:
         if chosen:
             return chosen
 
-        print('[fMCSI] No folder selected -- using system temp directory.')
+        print('[OMSI] No folder selected -- using system temp directory.')
 
     except Exception as exc:
-        print('[fMCSI] GUI unavailable ({}) -- using system temp directory.'.format(exc))
+        print('[OMSI] GUI unavailable ({}) -- using system temp directory.'.format(exc))
 
     import tempfile
     return tempfile.gettempdir()
@@ -138,6 +138,6 @@ def get_path(key: str, prompt: str) -> str:
 
     config[key] = path
     _save(config)
-    print('[fMCSI] {} = {}  (saved to internals.yaml)'.format(key, path))
+    print('[OMSI] {} = {}  (saved to internals.yaml)'.format(key, path))
 
     return path

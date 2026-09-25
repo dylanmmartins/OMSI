@@ -12,6 +12,8 @@ _run_cascade_inference
     Run CASCADE spike inference via subprocess.
 _fbeta
     Compute F-beta score from precision and recall arrays.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 run_test
     Run all inference methods on simulated data.
 _best_window_sim
@@ -25,7 +27,7 @@ _with_window_metrics
 plot_figure
     Load results and render the figure.
 plot_running_median
-    Overlay a running-median curve with SEM band on an axes.
+    Overlay a running-median curve with MAD band on an axes.
 print_stats
     Print summary statistics to the terminal.
 
@@ -54,6 +56,7 @@ from oasis.functions import deconvolve as oasis_deconv
 import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig1')
 
@@ -74,7 +77,7 @@ BETA     = 0.5
 USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
 
 COLORS = {
-    'fMCSI':      '#4C72B0',
+    'OMSI':      '#4C72B0',
     'MATLAB':      '#DD8452',
     'OASIS':       '#55A868',
     'CASCADE_GPU': '#8172B3',
@@ -82,7 +85,7 @@ COLORS = {
 }
 
 _NPZ_NAMES = {
-    'fMCSI':      'fixed_benchmark_fMCSI.npz',
+    'OMSI':      'fixed_benchmark_OMSI.npz',
     'MATLAB':      'fixed_benchmark_MATLAB.npz',
     'OASIS':       'fixed_benchmark_OASIS.npz',
     'CASCADE_GPU': 'fixed_benchmark_CASCADE_GPU.npz',
@@ -195,7 +198,26 @@ def _fbeta(precision, recall):
         return np.where(denom > 0, (1 + b2) * p * r / denom, 0.0)
 
 
-def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
+def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
              run_oasis=True, run_cascade=True):
     """ Run spike inference for all methods on simulated data.
 
@@ -203,8 +225,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
     ----------
     data_dir : str, optional
         Directory for reading/writing result files.
-    run_fmcsi : bool, optional
-        Whether to run fMCSI inference.
+    run_omsi : bool, optional
+        Whether to run OMSI inference.
     run_matlab : bool, optional
         Whether to run MATLAB/CaImAn inference.
     run_oasis : bool, optional
@@ -243,16 +265,18 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
         'kurtosis':      kurtosis,
     }
 
-    if run_fmcsi:
+    if run_omsi:
 
-        print('\nRunning fMCSI...')
+        print('\nRunning OMSI...')
         t0 = time.time()
         optim_dict = OMSI.deconv(noisy, params, true_spikes=true_spikes, benchmark=True)
         optim_time = time.time() - t0
-        print('  fMCSI took {:.1f}s ({:.3f}s/cell)'.format(optim_time, optim_time/N_CELLS))
-        print('  P={:.3f}  R={:.3f}'.format(np.nanmean(optim_dict["optim_precision"]), np.nanmean(optim_dict["optim_recall"])))
+        print('  OMSI took {:.1f}s ({:.3f}s/cell)'.format(optim_time, optim_time/N_CELLS))
+        print('  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+            np.nanmedian(optim_dict["optim_precision"]), _mad(optim_dict["optim_precision"]),
+            np.nanmedian(optim_dict["optim_recall"]),    _mad(optim_dict["optim_recall"])))
         save = {**shared, **optim_dict, 'optim_time': optim_time}
-        np.savez(os.path.join(data_dir, _NPZ_NAMES['fMCSI']), **save)
+        np.savez(os.path.join(data_dir, _NPZ_NAMES['OMSI']), **save)
 
     if run_matlab:
 
@@ -263,7 +287,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
         )
         matlab_time = time.time() - t0
         trad_prec, trad_rec, trad_F1 = OMSI.compute_accuracy_strict(true_spikes, trad_spikes)
-        print('  MATLAB took {:.1f}s  P={:.3f}  R={:.3f}'.format(matlab_time, np.nanmean(trad_prec), np.nanmean(trad_rec)))
+        print('  MATLAB took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+            matlab_time, np.nanmedian(trad_prec), _mad(trad_prec), np.nanmedian(trad_rec), _mad(trad_rec)))
         save = {
             **shared,
             'tradmat_spikes':    np.array(trad_spikes, dtype=object),
@@ -290,7 +315,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
             oasis_spikes.append(_oasis_spikes_from_s(s, sigmas[i], FS))
         oasis_time = time.time() - t0
         oasis_prec, oasis_rec, oasis_F1 = OMSI.compute_accuracy_strict(true_spikes, oasis_spikes)
-        print('  OASIS took {:.1f}s  P={:.3f}  R={:.3f}'.format(oasis_time, np.nanmean(oasis_prec), np.nanmean(oasis_rec)))
+        print('  OASIS took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+            oasis_time, np.nanmedian(oasis_prec), _mad(oasis_prec), np.nanmedian(oasis_rec), _mad(oasis_rec)))
         save = {
             **shared,
             'oasis_spikes':    np.array(oasis_spikes, dtype=object),
@@ -310,7 +336,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
                 prefix=f'fig1_cascade_{_dev}', device=_dev
             )
             _prec, _rec, _F1 = OMSI.compute_accuracy_strict(true_spikes, _spikes)
-            print('  CASCADE ({}) took {:.1f}s  P={:.3f}  R={:.3f}'.format(_dev.upper(), _time, np.nanmean(_prec), np.nanmean(_rec)))
+            print('  CASCADE ({}) took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
+                _dev.upper(), _time, np.nanmedian(_prec), _mad(_prec), np.nanmedian(_rec), _mad(_rec)))
             np.savez(os.path.join(data_dir, _NPZ_NAMES[_key]), **{
                 **shared,
                 'cascade_spikes':    np.array(_spikes, dtype=object),
@@ -381,7 +408,7 @@ def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
     Parameters
     ----------
     mine_res : np.lib.npyio.NpzFile
-        fMCSI results.
+        OMSI results.
     oasis_res : np.lib.npyio.NpzFile
         OASIS results.
     cascade_res : np.lib.npyio.NpzFile
@@ -498,7 +525,7 @@ def _plot_raster(ax, cells, window=60.0):
         ('CASCADE',       'cascade_spikes', COLORS['CASCADE_GPU'], 0),
         ('OASIS',        'oasis_spikes',    COLORS['OASIS'],       1),
         ('CaImAn',       'trad_spikes',     COLORS['MATLAB'],      2),
-        ('OMSI',        'my_spikes',       COLORS['fMCSI'],       3),
+        ('OMSI',        'my_spikes',       COLORS['OMSI'],       3),
         ('Ground Truth', 'true_spikes',     '#111111',             4),
     ]
     label_x = -4.0
@@ -599,7 +626,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
                 f'{name} results not found at {path}. Run --mode test first.'
             )
 
-    MINE_RESULTS        = np.load(paths['fMCSI'],       allow_pickle=True)
+    MINE_RESULTS        = np.load(paths['OMSI'],       allow_pickle=True)
     MATLAB_RESULTS      = np.load(paths['MATLAB'],      allow_pickle=True)
     OASIS_RESULTS       = np.load(paths['OASIS'],       allow_pickle=True)
     CASCADE_GPU_RESULTS = np.load(paths['CASCADE_GPU'], allow_pickle=True)
@@ -616,14 +643,14 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
     if USE_STRICT_ACCURACY:
         METHOD_INFO = [
-            ('fMCSI',       MINE_RESULTS,        'optim_F1',    'optim_recall',    'optim_precision',    None, float(MINE_RESULTS['optim_time'])),
+            ('OMSI',       MINE_RESULTS,        'optim_F1',    'optim_recall',    'optim_precision',    None, float(MINE_RESULTS['optim_time'])),
             ('MATLAB',      MATLAB_RESULTS,      'tradmat_F1',  'tradmat_recall',  'tradmat_precision',  None, float(MATLAB_RESULTS['tradmat_time'])),
             ('OASIS',       OASIS_RESULTS,       'oasis_F1',    'oasis_recall',    'oasis_precision',    None, float(OASIS_RESULTS['oasis_time'])),
             ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_F1',  'cascade_recall',  'cascade_precision',  None, float(CASCADE_GPU_RESULTS['cascade_time'])),
         ]
     else:
         METHOD_INFO = [
-            ('fMCSI',       MINE_RESULTS,        'optim_F1_window',    'optim_recall_window',    'optim_precision_window',    None, float(MINE_RESULTS['optim_time'])),
+            ('OMSI',       MINE_RESULTS,        'optim_F1_window',    'optim_recall_window',    'optim_precision_window',    None, float(MINE_RESULTS['optim_time'])),
             ('MATLAB',      MATLAB_RESULTS,      'tradmat_F1_window',  'tradmat_recall_window',  'tradmat_precision_window',  None, float(MATLAB_RESULTS['tradmat_time'])),
             ('OASIS',       OASIS_RESULTS,       'oasis_F1_window',    'oasis_recall_window',    'oasis_precision_window',    None, float(OASIS_RESULTS['oasis_time'])),
             ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_F1_window',  'cascade_recall_window',  'cascade_precision_window',  None, float(CASCADE_GPU_RESULTS['cascade_time'])),
@@ -632,7 +659,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     labels    = [name for name, *_ in METHOD_INFO]
     positions = list(range(len(labels)))
     _display  = {
-        'fMCSI': 'OMSI',
         'MATLAB': 'CaImAn',
         'OASIS': 'OASIS',
         'CASCADE_GPU': 'CASCADE',
@@ -702,7 +728,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     true_spikes = list(MINE_RESULTS['true_spikes'])
     fs = float(MINE_RESULTS['f'])
     cosmic_spike_keys = [
-        ('fMCSI',       MINE_RESULTS,        'optim_spikes'),
+        ('OMSI',       MINE_RESULTS,        'optim_spikes'),
         ('MATLAB',      MATLAB_RESULTS,      'tradmat_spikes'),
         ('OASIS',       OASIS_RESULTS,       'oasis_spikes'),
         ('CASCADE_GPU', CASCADE_GPU_RESULTS, 'cascade_spikes'),
@@ -712,7 +738,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     for name, res, spk_k in cosmic_spike_keys:
         scores = compute_cosmic(true_spikes, list(res[spk_k]), fs)
         cosmic_arrays.append(scores)
-        print('  {}: mean CosMIC = {:.3f}'.format(name, np.mean(scores)))
+        print('  {}: CosMIC = {:.3f} ± {:.3f}'.format(name, np.nanmedian(scores), _mad(scores)))
     parts = cosmic_dist.violinplot(cosmic_arrays, positions=positions,
                                    showmedians=True, widths=0.65)
     for pc, name in zip(parts['bodies'], labels):
@@ -754,7 +780,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     true_spikes_arr = list(MINE_RESULTS['true_spikes'])
     n_true_spikes   = np.array([len(np.atleast_1d(s)) for s in true_spikes_arr], dtype=float)
     my_tpc          = np.array(MINE_RESULTS['optim_times_per_cell'], dtype=float)
-    time_per_spike.scatter(n_true_spikes[my_tpc>0], my_tpc[my_tpc>0], s=2, c=COLORS['fMCSI'], alpha=0.6)
+    time_per_spike.scatter(n_true_spikes[my_tpc>0], my_tpc[my_tpc>0], s=2, c=COLORS['OMSI'], alpha=0.6)
     time_per_spike.set_xlabel('# true spikes')
     time_per_spike.set_ylabel('time per cell (sec)')
     time_per_spike.set_xlim([0, 1000])
@@ -770,7 +796,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     )
 
     legend_handles = [
-        plt.Line2D([0], [0], color=COLORS['fMCSI'],      marker='.', linestyle='-', label='OMSI'),
+        plt.Line2D([0], [0], color=COLORS['OMSI'],      marker='.', linestyle='-', label='OMSI'),
         plt.Line2D([0], [0], color=COLORS['MATLAB'],      marker='.', linestyle='-', label='CaImAn'),
         plt.Line2D([0], [0], color=COLORS['OASIS'],       marker='.', linestyle='-', label='OASIS'),
         plt.Line2D([0], [0], color=COLORS['CASCADE_GPU'], marker='.', linestyle='-', label='CASCADE'),
@@ -786,7 +812,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
 
 def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
-    """ Overlay a running-median curve with SEM band on an axes.
+    """ Overlay a running-median curve with MAD band on an axes.
 
     Parameters
     ----------
@@ -799,16 +825,16 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
     n_bins : int, optional
         Number of bins for the running median.
     vertical : bool, optional
-        If True, plot x vs bin_means instead of bin_means vs x.
+        If True, plot x vs bin_medians instead of bin_medians vs x.
     fb : bool, optional
-        If True, fill between mean +/- SEM.
+        If True, fill between median +/- MAD.
     color : str, optional
         Line and fill color.
 
     Returns
     -------
     float
-        Maximum value of bin_means + tuning_err.
+        Maximum value of bin_medians + tuning_err.
     """
     import scipy.stats
     mask = ~np.isnan(x) & ~np.isnan(y)
@@ -816,21 +842,18 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
         return np.nan
     x_use, y_use = x[mask], y[mask]
     bins = np.linspace(np.min(x_use), np.max(x_use), n_bins)
-    bin_means, bin_edges, _ = scipy.stats.binned_statistic(x_use, y_use, np.nanmedian, bins=bins)
-    bin_std, _, _  = scipy.stats.binned_statistic(x_use, y_use, np.nanstd,    bins=bins)
-    hist, _, _     = scipy.stats.binned_statistic(x_use, y_use,
-                                                  lambda v: np.sum(~np.isnan(v)), bins=bins)
-    tuning_err = bin_std / np.sqrt(hist)
+    bin_medians, bin_edges, _ = scipy.stats.binned_statistic(x_use, y_use, np.nanmedian, bins=bins)
+    tuning_err, _, _          = scipy.stats.binned_statistic(x_use, y_use, _mad,         bins=bins)
     centers = bin_edges[:-1] + np.median(np.diff(bins)) / 2
     if not vertical:
-        ax.plot(centers, bin_means, '-', color=color)
+        ax.plot(centers, bin_medians, '-', color=color)
         if fb:
-            ax.fill_between(centers, bin_means - tuning_err, bin_means + tuning_err,
+            ax.fill_between(centers, bin_medians - tuning_err, bin_medians + tuning_err,
                             color=color, alpha=0.2)
     else:
-        ax.plot(bin_means, centers, '-', color=color)
+        ax.plot(bin_medians, centers, '-', color=color)
         if fb:
-            ax.fill_betweenx(centers, bin_means - tuning_err, bin_means + tuning_err,
+            ax.fill_betweenx(centers, bin_medians - tuning_err, bin_medians + tuning_err,
                              color=color, alpha=0.2)
 
     # Do a linear regression and print the slope.
@@ -838,7 +861,7 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
         slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(x_use, y_use)
         print('Linear regression slope: {:.4f}, R-squared: {:.4f}'.format(slope, r_value**2))
 
-    return np.nanmax(bin_means + tuning_err)
+    return np.nanmax(bin_medians + tuning_err)
 
 
 
@@ -855,7 +878,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
         if not os.path.exists(path):
             raise FileNotFoundError(f'{name} results not found at {path}. Run --mode test first.')
 
-    MINE_RESULTS        = np.load(paths['fMCSI'],       allow_pickle=True)
+    MINE_RESULTS        = np.load(paths['OMSI'],       allow_pickle=True)
     MATLAB_RESULTS      = np.load(paths['MATLAB'],      allow_pickle=True)
     OASIS_RESULTS       = np.load(paths['OASIS'],       allow_pickle=True)
     CASCADE_GPU_RESULTS = np.load(paths['CASCADE_GPU'], allow_pickle=True)
@@ -887,8 +910,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     print('FIGURE 1 STATISTICS')
     print('='*78)
 
-    print('\n{:<14}  {:>14}  {:>11}  {:>14}  {:>11}'.format('Method', 'F_beta median', 'F_beta IQR', 'CosMIC median', 'CosMIC IQR'))
-    print('-'*70)
+    print('\n{:<14}  {:>20}  {:>20}'.format('Method', 'F_beta (med ± MAD)', 'CosMIC (med ± MAD)'))
+    print('-'*58)
     fb_data = {}
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         prec   = np.array(res[prec_k], dtype=float)
@@ -896,34 +919,35 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
         fb     = _fbeta(prec, rec)
         cosmic = compute_cosmic(true_spikes, list(res[spk_k]), fs)
         fb_data[label] = fb
-        fb_med = np.nanmedian(fb);     fb_iqr = np.subtract(*np.nanpercentile(fb,     [75, 25]))
-        co_med = np.nanmedian(cosmic); co_iqr = np.subtract(*np.nanpercentile(cosmic, [75, 25]))
-        print('{:<14}  {:>14.3f}  {:>11.3f}  {:>14.3f}  {:>11.3f}'.format(label, fb_med, fb_iqr, co_med, co_iqr))
+        fb_med = np.nanmedian(fb);     fb_mad = np.nanmedian(np.abs(fb     - fb_med))
+        co_med = np.nanmedian(cosmic); co_mad = np.nanmedian(np.abs(cosmic - co_med))
+        print('{:<14}  {:>20}  {:>20}'.format(
+            label, '{:.3f} ± {:.3f}'.format(fb_med, fb_mad), '{:.3f} ± {:.3f}'.format(co_med, co_mad)))
 
     print('\n{:<14}  {:>17}  {:>16}'.format('Method', 'Total time (min)', 'Time/cell (sec)'))
     print('-'*52)
-    fmcsi_total_s = None
+    omsi_total_s = None
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         if label == 'OMSI':
-            fmcsi_total_s = total_t
+            omsi_total_s = total_t
         total_min = total_t / 60.0
         tpc_sec   = total_t / n_cells
         print('{:<14}  {:>17.3f}  {:>16.3f}'.format(label, total_min, tpc_sec))
 
-    print('\n{:<14}  {:>30}'.format('Method', '% diff from fMCSI total time'))
+    print('\n{:<14}  {:>30}'.format('Method', '% diff from OMSI total time'))
     print('-'*50)
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         if label == 'OMSI':
             print('{:<14}  {:>30}'.format(label, '(reference)'))
             continue
-        pct = (total_t - fmcsi_total_s) / total_t * 100.0
+        pct = (total_t - omsi_total_s) / total_t * 100.0
         sign = '+' if pct >= 0 else ''
         print('{:<14}  {}{:>28.1f}%'.format(label, sign, pct))
 
     matlab_t = float(MATLAB_RESULTS['tradmat_time'])
-    if fmcsi_total_s and fmcsi_total_s > 0:
-        oom = np.log10(matlab_t / fmcsi_total_s)
-        print('\nOrder-of-magnitude difference (fMCSI vs MATLAB): {:.2f}  (MATLAB is ~{:.1f}x slower, 10^{:.2f})'.format(oom, 10**oom, oom))
+    if omsi_total_s and omsi_total_s > 0:
+        oom = np.log10(matlab_t / omsi_total_s)
+        print('\nOrder-of-magnitude difference (OMSI vs MATLAB): {:.2f}  (MATLAB is ~{:.1f}x slower, 10^{:.2f})'.format(oom, 10**oom, oom))
 
 
 if __name__ == '__main__':
@@ -937,20 +961,21 @@ if __name__ == '__main__':
                              '"print" prints summary statistics to terminal')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for reading/writing result files')
-    parser.add_argument('--no-fmcsi',   action='store_true', help='Skip fMCSI')
+    parser.add_argument('--no-omsi',   action='store_true', help='Skip OMSI')
     parser.add_argument('--no-matlab',  action='store_true', help='Skip MATLAB')
     parser.add_argument('--no-oasis',   action='store_true', help='Skip OASIS')
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
     args = parser.parse_args()
 
     if args.mode == 'test':
-        run_test(
-            data_dir    = args.data_dir,
-            run_fmcsi   = not args.no_fmcsi,
-            run_matlab  = not args.no_matlab,
-            run_oasis   = not args.no_oasis,
-            run_cascade = not args.no_cascade,
-        )
+        with no_power_throttling(verbose=True):
+            run_test(
+                data_dir    = args.data_dir,
+                run_omsi   = not args.no_omsi,
+                run_matlab  = not args.no_matlab,
+                run_oasis   = not args.no_oasis,
+                run_cascade = not args.no_cascade,
+            )
     elif args.mode == 'plot':
         plot_figure(data_dir=args.data_dir)
     else:

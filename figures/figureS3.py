@@ -10,12 +10,16 @@ _run_cascade_inference
     Run CASCADE spike inference via a subprocess and return spike times.
 _fbeta
     Compute vectorised F-beta score from arrays of precision and recall.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 run_test
     Generate synthetic data, run CASCADE inference, and save benchmark results.
 plot_figure
     Load benchmark results and generate figure S3.
+print_stats
+    Print the values plotted in figure S3 without rendering the figure.
 main
-    Parse command-line arguments and dispatch to run_test or plot_figure.
+    Parse command-line arguments and dispatch to run_test, plot_figure, or print_stats.
 
 
 DMM, March 2026
@@ -36,6 +40,7 @@ from matplotlib.patches import Patch
 
 import OMSI
 import OMSI.helpers as helpers
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'figS3')
@@ -128,6 +133,25 @@ def _fbeta(prec, rec):
         return np.where(denom > 0, (1 + b2) * p * r / denom, 0.0)
 
 
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
+
+
 def run_test(data_dir=_DEFAULT_DATA_DIR, run_cascade=True):
     """Generate synthetic data, run CASCADE inference, and save benchmark results.
 
@@ -180,7 +204,8 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_cascade=True):
         cosmic = helpers.compute_cosmic(true_spikes, cascade_spikes, fs)
         results[f'fb_{suffix}']     = fb
         results[f'cosmic_{suffix}'] = cosmic
-        print('  Mean F_beta={:.3f}  CosMIC={:.3f}.'.format(np.nanmean(fb), np.nanmean(cosmic)))
+        print('  F_beta={:.3f} ± {:.3f}  CosMIC={:.3f} ± {:.3f}.'.format(
+            np.nanmedian(fb), _mad(fb), np.nanmedian(cosmic), _mad(cosmic)))
 
     np.savez(out_path, **results)
     print('\nSaved {}.'.format(out_path))
@@ -246,14 +271,52 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     plt.close(fig)
 
 
+def print_stats(data_dir=_DEFAULT_DATA_DIR):
+    """Print the values plotted in figure S3 without rendering the figure.
+
+    Parameters
+    ----------
+    data_dir : str, optional
+        Directory containing the benchmark NPZ file.
+    """
+
+    npz_path = os.path.join(data_dir, _NPZ_NAME)
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(
+            f'Results not found at {npz_path}. Run --mode test first.')
+
+    data = np.load(npz_path)
+
+    print('\n' + '=' * 72)
+    print('FIGURE S3 STATISTICS')
+    print('=' * 72)
+    print('\n--- CASCADE 7.5 Hz vs 30 Hz (across cells) ---')
+    header = '  {:<8} {:<8} {:>15} {:>7} {:>7} {:>5}'.format(
+        'Metric', 'Fs', 'Median ± MAD', 'Min', 'Max', 'n')
+    print(header)
+    print('  ' + '-' * (len(header) - 2))
+    for key, label in [('fb', 'F_beta'), ('cosmic', 'CosMIC')]:
+        for suffix, fs_label in [('7', '7.5 Hz'), ('30', '30 Hz')]:
+            v = data[f'{key}_{suffix}']
+            v = v[np.isfinite(v)]
+            if len(v) == 0:
+                print('  {:<8} {:<8} {:>15}'.format(label, fs_label, 'no data'))
+                continue
+            print('  {:<8} {:<8} {:>15} {:>7.3f} {:>7.3f} {:>5}'.format(
+                label, fs_label,
+                '{:.3f} ± {:.3f}'.format(np.median(v), _mad(v)),
+                np.min(v), np.max(v), len(v)))
+
+
 def main():
 
     parser = argparse.ArgumentParser(
         description='Figure S3 -- CASCADE performance at 7.5 Hz vs 30 Hz'
     )
-    parser.add_argument('--mode', required=True, choices=['test', 'plot'],
+    parser.add_argument('--mode', required=True, choices=['test', 'plot', 'print'],
                         help='"test" runs inference and writes NPZ; '
-                             '"plot" loads NPZ and generates the figure')
+                             '"plot" loads NPZ and generates the figure; '
+                             '"print" prints the plotted values without rendering')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for reading/writing result files')
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
@@ -261,9 +324,12 @@ def main():
 
     if args.mode == 'test':
         run_test(data_dir=args.data_dir, run_cascade=not args.no_cascade)
+    elif args.mode == 'print':
+        print_stats(data_dir=args.data_dir)
     else:
         plot_figure(data_dir=args.data_dir)
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()

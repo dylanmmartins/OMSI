@@ -8,6 +8,10 @@ Functions
 ---------
 _compute_otsu_threshold
     Scans every split point and picks the threshold maximizing between-class variance.
+spikes_from_samples
+    Per-frame spike probability and called spike times from posterior samples.
+default_lag_s
+    Indicator lag in seconds from params['defg'] rise root, else 45 ms.
 _process_cell
     Ray remote task: runs MCMC sampler on one cell and returns results dict.
 deconv
@@ -52,6 +56,7 @@ from scipy.ndimage import gaussian_filter1d
 import numba
 
 from . import helpers
+from ._win_perf import no_power_throttling
 from .sampler import cont_ca_sampler
 from .make_mean_sample import make_mean_sample
 
@@ -106,51 +111,29 @@ def _compute_otsu_threshold(data):
     return threshold
 
 
-# max_calls=1 tells Ray to kill and restart the worker after each cell,
-# preventing memory from accumulating across cells in long sessions.
-@ray.remote(max_calls=1)
-def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_s=0.0):
-    """Ray remote task: run MCMC sampler on one cell and return results dict.
-
-    Runs cont_ca_sampler, builds the spike probability trace from posterior
-    samples, calls spike selection (last/MAP/prob methods), and optionally
-    computes precision/recall/F1 if ground truth is provided.
+def spikes_from_samples(ss, n_frames, fs, lag_s=0.0, spike_method='map'):
+    """Per-frame spike probability and called spike times from posterior samples.
 
     Parameters
     ----------
-    Y_cell : np.ndarray
-        Fluorescence trace for one cell, shape (n_frames,).
-    cell_idx : int
-        Cell index, used to sort results after parallel collection.
-    params : dict
-        Sampler parameters forwarded to cont_ca_sampler.
-    true_spikes_cell : np.ndarray or None
-        Ground-truth spike times in seconds for this cell, or None.
-    fs : float
-        Frame rate in Hz.
+    ss : list of np.ndarray
+        Posterior spike time samples, in frame units.
     n_frames : int
         Number of frames in the recording.
-    lag_s : float
-        Indicator rise-time lag in seconds to subtract from inferred spike times.
+    fs : float
+        Frame rate in Hz.
+    lag_s : float, optional
+        Indicator rise-time lag in seconds to subtract from called spike times.
+    spike_method : str, optional
+        'map' (default), 'last', or anything else for Otsu-thresholded peaks.
 
     Returns
     -------
-    dict
-        Keys: cell_idx, calcium, prob, spikes, precision, recall, F1,
-        final_tau, sn_mad, final_sg, n_samples, time.
+    prob_trace : np.ndarray
+        Fraction of samples with a spike in each frame, shape (n_frames,).
+    spikes_sec : np.ndarray
+        Called spike times in seconds.
     """
-
-    t0 = time.time()
-    SAMPLES = cont_ca_sampler(Y_cell, params)
-    time_taken = time.time() - t0
-
-    final_tau = SAMPLES['g'][-1]
-    sn_mad    = SAMPLES.get('sn_mad', 0.0)
-    final_sg  = float(np.mean(np.sqrt(SAMPLES['sn2']))) if 'sn2' in SAMPLES else 0.0
-
-    calcium = make_mean_sample(SAMPLES, Y_cell)
-
-    ss = SAMPLES['ss']
 
     # Count how often each frame had a spike across all posterior samples,
     # then normalize by sample count to get per-frame spike probability.
@@ -164,7 +147,6 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
     prob_trace /= max(1, len(ss))
 
     lag_frames = lag_s * fs
-    spike_method = params.get('spike_method', 'map') if params else 'map'
 
     if spike_method == 'last' and len(ss) > 0:
         # Return the final posterior sample directly -- mirrors CaImAn's
@@ -221,6 +203,82 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
         )
         spikes_sec = np.clip(spikes_frames - lag_frames, 0, n_frames - 1) / fs
 
+    return prob_trace, spikes_sec
+
+
+def default_lag_s(params, fs):
+    """Indicator lag in seconds from params['defg'] rise root, else 45 ms.
+
+    Parameters
+    ----------
+    params : dict or None
+        Sampler parameters as passed by the caller, before defaults are filled.
+    fs : float
+        Frame rate in Hz.
+
+    Returns
+    -------
+    float
+        Lag in seconds.
+    """
+
+    # Derive indicator lag from the rise time constant if available,
+    # otherwise fall back to 45 ms -- a reasonable default for GCaMP6.
+    defg = params.get('defg', []) if params else []
+    if len(defg) > 0 and 0.0 < defg[0] < 1.0:
+        return -1.0 / (fs * np.log(defg[0]))
+    return 0.045
+
+
+# max_calls=1 tells Ray to kill and restart the worker after each cell,
+# preventing memory from accumulating across cells in long sessions.
+@ray.remote(max_calls=1)
+def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_s=0.0):
+    """Ray remote task: run MCMC sampler on one cell and return results dict.
+
+    Runs cont_ca_sampler, builds the spike probability trace from posterior
+    samples, calls spike selection (last/MAP/prob methods), and optionally
+    computes precision/recall/F1 if ground truth is provided.
+
+    Parameters
+    ----------
+    Y_cell : np.ndarray
+        Fluorescence trace for one cell, shape (n_frames,).
+    cell_idx : int
+        Cell index, used to sort results after parallel collection.
+    params : dict
+        Sampler parameters forwarded to cont_ca_sampler.
+    true_spikes_cell : np.ndarray or None
+        Ground-truth spike times in seconds for this cell, or None.
+    fs : float
+        Frame rate in Hz.
+    n_frames : int
+        Number of frames in the recording.
+    lag_s : float
+        Indicator rise-time lag in seconds to subtract from inferred spike times.
+
+    Returns
+    -------
+    dict
+        Keys: cell_idx, calcium, prob, spikes, precision, recall, F1,
+        final_tau, sn_mad, final_sg, n_samples, time.
+    """
+
+    t0 = time.time()
+    SAMPLES = cont_ca_sampler(Y_cell, params)
+    time_taken = time.time() - t0
+
+    final_tau = SAMPLES['g'][-1]
+    sn_mad    = SAMPLES.get('sn_mad', 0.0)
+    final_sg  = float(np.mean(np.sqrt(SAMPLES['sn2']))) if 'sn2' in SAMPLES else 0.0
+
+    calcium = make_mean_sample(SAMPLES, Y_cell)
+
+    ss = SAMPLES['ss']
+    spike_method = params.get('spike_method', 'map') if params else 'map'
+    prob_trace, spikes_sec = spikes_from_samples(
+        ss, n_frames, fs, lag_s=lag_s, spike_method=spike_method)
+
     prec = rec = f1 = 0.0
     if true_spikes_cell is not None:
         p_arr, r_arr, f_arr = helpers.compute_accuracy_strict(
@@ -244,6 +302,7 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
     }
 
 
+@no_power_throttling() # on Windows, keep the OS from throttling Ray workers
 def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     """Initialize Ray, dispatch one _process_cell task per cell, collect results.
 
@@ -318,15 +377,8 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
 
     fs = params['f'] if params and 'f' in params else 1.0
 
-    # Derive indicator lag from the rise time constant if available,
-    # otherwise fall back to 45 ms -- a reasonable default for GCaMP6.
     if lag_s is None:
-        defg = params.get('defg', []) if params else []
-        if len(defg) > 0 and 0.0 < defg[0] < 1.0:
-            import math
-            lag_s = -1.0 / (fs * math.log(defg[0]))
-        else:
-            lag_s = 0.045
+        lag_s = default_lag_s(params, fs)
 
     futures = []
     for i in range(n_cells):
@@ -665,7 +717,7 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
             plane_dirs = [datadir]
         else:
             raise FileNotFoundError(
-                '[fMCSI] No suite2p plane directories found under {}.\n'.format(datadir) +
+                '[OMSI] No suite2p plane directories found under {}.\n'.format(datadir) +
                 'Expected: <datadir>/suite2p/plane*/ or <datadir>/plane*/ '
                 'or F.npy directly in <datadir>.'
             )
@@ -675,7 +727,7 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
                       if any(os.path.basename(p) == 'plane{}'.format(i) for i in planes)]
         if not plane_dirs:
             raise FileNotFoundError(
-                '[fMCSI] No plane directories match --plane {} under {}.'.format(
+                '[OMSI] No plane directories match --plane {} under {}.'.format(
                     planes, search_root)
             )
 
@@ -692,7 +744,7 @@ def deconv_from_suite2p(datadir, hz=None, f_corr=0.7, planes=None,
 
         for req in [f_path, fneu_path]:
             if not os.path.isfile(req):
-                raise FileNotFoundError('[fMCSI] Required file not found: {}'.format(req))
+                raise FileNotFoundError('[OMSI] Required file not found: {}'.format(req))
 
         F    = np.load(f_path,    allow_pickle=True).astype(np.float32)
         Fneu = np.load(fneu_path, allow_pickle=True).astype(np.float32)
@@ -772,7 +824,7 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=Non
     )
     if not candidates:
         raise FileNotFoundError(
-            '[fMCSI] No .hdf5 or .h5 files found in {}. '.format(datadir) +
+            '[OMSI] No .hdf5 or .h5 files found in {}. '.format(datadir) +
             'CaImAn saves results via cnmf.save("path.hdf5").'
         )
     if len(candidates) > 1:
@@ -830,7 +882,7 @@ def deconv_from_caiman(datadir, hz=None, outdir=None, save_mat=False, params=Non
 def _build_parser():
 
     parser = argparse.ArgumentParser(
-        prog='fMCSI',
+        prog='OMSI',
         description=(
             'Optimized MCMC spike deconvolution.\n\n'
             'Provide one source flag (--suite2p, --caiman, or --array) to '
@@ -841,16 +893,16 @@ def _build_parser():
             Examples
             --------
             # suite2p output directory (frame rate auto-read from ops.npy)
-            python -m fMCSI.deconv --suite2p -dir /data/mouse1/suite2p
+            python -m OMSI.deconv --suite2p -dir /data/mouse1/suite2p
 
             # suite2p, explicit frame rate, two planes, save elsewhere
-            python -m fMCSI.deconv --suite2p -dir /data/mouse1 -hz 30 --plane 0 1 --outdir /results
+            python -m OMSI.deconv --suite2p -dir /data/mouse1 -hz 30 --plane 0 1 --outdir /results
 
             # CaImAn HDF5 file
-            python -m fMCSI.deconv --caiman -dir /data/mouse1 -hz 30
+            python -m OMSI.deconv --caiman -dir /data/mouse1 -hz 30
 
             # Raw numpy arrays (pass paths as positional arguments)
-            python -m fMCSI.deconv --array -dir /data/mouse1 -hz 30
+            python -m OMSI.deconv --array -dir /data/mouse1 -hz 30
         """),
     )
 
@@ -920,7 +972,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.datadir):
-        parser.error('[fMCSI] Data directory not found: {}'.format(args.datadir))
+        parser.error('[OMSI] Data directory not found: {}'.format(args.datadir))
 
     hz       = args.sample_rate
     save_mat = args.mat
@@ -964,7 +1016,7 @@ def main(argv=None):
                   + (', Fneu.npy: {}.'.format(fneu.shape) if fneu is not None else '.'))
         else:
             parser.error(
-                '[fMCSI] --array requires F.npy or dFF.npy in {}.'.format(args.datadir)
+                '[OMSI] --array requires F.npy or dFF.npy in {}.'.format(args.datadir)
             )
 
         if hz is None or hz <= 0:

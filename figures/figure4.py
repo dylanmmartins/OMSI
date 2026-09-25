@@ -22,6 +22,8 @@ _load_records
     Load scalar records from an NPZ file into a list of dicts.
 _fbeta
     Compute F-beta score from scalar precision and recall values.
+_mad
+    Compute the median absolute deviation, ignoring NaNs.
 _get_fbeta
     Extract F-beta score from a benchmark record dict.
 get_tau
@@ -87,6 +89,7 @@ import OMSI
 import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from oasis.functions import deconvolve as oasis_deconv
+from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig4')
 
@@ -129,13 +132,13 @@ def _snr_from_fluo(fluo):
     return (float(np.percentile(fv, 99)) - float(np.percentile(fv, 8))) / (mad + 1e-9)
 
 _METHODS = {
-    'fmcsi':       {'label': 'OMSI',   'color': '#4C72B0'},
+    'omsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
     'matlab':      {'label': 'CaImAn',  'color': '#DD8452'},
     'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
 }
-_METHOD_ORDER  = ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
-_TRACE_METHODS = ['fmcsi', 'oasis', 'matlab', 'cascade_loo']
+_METHOD_ORDER  = ['omsi', 'matlab', 'oasis', 'cascade_loo']
+_TRACE_METHODS = ['omsi', 'oasis', 'matlab', 'cascade_loo']
 
 _CASCADE_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'run_cascade_subprocess.py')
@@ -290,6 +293,25 @@ def _fbeta(precision, recall):
     b2 = BETA ** 2
     denom = b2 * p + r
     return (1 + b2) * p * r / denom if denom > 0 else 0.0
+
+
+def _mad(x, axis=None):
+    """ Compute the median absolute deviation, ignoring NaNs.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values.
+    axis : int or None, optional
+        Axis along which to compute; None flattens the input.
+
+    Returns
+    -------
+    float or np.ndarray
+        Median of |x - median(x)| along axis.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _get_fbeta(record):
@@ -514,7 +536,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     ground_truth_dir : str
         Root directory of the CASCADE Ground_truth data.
     model : str
-        Method to run ('fmcsi', 'matlab', 'oasis', or 'cascade_loo').
+        Method to run ('omsi', 'matlab', 'oasis', or 'cascade_loo').
 
     Returns
     -------
@@ -577,7 +599,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     probs_list  = []
     spikes_list = []
 
-    if model == 'fmcsi':
+    if model == 'omsi':
         params = _build_params(fs, tau)
 
         # Batch into one deconv call so Ray parallelizes across cells rather
@@ -680,13 +702,13 @@ def process_dataset(ds_folder, ground_truth_dir, model):
         true_events, spikes_list, tolerance=0.1)
     cosmic = helpers.compute_cosmic(true_spikes, spikes_list, fs)
 
-    print('  Strict   P={:.3f}  R={:.3f}  F1={:.3f}'.format(
-        np.mean(prec_s), np.mean(rec_s), np.mean(f1_s)))
-    print('  Window   P={:.3f}  R={:.3f}  F1={:.3f}'.format(
-        np.mean(prec_w), np.mean(rec_w), np.mean(f1_w)))
-    print('  Win-OTO  P={:.3f}  R={:.3f}  F1={:.3f}'.format(
-        np.mean(prec_w1), np.mean(rec_w1), np.mean(f1_w1)))
-    print('  CosMIC   mean={:.3f}'.format(np.mean(cosmic)))
+    for tag, (p_, r_, f_) in [('Strict ', (prec_s,  rec_s,  f1_s)),
+                              ('Window ', (prec_w,  rec_w,  f1_w)),
+                              ('Win-OTO', (prec_w1, rec_w1, f1_w1))]:
+        print('  {}  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}  F1={:.3f} ± {:.3f}'.format(
+            tag, np.nanmedian(p_), _mad(p_), np.nanmedian(r_), _mad(r_),
+            np.nanmedian(f_), _mad(f_)))
+    print('  CosMIC   {:.3f} ± {:.3f}'.format(np.nanmedian(cosmic), _mad(cosmic)))
 
     records = []
     for i, cell in enumerate(cells):
@@ -739,7 +761,7 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
 
     os.makedirs(data_dir, exist_ok=True)
     if methods is None:
-        methods = ['fmcsi', 'oasis', 'matlab', 'cascade_loo']
+        methods = ['omsi', 'oasis', 'matlab', 'cascade_loo']
 
     ds_folders = sorted(
         d for d in os.listdir(ground_truth_dir)
@@ -910,7 +932,7 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
         Selected cell data dicts.
     """
 
-    _REQUIRED = ['fmcsi', 'oasis', 'matlab']
+    _REQUIRED = ['omsi', 'oasis', 'matlab']
 
     try:
         sets = [
@@ -935,7 +957,7 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
         sensor = _get_sensor(ds)
         if sensor not in by_sensor:
             continue
-        ref_path = os.path.join(_traces_dir(data_dir, 'fmcsi'),
+        ref_path = os.path.join(_traces_dir(data_dir, 'omsi'),
                                 f'{ds}_traces.npz')
         try:
             ref_npz = np.load(ref_path, allow_pickle=False)
@@ -1051,7 +1073,7 @@ def _plot_raster(ax, cells, window=60.0):
         bottom_to_top.append((
             _METHODS['cascade_loo']['label'], 'cascade_loo',
             _METHODS['cascade_loo']['color']))
-    for m in ['oasis', 'matlab', 'fmcsi']:
+    for m in ['oasis', 'matlab', 'omsi']:
         bottom_to_top.append(
             (_METHODS[m]['label'], m, _METHODS[m]['color']))
     bottom_to_top.append(('Ground Truth', None, '#111111'))
@@ -1228,7 +1250,7 @@ def plot_figure(data_dir):
     legend_handles = [
         plt.Line2D([0], [0], color=_METHODS[m]['color'], marker='.', linestyle='-',
                    label=_METHODS[m]['label'])
-        for m in ['fmcsi', 'matlab', 'oasis', 'cascade_loo']
+        for m in ['omsi', 'matlab', 'oasis', 'cascade_loo']
     ]
     fig.legend(handles=legend_handles, loc='upper center', ncol=4,
                bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)
@@ -1252,7 +1274,7 @@ def main():
     parser.add_argument('--ground-truth-dir', default='/home/dylan/Documents/Github/Cascade/Ground_truth',
                         help='Path to CASCADE Ground_truth/ folder (test mode)')
     parser.add_argument('--method', nargs='+',
-                        choices=['fmcsi', 'matlab', 'oasis', 'cascade_loo'],
+                        choices=['omsi', 'matlab', 'oasis', 'cascade_loo'],
                         default=None,
                         help='Method(s) to run in test mode '
                              '(default: all four)')
@@ -1271,4 +1293,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with no_power_throttling(verbose=True):
+        main()
