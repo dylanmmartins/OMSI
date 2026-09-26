@@ -106,6 +106,7 @@ try
     all_spikes = cell(n_cells, 1);
     all_probs = zeros(n_cells, n_frames);
     model_traces = zeros(n_cells, n_frames);
+    cell_times = nan(n_cells, 1);
 
     set(0, 'DefaultFigureVisible', 'off');
     fprintf('Running MCMC on %d cells...\\n', n_cells);
@@ -115,7 +116,9 @@ try
         y = double(dff(i, :))';
 
         try
+            t_cell = tic;
             res = cont_ca_sampler(y, params);
+            cell_times(i) = toc(t_cell);
 
             samples = res.ss;
             n_post = length(samples);
@@ -143,7 +146,7 @@ try
         end
     end
 
-    save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces');
+    save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'cell_times');
     exit(0);
 
 catch ME
@@ -515,7 +518,7 @@ def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
 
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
-                        verbose=True):
+                        verbose=True, return_cell_times=False):
     """ Run MCMC spike inference via MATLAB subprocess.
 
     Parameters
@@ -539,6 +542,8 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         MATLAB executable. Discovered automatically when omitted.
     verbose : bool, optional
         Print progress and discovery details.
+    return_cell_times : bool, optional
+        If True, also return each cell's cont_ca_sampler time in seconds.
 
     Returns
     -------
@@ -550,6 +555,9 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         Posterior spike probability traces, shape (n_cells, n_frames).
     sweeps_per_cell : np.ndarray
         Number of MCMC sweeps run for each cell.
+    cell_times : np.ndarray
+        Only if return_cell_times: seconds spent in cont_ca_sampler per cell,
+        timed inside MATLAB (NaN for cells that errored or on failure).
     """
 
     if dff.ndim == 1:
@@ -568,8 +576,9 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
 
     def _empty():
         """Null result in the shape callers expect, used on any failure."""
-        return ([np.array([]) for _ in range(n_cells)],
-                np.zeros_like(dff), np.zeros_like(dff), np.zeros(n_cells))
+        out = ([np.array([]) for _ in range(n_cells)],
+               np.zeros_like(dff), np.zeros_like(dff), np.zeros(n_cells))
+        return out + (np.full(n_cells, np.nan),) if return_cell_times else out
 
     exe = find_matlab(matlab_exe)
     if exe is None:
@@ -669,4 +678,8 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
 
     sweeps_per_cell = np.full(n_cells, n_sweeps_val, dtype=np.int32)
 
+    if return_cell_times:
+        cell_times = (np.asarray(res['cell_times'], dtype=float).ravel()
+                      if 'cell_times' in res else np.full(n_cells, np.nan))
+        return final_spikes, model_traces, all_probs, sweeps_per_cell, cell_times
     return final_spikes, model_traces, all_probs, sweeps_per_cell

@@ -775,8 +775,8 @@ def cont_ca_sampler(Y, params=None):
         'print_flag': 0,
         'lam_pr': [0.1, 1.0],
         'auto_stop': True,
-        'max_sweeps': 2000, 'min_sweeps': 300,
-        'burn_tol': 1e-4, 'conv_tol': 10 ** -1.5,
+        'max_sweeps': 1000, 'min_sweeps': 300,
+        'burn_tol': 1e-3, 'conv_tol': 0.05,
         'check_every': 50,
         'prob_thresh': 0.85,
         'lam_scale': 0.002,
@@ -953,10 +953,10 @@ def cont_ca_sampler(Y, params=None):
 
     B           = int(params['B'])
     auto_stop   = int(bool(params.get('auto_stop', False)))
-    max_sweeps  = int(params.get('max_sweeps', 2000))
+    max_sweeps  = int(params.get('max_sweeps', 1000))
     min_sweeps  = int(params.get('min_sweeps', 300))
-    burn_tol    = float(params.get('burn_tol', 0.005))
-    conv_tol    = float(params.get('conv_tol', 0.00067))
+    burn_tol    = float(params.get('burn_tol', 1e-3))
+    conv_tol    = float(params.get('conv_tol', 0.05))
     check_every = int(params.get('check_every', 50))
     win         = int(params.get('win', 100))
 
