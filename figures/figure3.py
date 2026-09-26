@@ -7,6 +7,14 @@ Allen Institute data benchmark comparing OMSI, OASIS, CASCADE, and CaImAn MCMC.
 To run inference:
     $ python figure3.py --mode test --data-dir /path/to/results --allen-data-dir /path/to/allen/data
 
+To run only CASCADE (keeps all other results):
+    $ python figure3.py --mode cascade --data-dir /path/to/results
+
+To also benchmark the cells excluded by the kurtosis threshold (included in
+the figure automatically once written; delete allen_lowkurt_results_*.npz to
+leave them out again):
+    $ python figure3.py --mode add-bad-cells --data-dir /path/to/results
+
 To create figure:
     $ python figure3.py --mode plot --data-dir /path/to/results
 
@@ -38,6 +46,18 @@ compute_accuracy_window
     Compute precision, recall, and F1 using a temporal tolerance window.
 _run_cascade_inference
     Run CASCADE spike inference via subprocess and return probs and spike times.
+_kurtosis_filter
+    Keep only cells whose excess kurtosis passes the benchmark threshold.
+_low_kurtosis_cells
+    Return the cells that _kurtosis_filter excludes.
+_omsi_params
+    OMSI parameter dict used for every Allen dataset group.
+_lowkurt_path
+    Path of the low-kurtosis results file for one dataset group.
+_run_and_save_lowkurt_group
+    Run all four methods on the excluded low-kurtosis cells of one group.
+_run_and_save_cascade_group
+    Run CASCADE on one filtered Allen dataset group and save its results.
 _run_and_save_allen_group
     Run all inference methods on one Allen dataset group and save results.
 _run_and_save_omsi_group
@@ -46,6 +66,10 @@ test_figure
     Run full benchmark across all Allen dataset groups.
 test_omsi
     Run OMSI-only benchmark across all Allen dataset groups.
+test_cascade
+    Run CASCADE-only benchmark across all Allen dataset groups.
+test_add_bad_cells
+    Run all four methods on the cells excluded by the kurtosis threshold.
 _load_and_preprocess_raw
     Preprocess raw Allen H5 files into dF/F arrays and spike times.
 _build_cascade_lookup
@@ -74,14 +98,26 @@ _plot_cosmic_violin
     Plot overall CosMIC score violin per model.
 _recompute_all_metrics_from_traces
     Recompute precision, recall, F-beta, and CosMIC from saved trace NPZ files.
+_metrics_from_spikes
+    Per-cell accuracy metrics for one method, keyed by record field name.
+_load_lowkurt_records
+    Build result records for the low-kurtosis cells from their saved outputs.
 _load_all_results
     Load all benchmark records and recompute their metrics from saved traces.
 plot_figure
     Load all results, recompute metrics, and render the combined figure.
+_paired_by_cell
+    Collect one metric for two models on the cells both were run on.
+_print_signed_rank_tests
+    Print Wilcoxon signed-rank tests for every violin panel.
+_omsi_snr
+    SNR exactly as OMSI's sampler computes it to decide whether to skip a cell.
+_print_omsi_snr_exclusions
+    Print how many cells OMSI skipped because their SNR was below its floor.
 print_stats
     Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
 main
-    Parse CLI arguments and dispatch to test, omsi, plot, or print mode.
+    Parse CLI arguments and dispatch to test, omsi, cascade, add-bad-cells, plot, or print mode.
 
 
 DMM, March 2026
@@ -112,9 +148,10 @@ from oasis.functions import deconvolve
 import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from OMSI._win_perf import no_power_throttling
+from stats_helpers import signed_rank, print_test_header, print_test_row
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig3')
-_MATLAB_DATA_DIR  = '/home/dylan/Fast2/spike_deconv/figures_output_data_260421/data/fig3'
+_MATLAB_DATA_DIR  = r'C:\Users\dmartins\Documents\GitHub\OMSI\figures\data\fig3'
 
 mpl.rcParams['axes.spines.top'] = False
 mpl.rcParams['axes.spines.right'] = False
@@ -173,6 +210,14 @@ _GENO_LS         = {'Cux2': '-', 'Emx1': '--', 'tetO': ':'}
 _GENO_LS_DEFAULT = ':'
 
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
+
+# Cells with excess kurtosis below this are left out of the main benchmark
+# (see _kurtosis_filter); --mode add-bad-cells benchmarks them separately.
+_KURTOSIS_THRESHOLD = 0.5
+
+# OMSI skips inference (returns no spikes) for traces below this SNR; see
+# cont_ca_sampler in src/OMSI/sampler.py.
+_OMSI_SNR_FLOOR = 2.0
 
 
 def _save_records(records, path):
@@ -508,13 +553,274 @@ def _run_cascade_inference(dff, fs, label, data_dir):
     output_path = os.path.join(data_dir, f'fig3_cascade_{label}_output.npz')
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', script,
          '--mode', 'inference', '--input', input_path, '--output', output_path],
         check=True)
     result = np.load(output_path, allow_pickle=True)
     return (result['cascade_probs'],
             list(result['cascade_spikes']),
             float(result['cascade_time']))
+
+
+def _kurtosis_filter(dff, true_spikes, label):
+    """Keep only cells whose excess kurtosis passes the benchmark threshold.
+
+    Every mode applies this same filter, so cell_id values line up across the
+    result files of different methods.
+
+    Parameters
+    ----------
+    dff : np.ndarray
+        dF/F traces, shape (n_cells, n_frames).
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds, one array per cell.
+    label : str
+        Dataset label, used in messages.
+
+    Returns
+    -------
+    tuple or None
+        (dff, true_spikes, good_idx) for the passing cells, or None if none pass.
+    """
+    n_cells = dff.shape[0]
+    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
+    good_idx = np.where(cell_kurtosis >= _KURTOSIS_THRESHOLD)[0]
+    print("  Kurtosis filter: {}/{} cells pass (excess kurtosis >= {}).".format(
+        len(good_idx), n_cells, _KURTOSIS_THRESHOLD))
+    if len(good_idx) == 0:
+        print("  WARNING: No cells pass kurtosis filter for {}, skipping.".format(label))
+        return None
+    return dff[good_idx], [true_spikes[i] for i in good_idx], good_idx
+
+
+def _low_kurtosis_cells(dff, true_spikes):
+    """Return the cells that _kurtosis_filter excludes.
+
+    Parameters
+    ----------
+    dff : np.ndarray
+        dF/F traces, shape (n_cells, n_frames).
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds, one array per cell.
+
+    Returns
+    -------
+    tuple
+        (dff, true_spikes, bad_idx) for cells with excess kurtosis below
+        _KURTOSIS_THRESHOLD; bad_idx may be empty.
+    """
+    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
+    bad_idx = np.where(~(cell_kurtosis >= _KURTOSIS_THRESHOLD))[0]
+    return dff[bad_idx], [true_spikes[i] for i in bad_idx], bad_idx
+
+
+def _omsi_params(fs, tau):
+    """OMSI parameter dict used for every Allen dataset group.
+
+    Parameters
+    ----------
+    fs : float
+        Sampling frequency in Hz.
+    tau : float
+        Calcium decay time constant in seconds.
+
+    Returns
+    -------
+    dict
+        Parameters for OMSI.deconv.
+    """
+    tau_rise = 0.05
+    g_rise   = float(np.exp(-1.0 / (tau_rise * fs)))
+    g_decay  = float(np.exp(-1.0 / (tau * fs)))
+    return {
+        'f': fs, 'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 0, 'upd_gam': 1,
+        'g': [g_rise + g_decay, -g_rise * g_decay], 'defg': [g_rise, g_decay],
+        'TauStd': [tau_rise * fs, tau * fs], 'lam_scale': 1.0,
+    }
+
+
+def _lowkurt_path(data_dir, label):
+    """Path of the low-kurtosis results file for one dataset group."""
+    return os.path.join(data_dir, f'allen_lowkurt_results_{label}.npz')
+
+
+def _run_and_save_lowkurt_group(dff, true_spikes, fs, tau, label, data_dir,
+                                run_matlab=True):
+    """Run all four methods on the excluded low-kurtosis cells of one group.
+
+    Everything goes into one file, allen_lowkurt_results_<label>.npz, holding
+    the traces, ground truth, original cell ids, and each method's output. The
+    file is rewritten after every method, and methods already in it are
+    skipped, so a crash or a re-run only repeats unfinished work. Scores are
+    computed when the figure is made (see _load_lowkurt_records).
+
+    Parameters
+    ----------
+    dff : np.ndarray
+        Full (unfiltered) dF/F traces of the group, shape (n_cells, n_frames).
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds, one array per cell.
+    fs : float
+        Sampling frequency in Hz.
+    tau : float
+        Calcium decay time constant in seconds.
+    label : str
+        Dataset label, matching the one used by test mode.
+    data_dir : str
+        Directory for output NPZ files.
+    run_matlab : bool, optional
+        Whether to run CaImAn MCMC (default True).
+    """
+    dff, true_spikes, bad_idx = _low_kurtosis_cells(dff, true_spikes)
+    print("  {} cells below the kurtosis threshold.".format(len(bad_idx)))
+    if len(bad_idx) == 0:
+        return
+
+    path  = _lowkurt_path(data_dir, label)
+    state = {}
+    if os.path.exists(path):
+        # Read fully and close: on Windows an open .npz blocks the os.replace below.
+        with np.load(path, allow_pickle=True) as prev:
+            prev_state = {k: prev[k] for k in prev.files}
+        if np.array_equal(prev_state['cell_ids'], bad_idx):
+            state = prev_state
+            print("  Resuming {} (already has: {}).".format(
+                path, ', '.join(k[len('time_'):] for k in state if k.startswith('time_'))))
+    state.update({'dff': dff, 'true_spikes': np.array(true_spikes, dtype=object),
+                  'cell_ids': bad_idx, 'fs': fs, 'tau': tau})
+
+    def _save():
+        # Write to a temporary name first so a crash mid-write cannot leave a
+        # truncated file; the temporary name does not match the loader's glob.
+        tmp = os.path.join(data_dir, f'tmp_lowkurt_{label}.npz')
+        np.savez(tmp, **state)
+        os.replace(tmp, path)
+
+    if 'time_omsi' not in state:
+        print("  Running OMSI...")
+        t0 = time.time()
+        optim_dict = OMSI.deconv(dff, _omsi_params(fs, tau), true_spikes=true_spikes,
+                                 benchmark=True)
+        state['my_probs']  = optim_dict['optim_prob']
+        state['my_spikes'] = np.array(list(optim_dict['optim_spikes']), dtype=object)
+        state['time_omsi'] = time.time() - t0
+        _save()
+
+    if 'time_oasis' not in state:
+        print("  Running OASIS...")
+        t0 = time.time()
+        diff   = np.diff(dff, axis=1)
+        sigmas = np.maximum(np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2)), 1e-9)
+        g = np.exp(-1 / (fs * tau))
+        state['oasis_probs'] = np.array([
+            deconvolve(dff[i], g=(g,), sn=sigmas[i], penalty=1)[1]
+            for i in range(dff.shape[0])])
+        state['time_oasis'] = time.time() - t0
+        _save()
+
+    if run_matlab and 'time_matlab' not in state:
+        print("  Running MATLAB...")
+        t0 = time.time()
+        _, _, trad_probs, sweeps = run_matlab_pnevMCMC(
+            dff, fs=fs, tau=tau, n_sweeps=500, true_spikes=true_spikes)
+        if np.all(np.asarray(sweeps) == 0):
+            # run_matlab_pnevMCMC signals failure with zero sweeps rather than raising.
+            print("  WARNING: MATLAB returned no result for {}; not saved.".format(label))
+        else:
+            state['trad_probs']  = trad_probs
+            state['time_matlab'] = time.time() - t0
+            _save()
+
+    if 'time_cascade' not in state:
+        print("  Running CASCADE (subprocess)...")
+        try:
+            cascade_probs, cascade_spikes, time_cascade = _run_cascade_inference(
+                dff, fs, f'{label}_lowkurt', data_dir)
+            state['cascade_probs']  = cascade_probs
+            state['cascade_spikes'] = np.array(cascade_spikes, dtype=object)
+            state['time_cascade']   = time_cascade
+            _save()
+        except subprocess.CalledProcessError as exc:
+            print("  WARNING: CASCADE subprocess failed for {}: {}.".format(label, exc))
+
+    print("  Saved low-kurtosis results: {}.".format(path))
+
+
+def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx,
+                                label, data_dir):
+    """Run CASCADE on one filtered Allen dataset group and save its results.
+
+    Writes allen_data_results_cascade_<label>.npz (per-cell records) and
+    allen_data_results_cascade_<label>_traces.npz (probabilities and spikes).
+
+    Parameters
+    ----------
+    dff : np.ndarray
+        Kurtosis-filtered dF/F traces, shape (n_cells, n_frames).
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds for the filtered cells.
+    true_events : list of np.ndarray
+        Event ground truth for the filtered cells.
+    fs : float
+        Sampling frequency in Hz.
+    tau : float
+        Calcium decay time constant in seconds.
+    good_idx : np.ndarray
+        Original cell indices of the filtered cells.
+    label : str
+        Dataset label used for output file naming.
+    data_dir : str
+        Directory for output NPZ files.
+    """
+    n_cells = dff.shape[0]
+    print("  Running CASCADE (subprocess)...")
+    try:
+        cascade_probs, cascade_spikes, time_cascade = _run_cascade_inference(
+            dff, fs, label, data_dir)
+
+        prec_cas, rec_cas, f1_cas       = OMSI.compute_accuracy_strict(
+            true_spikes, cascade_spikes, tolerance=0.1)
+        prec_cas_w, rec_cas_w, f1_cas_w = compute_accuracy_window(
+            true_spikes, cascade_spikes, tolerance=0.1)
+        prec_cas_e, rec_cas_e, f1_cas_e = compute_accuracy_window(
+            true_events, cascade_spikes, tolerance=0.1)
+        cosmic_cas                       = OMSI.helpers.compute_cosmic(
+            true_spikes, cascade_spikes, fs)
+
+        print("    [CASCADE] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
+            np.nanmedian(f1_cas), _mad(f1_cas), np.nanmedian(f1_cas_w), _mad(f1_cas_w)))
+
+        cas_results = []
+        for i in range(n_cells):
+            cas_results.append({
+                'model': 'CASCADE', 'tau': tau, 'cell_id': int(good_idx[i]),
+                'time': time_cascade / n_cells,
+                'f1': f1_cas[i], 'precision': prec_cas[i], 'recall': rec_cas[i],
+                'f1_window': f1_cas_w[i], 'precision_window': prec_cas_w[i],
+                'recall_window': rec_cas_w[i],
+                'f1_event': f1_cas_e[i], 'precision_event': prec_cas_e[i],
+                'recall_event': rec_cas_e[i],
+                'cosmic': cosmic_cas[i],
+            })
+
+        cas_traces_path = os.path.join(
+            data_dir, f'allen_data_results_cascade_{label}_traces.npz')
+        np.savez(
+            cas_traces_path,
+            dff=dff, true_spikes=np.array(true_spikes, dtype=object),
+            cascade_probs=cascade_probs,
+            cascade_spikes=np.array(cascade_spikes, dtype=object),
+            fs=fs, tau=tau,
+            cosmic_cas=cosmic_cas,
+        )
+
+        cas_npz_path = os.path.join(
+            data_dir, f'allen_data_results_cascade_{label}.npz')
+        _save_records(cas_results, cas_npz_path)
+        print("  Saved CASCADE results: {}.".format(cas_npz_path))
+
+    except subprocess.CalledProcessError as exc:
+        print("  WARNING: CASCADE subprocess failed for {}: {}.".format(label, exc))
 
 
 def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
@@ -539,23 +845,11 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         Whether to also run the MATLAB CaImAn MCMC method (default False).
     """
     all_results = []
-    n_cells = dff.shape[0]
-
-    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
-    kurtosis_threshold = 0.5
-    good_mask = cell_kurtosis >= kurtosis_threshold
-    good_idx  = np.where(good_mask)[0]
-    n_good    = len(good_idx)
-    print("  Kurtosis filter: {}/{} cells pass (excess kurtosis >= {}).".format(
-        n_good, n_cells, kurtosis_threshold))
-
-    dff         = dff[good_idx]
-    true_spikes = [true_spikes[i] for i in good_idx]
-    n_cells     = n_good
-
-    if n_cells == 0:
-        print("  WARNING: No cells pass kurtosis filter for {}, skipping.".format(label))
+    filtered = _kurtosis_filter(dff, true_spikes, label)
+    if filtered is None:
         return
+    dff, true_spikes, good_idx = filtered
+    n_cells = dff.shape[0]
 
     true_events    = [OMSI.helpers.make_event_ground_truth(sp, tau)
                       for sp in true_spikes]
@@ -566,15 +860,7 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
 
     print("  Running OMSI...")
     t0      = time.time()
-    tau_rise = 0.05
-    g_rise   = float(np.exp(-1.0 / (tau_rise * fs)))
-    g_decay  = float(np.exp(-1.0 / (tau * fs)))
-    g_ar2    = [g_rise + g_decay, -g_rise * g_decay]
-    params   = {
-        'f': fs, 'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 0, 'upd_gam': 1,
-        'g': g_ar2, 'defg': [g_rise, g_decay],
-        'TauStd': [tau_rise * fs, tau * fs], 'lam_scale': 1.0,
-    }
+    params   = _omsi_params(fs, tau)
     optim_dict = OMSI.deconv(dff, params, true_spikes=true_spikes, benchmark=True)
     my_probs   = optim_dict['optim_prob']
     my_spikes  = list(optim_dict['optim_spikes'])
@@ -694,54 +980,8 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
     _save_records(all_results, npz_path)
     print("  Saved results: {}.".format(npz_path))
 
-    print("  Running CASCADE (subprocess)...")
-    try:
-        cascade_probs, cascade_spikes, time_cascade = _run_cascade_inference(
-            dff, fs, label, data_dir)
-
-        prec_cas, rec_cas, f1_cas       = OMSI.compute_accuracy_strict(
-            true_spikes, cascade_spikes, tolerance=0.1)
-        prec_cas_w, rec_cas_w, f1_cas_w = compute_accuracy_window(
-            true_spikes, cascade_spikes, tolerance=0.1)
-        prec_cas_e, rec_cas_e, f1_cas_e = compute_accuracy_window(
-            true_events, cascade_spikes, tolerance=0.1)
-        cosmic_cas                       = OMSI.helpers.compute_cosmic(
-            true_spikes, cascade_spikes, fs)
-
-        print("    [CASCADE] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
-            np.nanmedian(f1_cas), _mad(f1_cas), np.nanmedian(f1_cas_w), _mad(f1_cas_w)))
-
-        cas_results = []
-        for i in range(n_cells):
-            cas_results.append({
-                'model': 'CASCADE', 'tau': tau, 'cell_id': int(good_idx[i]),
-                'time': time_cascade / n_cells,
-                'f1': f1_cas[i], 'precision': prec_cas[i], 'recall': rec_cas[i],
-                'f1_window': f1_cas_w[i], 'precision_window': prec_cas_w[i],
-                'recall_window': rec_cas_w[i],
-                'f1_event': f1_cas_e[i], 'precision_event': prec_cas_e[i],
-                'recall_event': rec_cas_e[i],
-                'cosmic': cosmic_cas[i],
-            })
-
-        cas_traces_path = os.path.join(
-            data_dir, f'allen_data_results_cascade_{label}_traces.npz')
-        np.savez(
-            cas_traces_path,
-            dff=dff, true_spikes=np.array(true_spikes, dtype=object),
-            cascade_probs=cascade_probs,
-            cascade_spikes=np.array(cascade_spikes, dtype=object),
-            fs=fs, tau=tau,
-            cosmic_cas=cosmic_cas,
-        )
-
-        cas_npz_path = os.path.join(
-            data_dir, f'allen_data_results_cascade_{label}.npz')
-        _save_records(cas_results, cas_npz_path)
-        print("  Saved CASCADE results: {}.".format(cas_npz_path))
-
-    except subprocess.CalledProcessError as exc:
-        print("  WARNING: CASCADE subprocess failed for {}: {}.".format(label, exc))
+    _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx,
+                                label, data_dir)
 
 
 def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
@@ -762,38 +1002,18 @@ def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
     data_dir : str
         Directory for output NPZ files.
     """
-    n_cells = dff.shape[0]
-
-    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
-    kurtosis_threshold = 0.5
-    good_mask = cell_kurtosis >= kurtosis_threshold
-    good_idx  = np.where(good_mask)[0]
-    n_good    = len(good_idx)
-    print("  Kurtosis filter: {}/{} cells pass (excess kurtosis >= {}).".format(
-        n_good, n_cells, kurtosis_threshold))
-
-    dff         = dff[good_idx]
-    true_spikes = [true_spikes[i] for i in good_idx]
-    n_cells     = n_good
-
-    if n_cells == 0:
-        print("  WARNING: No cells pass kurtosis filter for {}, skipping.".format(label))
+    filtered = _kurtosis_filter(dff, true_spikes, label)
+    if filtered is None:
         return
+    dff, true_spikes, good_idx = filtered
+    n_cells = dff.shape[0]
 
     true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
                    for sp in true_spikes]
 
     print("  Running OMSI...")
     t0       = time.time()
-    tau_rise = 0.05
-    g_rise   = float(np.exp(-1.0 / (tau_rise * fs)))
-    g_decay  = float(np.exp(-1.0 / (tau * fs)))
-    g_ar2    = [g_rise + g_decay, -g_rise * g_decay]
-    params   = {
-        'f': fs, 'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 0, 'upd_gam': 1,
-        'g': g_ar2, 'defg': [g_rise, g_decay],
-        'TauStd': [tau_rise * fs, tau * fs], 'lam_scale': 1.0,
-    }
+    params   = _omsi_params(fs, tau)
     optim_dict = OMSI.deconv(dff, params, true_spikes=true_spikes, benchmark=True)
     my_probs   = optim_dict['optim_prob']
     my_spikes  = list(optim_dict['optim_spikes'])
@@ -956,6 +1176,98 @@ def test_omsi(data_dir, allen_data_dir):
             _run_and_save_omsi_group(
                 gd['dff'], gd['spikes_list'], gd['fs'], gd['tau'],
                 label, data_dir)
+
+
+def test_cascade(data_dir, allen_data_dir):
+    """Run CASCADE-only benchmark across all Allen dataset groups.
+
+    Uses the same preprocessed data and kurtosis filter as test_figure, and
+    writes only the CASCADE result files, so existing OMSI, OASIS and CaImAn
+    results are left untouched.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory for output data and figures.
+    allen_data_dir : str
+        Path to raw Allen H5 files (only read if allen_aggregated_data.h5 is
+        not already in data_dir).
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
+
+    if os.path.exists(aggregated_h5):
+        print("Loading preprocessed data from {}...".format(aggregated_h5))
+        slow_data_groups, fast_data_groups = load_aggregated_data(aggregated_h5)
+    else:
+        print("Preprocessing raw data from {}...".format(allen_data_dir))
+        slow_data_groups, fast_data_groups = _load_and_preprocess_raw(
+            allen_data_dir, aggregated_h5)
+
+    for indicator, data_groups in [('slow', slow_data_groups),
+                                   ('fast', fast_data_groups)]:
+        if not data_groups:
+            continue
+        print("\n--- Processing {} cell groups (CASCADE only) ---".format(indicator.upper()))
+        for (experiment_name, fs_rounded, n_frames), gd in data_groups.items():
+            if experiment_name in _EXCLUDED_DATASETS:
+                print("\n  Skipping excluded dataset: {}.".format(experiment_name))
+                continue
+            print("\n  Group {}  {} frames @ {}Hz ({} cells).".format(
+                experiment_name, n_frames, fs_rounded, gd['dff'].shape[0]))
+            label = f"{experiment_name}_{indicator}_tau_{n_frames}frames_{fs_rounded}hz"
+            filtered = _kurtosis_filter(gd['dff'], gd['spikes_list'], label)
+            if filtered is None:
+                continue
+            dff, true_spikes, good_idx = filtered
+            true_events = [OMSI.helpers.make_event_ground_truth(sp, gd['tau'])
+                           for sp in true_spikes]
+            _run_and_save_cascade_group(dff, true_spikes, true_events, gd['fs'], gd['tau'],
+                                        good_idx, label, data_dir)
+
+
+def test_add_bad_cells(data_dir, allen_data_dir, run_matlab=True):
+    """Run all four methods on the cells excluded by the kurtosis threshold.
+
+    Uses the same preprocessed data, dataset labels and threshold as
+    test_figure. Results go to allen_lowkurt_results_<label>.npz, which
+    plot and print modes include automatically; existing results are untouched.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory for output data and figures.
+    allen_data_dir : str
+        Path to raw Allen H5 files (only read if allen_aggregated_data.h5 is
+        not already in data_dir).
+    run_matlab : bool, optional
+        Whether to run CaImAn MCMC (default True).
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
+
+    if os.path.exists(aggregated_h5):
+        print("Loading preprocessed data from {}...".format(aggregated_h5))
+        slow_data_groups, fast_data_groups = load_aggregated_data(aggregated_h5)
+    else:
+        print("Preprocessing raw data from {}...".format(allen_data_dir))
+        slow_data_groups, fast_data_groups = _load_and_preprocess_raw(
+            allen_data_dir, aggregated_h5)
+
+    for indicator, data_groups in [('slow', slow_data_groups),
+                                   ('fast', fast_data_groups)]:
+        if not data_groups:
+            continue
+        print("\n--- Processing {} cell groups (low-kurtosis cells) ---".format(indicator.upper()))
+        for (experiment_name, fs_rounded, n_frames), gd in data_groups.items():
+            if experiment_name in _EXCLUDED_DATASETS:
+                print("\n  Skipping excluded dataset: {}.".format(experiment_name))
+                continue
+            print("\n  Group {}  {} frames @ {}Hz ({} cells).".format(
+                experiment_name, n_frames, fs_rounded, gd['dff'].shape[0]))
+            label = f"{experiment_name}_{indicator}_tau_{n_frames}frames_{fs_rounded}hz"
+            _run_and_save_lowkurt_group(gd['dff'], gd['spikes_list'], gd['fs'], gd['tau'],
+                                        label, data_dir, run_matlab=run_matlab)
 
 
 def _load_and_preprocess_raw(data_dir, aggregated_h5):
@@ -1241,7 +1553,8 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                              cascade_lookup, n_cells=5,
                              window=60.0, min_spikes=15,
                              omsi_traces_lookup=None,
-                             matlab_data_dir=None):
+                             matlab_data_dir=None,
+                             target_snrs=(3, 5, 10, 20, 30)):
     """Load per-cell trace data for raster and trace visualization panels.
 
     Parameters
@@ -1264,11 +1577,14 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
         OMSI traces file lookup from _build_omsi_traces_lookup.
     matlab_data_dir : str, optional
         Directory with CaImAn MCMC trace NPZ files.
+    target_snrs : tuple, optional
+        One cell is chosen per target: the unused cell with the closest SNR.
 
     Returns
     -------
     list of dict
-        Selected cell data dicts with traces, spike times, and metadata.
+        Selected cell data dicts with traces, spike times, and metadata,
+        in increasing SNR.
     """
     all_cells = []
     for label, norm_label in label_map.items():
@@ -1397,8 +1713,6 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
         print("Warning: no trace data found for raster/trace plots.")
         return []
 
-    all_cells.sort(key=lambda c: c['kurtosis'])
-
     def _win_count(c):
         """Count ground-truth spikes within the selected visualization window."""
         t0, t1 = c['t_start'], c['t_start'] + window
@@ -1406,16 +1720,15 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
 
     good   = [c for c in all_cells if _win_count(c) >= min_spikes]
     pool   = good if len(good) >= n_cells else all_cells
-    target_kurts = [2.0, 5.0, 10.0, 50.0, 100.0]
     selected, used_idx = [], set()
-    for tk in target_kurts:
+    for target in target_snrs:
         best_i, best_d = None, np.inf
         for j, c in enumerate(pool):
             if j in used_idx:
                 continue
-            dk = abs(c['kurtosis'] - tk)
-            if dk < best_d:
-                best_d, best_i = dk, j
+            d = abs(c['snr'] - target)
+            if d < best_d:
+                best_d, best_i = d, j
         if best_i is not None:
             used_idx.add(best_i)
             selected.append(pool[best_i])
@@ -1424,6 +1737,7 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
         extra_idx = np.linspace(0, len(remaining) - 1,
                                 n_cells - len(selected), dtype=int)
         selected += [remaining[k] for k in extra_idx]
+    selected.sort(key=lambda c: c['snr'])
     return selected
 
 
@@ -1489,7 +1803,8 @@ def _plot_combined_raster_trace(ax, cells, window=60.0):
                 va='center', ha='center', color='k', fontsize=5.5,
                 fontweight='bold')
         ax.text(window + 0.8, base + cell_h / 2 - gap / 2,
-                f'SNR={cell["snr"]:.1f}', va='center', ha='left')
+                f'SNR={cell["snr"]:.1f}\nkurt={cell["kurtosis"]:.1f}',
+                va='center', ha='left', linespacing=1.3)
         if i < n - 1:
             ax.axhline(base - gap / 2, color='0.75', lw=0.4, ls='--')
     ax.set_xlim(label_x - 0.5, window + 4.5)
@@ -1917,6 +2232,105 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
         print("  No trace data found -- metrics unchanged from saved values.")
 
 
+def _metrics_from_spikes(true_spikes, true_events, spikes, fs):
+    """Per-cell accuracy metrics for one method, keyed by record field name.
+
+    Parameters
+    ----------
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds.
+    true_events : list of np.ndarray
+        Event ground truth.
+    spikes : list of np.ndarray
+        Detected spike times in seconds.
+    fs : float
+        Sampling frequency in Hz.
+
+    Returns
+    -------
+    dict
+        Arrays for precision, recall, f1 (strict, window, event) and cosmic.
+    """
+    prec,   rec,   f1   = OMSI.compute_accuracy_strict(true_spikes, spikes, tolerance=0.1)
+    prec_w, rec_w, f1_w = compute_accuracy_window(true_spikes, spikes, tolerance=0.1)
+    prec_e, rec_e, f1_e = compute_accuracy_window(true_events, spikes, tolerance=0.1)
+    return {
+        'precision': prec, 'recall': rec, 'f1': f1,
+        'precision_window': prec_w, 'recall_window': rec_w, 'f1_window': f1_w,
+        'precision_event': prec_e, 'recall_event': rec_e, 'f1_event': f1_e,
+        'cosmic': OMSI.helpers.compute_cosmic(true_spikes, spikes, fs),
+    }
+
+
+def _load_lowkurt_records(data_dir, label_map, file_path_map):
+    """Build result records for the low-kurtosis cells from their saved outputs.
+
+    Spikes are detected the same way _recompute_all_metrics_from_traces does
+    for the main cells (OMSI and CaImAn from probabilities with sigma 1.5,
+    OASIS with sigma 0.5, CASCADE from its saved spikes), so both sets of
+    cells are scored identically. Records are flagged low_kurtosis=True.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing allen_lowkurt_results_*.npz files.
+    label_map : dict
+        Clean label to normalized label; updated in place.
+    file_path_map : dict
+        Clean label to original dataset basename; updated in place.
+
+    Returns
+    -------
+    list of dict
+        One record per (cell, method) with metrics, label and genotype.
+    """
+    records = []
+    for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_lowkurt_results_*.npz'))):
+        orig = (os.path.basename(fpath)
+                .replace('allen_lowkurt_results_', '').replace('.npz', ''))
+        if any(orig.startswith(ds) for ds in _EXCLUDED_DATASETS):
+            continue
+        try:
+            with np.load(fpath, allow_pickle=True) as npz:
+                d = {k: npz[k] for k in npz.files}
+        except Exception as exc:
+            print("Warning: could not load {}: {}.".format(fpath, exc))
+            continue
+        norm_label = normalize_label(orig)
+        label      = clean_label(norm_label)
+        label_map.setdefault(label, norm_label)
+        file_path_map.setdefault(label, orig)
+        geno = get_genotype(orig)
+
+        true_spikes = list(d['true_spikes'])
+        fs, tau     = float(d['fs']), float(d['tau'])
+        cell_ids    = np.asarray(d['cell_ids'])
+        true_events = [OMSI.helpers.make_event_ground_truth(sp, tau) for sp in true_spikes]
+
+        methods = []
+        if 'my_probs' in d:
+            methods.append(('OMSI', OMSI.detect_spikes_from_probs(d['my_probs'], fs, sigma=1.5)[0],
+                            'time_omsi'))
+        if 'trad_probs' in d:
+            methods.append(('MATLAB', OMSI.detect_spikes_from_probs(d['trad_probs'], fs, sigma=1.5)[0],
+                            'time_matlab'))
+        if 'oasis_probs' in d:
+            methods.append(('OASIS', OMSI.detect_spikes_from_probs(d['oasis_probs'], fs, sigma=0.5)[0],
+                            'time_oasis'))
+        if 'cascade_spikes' in d:
+            methods.append(('CASCADE', list(d['cascade_spikes']), 'time_cascade'))
+
+        for model, spikes, time_key in methods:
+            m = _metrics_from_spikes(true_spikes, true_events, spikes, fs)
+            for i, cid in enumerate(cell_ids):
+                rec = {'model': model, 'tau': tau, 'cell_id': int(cid),
+                       'time': float(d[time_key]) / len(cell_ids),
+                       'label': label, 'genotype': geno, 'low_kurtosis': True}
+                rec.update({k: float(v[i]) for k, v in m.items()})
+                records.append(rec)
+    return records
+
+
 def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     """Load all benchmark records and recompute their metrics from saved traces.
 
@@ -2042,6 +2456,14 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                                         matlab_data_dir=matlab_data_dir)
 
+    # Added after the recompute above, which matches records to trace rows by
+    # position within a label and would misassign these extra cells.
+    lowkurt = _load_lowkurt_records(data_dir, label_map, file_path_map)
+    if lowkurt:
+        print("Including {} records for {} low-kurtosis cells (--mode add-bad-cells).".format(
+            len(lowkurt), len(set((r['label'], r['cell_id']) for r in lowkurt))))
+        alldata.extend(lowkurt)
+
     for d in alldata:
         d['zoom'] = get_zoom_for_label(d['label'])
 
@@ -2138,6 +2560,162 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     plt.close()
 
 
+def _paired_by_cell(alldata, model_a, model_b, key, **filters):
+    """Collect one metric for two models on the cells both were run on.
+
+    Parameters
+    ----------
+    alldata : list of dict
+        All benchmark result records.
+    model_a, model_b : str
+        Models to pair.
+    key : str
+        Record key of the metric.
+    **filters
+        Record fields that must match (e.g. tau=0.7, zoom='High Zoom').
+
+    Returns
+    -------
+    a, b : np.ndarray
+        Metric values, paired by (label, tau, cell_id).
+    """
+    def _collect(model):
+        return {(d['label'], d['tau'], d['cell_id']): d.get(key, np.nan)
+                for d in alldata if d['model'] == model
+                and all(d.get(k) == v for k, v in filters.items())}
+    a, b = _collect(model_a), _collect(model_b)
+    common = sorted(set(a) & set(b))
+    return (np.array([a[c] for c in common], dtype=float),
+            np.array([b[c] for c in common], dtype=float))
+
+
+def _print_signed_rank_tests(alldata):
+    """Print Wilcoxon signed-rank tests for every violin panel.
+
+    Each test pairs OMSI with one other model on the cells both were run on.
+
+    Parameters
+    ----------
+    alldata : list of dict
+        All benchmark result records.
+    """
+    prec_key = 'precision'    if USE_STRICT_ACCURACY else 'precision_window'
+    rec_key  = 'recall'       if USE_STRICT_ACCURACY else 'recall_window'
+    fb_key   = 'fbeta'        if USE_STRICT_ACCURACY else 'fbeta_window'
+    others   = [m for m in _MODEL_ORDER if m != 'OMSI']
+    taus     = sorted(set(d['tau'] for d in alldata))
+
+    print('\nWilcoxon signed-rank tests (two-sided, paired by cell, OMSI vs each method)')
+    print_test_header('Panel')
+    for key, label in [(fb_key, 'F_beta violin'), ('cosmic', 'CosMIC violin')]:
+        for other in others:
+            print_test_row(label, 'OMSI', other,
+                           signed_rank(*_paired_by_cell(alldata, 'OMSI', other, key)))
+    for zoom in ['High Zoom', 'Low Zoom']:
+        for key, name in [(prec_key, 'Precision'), (rec_key, 'Recall')]:
+            for tau_val in taus:
+                label = '{} {} tau={:g}s'.format(name, zoom.split()[0].lower(), tau_val)
+                for other in others:
+                    a, b = _paired_by_cell(alldata, 'OMSI', other, key,
+                                           tau=tau_val, zoom=zoom)
+                    if len(a):
+                        print_test_row(label, 'OMSI', other, signed_rank(a, b))
+    for tau_val in taus:
+        for zoom in ['High Zoom', 'Low Zoom']:
+            label = 'F_beta {} tau={:g}s'.format(zoom.split()[0].lower(), tau_val)
+            for other in others:
+                a, b = _paired_by_cell(alldata, 'OMSI', other, fb_key,
+                                       tau=tau_val, zoom=zoom)
+                if len(a):
+                    print_test_row(label, 'OMSI', other, signed_rank(a, b))
+    print('  p-values are uncorrected for multiple comparisons.')
+
+
+def _omsi_snr(trace):
+    """SNR exactly as OMSI's sampler computes it to decide whether to skip a cell.
+
+    (99th - 8th percentile) / (median |diff| / 0.6745), over non-NaN samples.
+
+    Parameters
+    ----------
+    trace : np.ndarray
+        Trace passed to OMSI.
+
+    Returns
+    -------
+    float
+        SNR of the trace.
+    """
+    y = np.asarray(trace, dtype=float)
+    y = y[~np.isnan(y)]
+    sn_mad = float(np.median(np.abs(np.diff(y)))) / 0.6745 if len(y) > 1 else 1e-4
+    if len(y) == 0:
+        return 0.0
+    return (float(np.percentile(y, 99)) - float(np.percentile(y, 8))) / (sn_mad + 1e-9)
+
+
+def _print_omsi_snr_exclusions(data_dir):
+    """Print how many cells OMSI skipped because their SNR was below its floor.
+
+    Uses the traces saved with the results, which are exactly the traces
+    passed to OMSI. Skipped cells are not removed from the figure: they stay
+    in every panel, scored as having no detected spikes.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing the saved traces.
+    """
+    sources = []
+    for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_data_results_*_traces.npz'))):
+        name = os.path.basename(fpath)
+        if 'allen_data_results_omsi_' in name or 'allen_data_results_cascade_' in name:
+            continue
+        sources.append((name.replace('allen_data_results_', '').replace('_traces.npz', ''),
+                        fpath, 'main'))
+    main_labels = {orig for orig, _, _ in sources}
+    for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_data_results_omsi_*_traces.npz'))):
+        orig = (os.path.basename(fpath)
+                .replace('allen_data_results_omsi_', '').replace('_traces.npz', ''))
+        if orig not in main_labels:
+            sources.append((orig, fpath, 'main'))
+    for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_lowkurt_results_*.npz'))):
+        sources.append((os.path.basename(fpath)
+                        .replace('allen_lowkurt_results_', '').replace('.npz', ''),
+                        fpath, 'low-kurtosis'))
+
+    print('\nCells skipped by OMSI for low SNR (SNR < {:g}; no inference, scored as no spikes)'.format(
+        _OMSI_SNR_FLOOR))
+    hdr = '{:<34} {:<13} {:>7} {:>8} {:>7}'.format('Dataset', 'Cells', 'n', 'skipped', '%')
+    print(hdr)
+    print('-' * len(hdr))
+    totals = {}
+    for orig, fpath, kind in sources:
+        if any(orig.startswith(ds) for ds in _EXCLUDED_DATASETS):
+            continue
+        try:
+            with np.load(fpath, allow_pickle=True) as d:
+                dff = d['dff'] if 'dff' in d.files else None
+        except Exception as exc:
+            print('  Warning: could not load {}: {}.'.format(fpath, exc))
+            continue
+        if dff is None or np.asarray(dff).ndim != 2:
+            continue
+        n = dff.shape[0]
+        n_skip = int(sum(_omsi_snr(tr) < _OMSI_SNR_FLOOR for tr in dff))
+        tot = totals.setdefault(kind, [0, 0])
+        tot[0] += n; tot[1] += n_skip
+        print('{:<34} {:<13} {:>7} {:>8} {:>6.1f}%'.format(
+            clean_label(normalize_label(orig))[:34], kind, n, n_skip, 100.0 * n_skip / max(n, 1)))
+    if not totals:
+        print('  No saved traces found. Run --mode test first.')
+        return
+    print('-' * len(hdr))
+    for kind, (n, n_skip) in totals.items():
+        print('{:<34} {:<13} {:>7} {:>8} {:>6.1f}%'.format(
+            'TOTAL', kind, n, n_skip, 100.0 * n_skip / max(n, 1)))
+
+
 def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
     """Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
 
@@ -2157,6 +2735,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
     print('\n' + '='*80)
     print('FIGURE 3 STATISTICS')
     print('='*80)
+
+    _print_omsi_snr_exclusions(data_dir)
 
     print('\n{:<12}  {:>27}  {:>27}  {:>20}'.format(
         'Method', 'F_beta strict (med ± MAD)',
@@ -2193,28 +2773,65 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
             line += '  {:>15}'.format('{:.3f} ± {:.3f}'.format(np.nanmedian(vals), _mad(vals)))
         print(line)
 
-    # Precision/recall panels: one violin per (tau, zoom, model).
-    prec_key = 'precision' if USE_STRICT_ACCURACY else 'precision_window'
-    rec_key  = 'recall'    if USE_STRICT_ACCURACY else 'recall_window'
-    print('\nPrecision / recall panels ({}, med ± MAD)'.format(
-        'strict' if USE_STRICT_ACCURACY else 'window'))
-    print('{:<10}  {:<6}  {:<12}  {:>15}  {:>15}  {:>5}'.format(
-        'Zoom', 'Tau', 'Method', 'Precision', 'Recall', 'n'))
-    print('-'*72)
+    # Per-condition panels: one violin per (tau, zoom, model).
+    prec_key = 'precision'    if USE_STRICT_ACCURACY else 'precision_window'
+    rec_key  = 'recall'       if USE_STRICT_ACCURACY else 'recall_window'
+    fb_key   = 'fbeta'        if USE_STRICT_ACCURACY else 'fbeta_window'
+    acc_name = 'strict' if USE_STRICT_ACCURACY else 'window'
+    cond_metrics = [(prec_key, 'Precision'), (rec_key, 'Recall'),
+                    (fb_key, 'F_beta'), ('cosmic', 'CosMIC')]
+    taus_all = sorted(set(d['tau'] for d in alldata))
+
+    print('\nPer-condition scores by method ({} precision/recall/F_beta, med ± MAD)'.format(acc_name))
+    hdr = '{:<10}  {:<6}  {:<12}'.format('Zoom', 'Tau', 'Method') + ''.join(
+        '  {:>15}'.format(label) for _, label in cond_metrics) + '  {:>5}'.format('n')
+    print(hdr)
+    print('-' * len(hdr))
     for zoom in ['High Zoom', 'Low Zoom']:
-        for tau_val in sorted(set(d['tau'] for d in alldata)):
+        for tau_val in taus_all:
             for model_name in _MODEL_ORDER:
                 md = [d for d in alldata if d['tau'] == tau_val
                       and d['zoom'] == zoom and d['model'] == model_name]
                 if not md:
                     continue
-                p = np.array([d.get(prec_key, np.nan) for d in md], dtype=float)
-                r = np.array([d.get(rec_key,  np.nan) for d in md], dtype=float)
-                print('{:<10}  {:<6g}  {:<12}  {:>15}  {:>15}  {:>5}'.format(
-                    zoom, tau_val, model_name,
-                    '{:.3f} ± {:.3f}'.format(np.nanmedian(p), _mad(p)),
-                    '{:.3f} ± {:.3f}'.format(np.nanmedian(r), _mad(r)),
-                    int(np.sum(np.isfinite(p)))))
+                line = '{:<10}  {:<6g}  {:<12}'.format(zoom, tau_val, model_name)
+                for key, _ in cond_metrics:
+                    v = np.array([d.get(key, np.nan) for d in md], dtype=float)
+                    line += '  {:>15}'.format('{:.3f} ± {:.3f}'.format(np.nanmedian(v), _mad(v)))
+                n_fin = int(np.sum(np.isfinite(
+                    np.array([d.get(prec_key, np.nan) for d in md], dtype=float))))
+                print(line + '  {:>5}'.format(n_fin))
+
+    # Pooled over methods: every (cell, method) value at a zoom and tau. Per-cell
+    # scores pile up at 1.0, where the median can sit at 1.000 and hide
+    # differences, so the mean is reported alongside it.
+    def _sem(v):
+        v = v[np.isfinite(v)]
+        return float(np.std(v, ddof=1) / np.sqrt(len(v))) if len(v) > 1 else np.nan
+
+    for pair in [cond_metrics[:2], cond_metrics[2:]]:
+        print('\n{} / {} pooled across all methods ({}; n = cells x methods)'.format(
+            pair[0][1], pair[1][1], acc_name))
+        hdr = '{:<10}  {:<6}'.format('Zoom', 'Tau') + ''.join(
+            '  {:>20}  {:>20}'.format(label + ' med ± MAD', label + ' mean ± SEM')
+            for _, label in pair) + '  {:>6}'.format('n')
+        print(hdr)
+        print('-' * len(hdr))
+        for zoom in ['High Zoom', 'Low Zoom']:
+            for tau_val in taus_all:
+                md = [d for d in alldata if d['tau'] == tau_val and d['zoom'] == zoom]
+                if not md:
+                    continue
+                line = '{:<10}  {:<6g}'.format(zoom, tau_val)
+                for key, _ in pair:
+                    v = np.array([d.get(key, np.nan) for d in md], dtype=float)
+                    line += '  {:>20}  {:>20}'.format(
+                        '{:.3f} ± {:.3f}'.format(np.nanmedian(v), _mad(v)),
+                        '{:.3f} ± {:.3f}'.format(np.nanmean(v), _sem(v)))
+                v0 = np.array([d.get(pair[0][0], np.nan) for d in md], dtype=float)
+                print(line + '  {:>6}'.format(int(np.sum(np.isfinite(v0)))))
+
+    _print_signed_rank_tests(alldata)
 
 
 def main():
@@ -2222,15 +2839,18 @@ def main():
     parser = argparse.ArgumentParser(
         description='Figure 3 -- Allen data benchmark'
     )
-    parser.add_argument('--mode', required=True, choices=['test', 'omsi', 'plot', 'print'],
+    parser.add_argument('--mode', required=True,
+                        choices=['test', 'omsi', 'cascade', 'add-bad-cells', 'plot', 'print'],
                         help='test: run all inference; omsi: re-run OMSI only; '
-                             'plot: make figure; print: print stats')
+                             'cascade: run CASCADE only; add-bad-cells: run all methods on '
+                             'the cells below the kurtosis threshold (included in plot/print '
+                             'automatically); plot: make figure; print: print stats')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for output data/figures')
     parser.add_argument('--allen-data-dir', default='/home/dylan/Fast2/spike_deconv/allen_results/raw_data',
                         help='Path to raw Allen H5 files (required for test mode)')
     parser.add_argument('--no-matlab', action='store_true',
-                        help='Skip traditional MCMC (Matlab) in test mode')
+                        help='Skip traditional MCMC (Matlab) in test and add-bad-cells modes')
     parser.add_argument('--matlab-data-dir', default=_MATLAB_DATA_DIR,
                         help='Directory containing CaImAn MCMC (MATLAB) results '
                              '(used in plot/print modes)')
@@ -2250,6 +2870,17 @@ def main():
         test_omsi(
             data_dir=args.data_dir,
             allen_data_dir=args.allen_data_dir,
+        )
+    elif args.mode == 'cascade':
+        test_cascade(
+            data_dir=args.data_dir,
+            allen_data_dir=args.allen_data_dir,
+        )
+    elif args.mode == 'add-bad-cells':
+        test_add_bad_cells(
+            data_dir=args.data_dir,
+            allen_data_dir=args.allen_data_dir,
+            run_matlab=not args.no_matlab,
         )
     elif args.mode == 'plot':
         plot_figure(data_dir=args.data_dir, matlab_data_dir=args.matlab_data_dir)

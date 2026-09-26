@@ -12,8 +12,14 @@ _snr_from_fluo
     Signal-to-noise ratio from a fluorescence trace.
 _oasis_spikes_from_s
     Convert OASIS deconvolved signal to spike times.
-_cascade_model_for_fs
-    Return the CASCADE model name closest to the given frame rate.
+_loo_training_datasets
+    Ground-truth datasets a leave-one-out CASCADE model may train on.
+_loo_model_name
+    Folder name of the leave-one-out CASCADE model for one dataset.
+_loo_smoothing
+    CASCADE smoothing width and kernel type for a frame rate.
+_train_loo_model
+    Train (or reuse) the leave-one-out CASCADE model for one dataset.
 _is_interneuron_dataset
     Return True if the dataset folder name contains an interneuron keyword.
 _save_records
@@ -58,10 +64,16 @@ _plot_raster
     Draw the multi-cell spike raster panel.
 _draw_grouped_violins
     Draw grouped violin plots by sensor for one performance metric.
+_load_filtered
+    Load all records and drop cells below SNR_THRESHOLD.
 plot_figure
     Load all benchmark data and save figure 4.
+_print_omsi_snr_exclusions
+    Print how many cells OMSI skipped because their SNR was below its floor.
+print_stats
+    Print per-sensor medians and Wilcoxon signed-rank tests for the violin panels.
 main
-    Parse command-line arguments and dispatch to test_figure or plot_figure.
+    Parse command-line arguments and dispatch to test_figure, plot_figure, or print_stats.
 
 
 DMM, March 2026
@@ -69,6 +81,7 @@ DMM, March 2026
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -90,6 +103,7 @@ import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from oasis.functions import deconvolve as oasis_deconv
 from OMSI._win_perf import no_power_throttling
+from stats_helpers import signed_rank, print_test_header, print_test_row
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig4')
 
@@ -143,10 +157,17 @@ _TRACE_METHODS = ['omsi', 'oasis', 'matlab', 'cascade_loo']
 _CASCADE_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'run_cascade_subprocess.py')
 
-_CASCADE_MODELS = [
-    (7.5,  'Global_EXC_7.5Hz_smoothing200ms'),
-    (30.0, 'Global_EXC_30Hz_smoothing50ms_causalkernel'),
-]
+# Leave-one-out CASCADE. CASCADE's pretrained global models were trained on
+# these same ground-truth datasets, so each dataset is instead predicted by a
+# model trained on all other datasets, at that dataset's own frame rate.
+# Training settings follow the Global_EXC pretrained models.
+_LOO_NOISE_LEVELS   = [2, 3, 4, 5, 6, 7, 8]
+_LOO_TRAIN_SETTINGS = {'nr_of_epochs': 10, 'ensemble_size': 5,
+                       'batch_size': 8192, 'dense_expansion': 30}
+# Extra datasets to hold out alongside a test dataset because they may contain
+# the same neurons, keyed by DS number (e.g. {'DS09': {'DS10'}}). Datasets that
+# share a DS number (such as X-DS09 and DS09) are always held out together.
+_LOO_EXTRA_HOLDOUT = {}
 
 #   'threshold' : return every frame where s > height * sigma (default)
 #   'peaks'     : find local maxima above height * sigma with minimum inter-peak distance
@@ -180,10 +201,107 @@ def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
         return peaks / fs
     return np.where(s > thresh)[0] / fs
 
-def _cascade_model_for_fs(fs):
-    """Return the pretrained CASCADE model name closest to the given frame rate."""
+def _ds_number(ds_folder):
+    """Return the 'DSnn' tag of a dataset folder name, or None."""
 
-    return min(_CASCADE_MODELS, key=lambda x: abs(x[0] - fs))[1]
+    m = re.search(r'DS\d+', ds_folder)
+    return m.group(0) if m else None
+
+
+def _loo_training_datasets(held_out, ground_truth_dir):
+    """Ground-truth datasets a leave-one-out CASCADE model may train on.
+
+    Every excitatory ground-truth dataset except the held-out one, any dataset
+    sharing its DS number, and any listed for it in _LOO_EXTRA_HOLDOUT.
+
+    Parameters
+    ----------
+    held_out : str
+        Dataset folder being predicted.
+    ground_truth_dir : str
+        Root directory of the CASCADE Ground_truth data.
+
+    Returns
+    -------
+    list of str
+        Training dataset folder names.
+    """
+    tag = _ds_number(held_out)
+    blocked = {tag} | set(_LOO_EXTRA_HOLDOUT.get(tag, ())) if tag else set()
+    out = []
+    for d in sorted(os.listdir(ground_truth_dir)):
+        if not os.path.isdir(os.path.join(ground_truth_dir, d)):
+            continue
+        if d == held_out or _is_interneuron_dataset(d) or _ds_number(d) in blocked:
+            continue
+        out.append(d)
+    return out
+
+
+def _loo_model_name(ds_folder, fs):
+    """Folder name of the leave-one-out CASCADE model for one dataset."""
+
+    return 'LOO_{}_{:.1f}Hz'.format(ds_folder, fs)
+
+
+def _loo_smoothing(fs):
+    """CASCADE smoothing width (s) and causal-kernel flag for a frame rate.
+
+    Matches the pretrained models used before: 50 ms causal at 30 Hz, 200 ms
+    symmetric at 7.5 Hz, with 100 ms symmetric in between.
+    """
+
+    if fs >= 20.0:
+        return 0.05, 1
+    if fs >= 10.0:
+        return 0.1, 0
+    return 0.2, 0
+
+
+def _train_loo_model(ds_folder, fs, ground_truth_dir, loo_models_dir):
+    """Train (or reuse) the leave-one-out CASCADE model for one dataset.
+
+    Runs in the cascade_gpu environment. Already-trained models are reused;
+    see mode_loo_train in run_cascade_subprocess.py.
+
+    Parameters
+    ----------
+    ds_folder : str
+        Held-out dataset folder name.
+    fs : float
+        Frame rate of the held-out dataset (Hz).
+    ground_truth_dir : str
+        Root directory of the CASCADE Ground_truth data.
+    loo_models_dir : str
+        Directory holding the leave-one-out model folders.
+
+    Returns
+    -------
+    str
+        Model name (folder inside loo_models_dir).
+    """
+    model_name = _loo_model_name(ds_folder, fs)
+    if os.path.isfile(os.path.join(loo_models_dir, model_name, 'LOO_TRAINING_COMPLETE')):
+        print('  Reusing LOO model {}.'.format(model_name))
+        return model_name
+    training = _loo_training_datasets(ds_folder, ground_truth_dir)
+    smoothing, causal = _loo_smoothing(fs)
+    print('  Training LOO model {} on {} datasets (held out: {})...'.format(
+        model_name, len(training), ds_folder))
+    cmd = [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', _CASCADE_SCRIPT,
+           '--mode', 'loo-train',
+           '--model-name', model_name,
+           '--loo-models-dir', loo_models_dir,
+           '--ground-truth-dir', ground_truth_dir,
+           '--training-datasets', ','.join(training),
+           '--sampling-rate', '{:.4f}'.format(fs),
+           '--smoothing', str(smoothing),
+           '--causal-kernel', str(causal),
+           '--noise-levels', ','.join(str(n) for n in _LOO_NOISE_LEVELS)]
+    for key, val in _LOO_TRAIN_SETTINGS.items():
+        cmd += ['--' + key.replace('_', '-'), str(val)]
+    subprocess.run(cmd, check=True)
+    return model_name
 
 _SENSOR_ORDER = [
     'GCaMP6f', 'GCaMP6s', 'GCaMP8f', 'GCaMP8m',
@@ -192,7 +310,9 @@ _SENSOR_ORDER = [
 _EXCLUDED_SENSORS = {'Other', 'Cal520', 'OGB1', 'jGECO', 'GCaMP5k'}
 
 # Datasets excluded for sensor / recording reasons unrelated to cell type.
-_EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
+# DS40 is spinal cord rather than cortex.
+_EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1',
+                      'DS40-GCaMP6s-spinal-cord-excitatory'}
 
 # Inhibitory interneuron datasets are excluded because all evaluated methods
 # (OMSI, CaImAn, OASIS, CASCADE) are designed and validated on excitatory
@@ -229,6 +349,9 @@ _DS_EPHYS_RATE  = {'DS05': 40000, 'DS28': 20000, 'DS29': 20000,
 _DEFAULT_EPHYS  = 10000
 
 RASTER_SENSORS = ['GCaMP6s', 'GCaMP6f', 'GCaMP8m']
+# Example cells are drawn from this SNR range, preferring the middle of it.
+RASTER_SNR_RANGE = (5.0, 10.0)
+# Pinned cells are only used when their SNR falls inside RASTER_SNR_RANGE.
 RASTER_PINS    = [
     ('DS13-GCaMP6s-m-V1-neuropil-corrected', 0),
     ('DS11-GCaMP6f-m-V1-neuropil-corrected', 2),
@@ -526,7 +649,7 @@ def _build_params(fs, tau):
         'con_lam': False,
     }
 
-def process_dataset(ds_folder, ground_truth_dir, model):
+def process_dataset(ds_folder, ground_truth_dir, model, loo_models_dir=None):
     """Run one inference model on all cells in a dataset folder.
 
     Parameters
@@ -537,6 +660,8 @@ def process_dataset(ds_folder, ground_truth_dir, model):
         Root directory of the CASCADE Ground_truth data.
     model : str
         Method to run ('omsi', 'matlab', 'oasis', or 'cascade_loo').
+    loo_models_dir : str or None, optional
+        Directory for leave-one-out CASCADE models (required for 'cascade_loo').
 
     Returns
     -------
@@ -602,26 +727,29 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     if model == 'omsi':
         params = _build_params(fs, tau)
 
-        # Batch into one deconv call so Ray parallelizes across cells rather
-        # than paying Ray init overhead once per cell.
-        processed_fluos = []
-        for cell in cells:
-            processed_fluos.append(cell['fluo'].astype(np.float32))
-
-        min_T  = min(len(f) for f in processed_fluos)
-        dff_2d = np.stack([f[:min_T] for f in processed_fluos], axis=0)
-
-        try:
-            od = OMSI.deconv(dff_2d, params, benchmark=True)
-            for i in range(n_cells):
-                probs_list.append(od['optim_prob'][i])
-                spk = np.asarray(od['optim_spikes'][i], dtype=np.float64)
-                spikes_list.append(spk[np.isfinite(spk)])
-        except Exception as exc:
-            print('    Warning -- batch inference failed: {}.'.format(exc))
-            for cell in cells:
-                probs_list.append(np.zeros(len(cell['fluo']), dtype=np.float32))
-                spikes_list.append(np.array([], dtype=np.float64))
+        # One deconv call per group of equal-length cells, so Ray parallelizes
+        # across cells while every trace is used in full. (Cutting all traces to
+        # the shortest cell would hide the rest of each recording from OMSI while
+        # its spikes were still scored.)
+        groups = {}
+        for i, cell in enumerate(cells):
+            groups.setdefault(len(cell['fluo']), []).append(i)
+        print('  {} cells in {} equal-length batches.'.format(n_cells, len(groups)))
+        probs_list  = [None] * n_cells
+        spikes_list = [None] * n_cells
+        for length, idx in sorted(groups.items()):
+            dff_2d = np.stack([cells[i]['fluo'].astype(np.float32) for i in idx], axis=0)
+            try:
+                od = OMSI.deconv(dff_2d, params, benchmark=True)
+                for row, i in enumerate(idx):
+                    probs_list[i] = od['optim_prob'][row]
+                    spk = np.asarray(od['optim_spikes'][row], dtype=np.float64)
+                    spikes_list[i] = spk[np.isfinite(spk)]
+            except Exception as exc:
+                print('    Warning -- batch inference failed ({} frames): {}.'.format(length, exc))
+                for i in idx:
+                    probs_list[i]  = np.zeros(length, dtype=np.float32)
+                    spikes_list[i] = np.array([], dtype=np.float64)
 
     elif model == 'matlab':
         for cell in cells:
@@ -653,35 +781,41 @@ def process_dataset(ds_folder, ground_truth_dir, model):
 
     elif model == 'cascade_loo':
         import tempfile
-        model_name = _cascade_model_for_fs(fs)
-        print('  CASCADE model: {}.'.format(model_name))
-        min_len = min(len(c['fluo']) for c in cells)
-        dff_2d = np.stack([c['fluo'][:min_len] for c in cells], axis=0).astype(np.float32)
+        if not loo_models_dir:
+            raise ValueError('cascade_loo needs loo_models_dir')
+        # Full-length traces; the subprocess predicts them in equal-length groups.
+        dff_list = np.empty(n_cells, dtype=object)
+        for i, c in enumerate(cells):
+            dff_list[i] = c['fluo'].astype(np.float32)
         with tempfile.TemporaryDirectory() as tmpdir:
             in_path  = os.path.join(tmpdir, 'cascade_in.npz')
             out_path = os.path.join(tmpdir, 'cascade_out.npz')
-            np.savez(in_path, dff=dff_2d, fs=np.float32(fs))
+            np.savez(in_path, dff_list=dff_list, fs=np.float32(fs))
             try:
+                model_name = _train_loo_model(ds_folder, fs, ground_truth_dir, loo_models_dir)
+                print('  CASCADE LOO model: {}.'.format(model_name))
                 subprocess.run(
-                    [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
+                    [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', _CASCADE_SCRIPT,
                      '--mode', 'inference',
                      '--model', model_name,
+                     '--model-folder', loo_models_dir,
                      '--input',  in_path,
                      '--output', out_path,
                      '--device', 'gpu'],
                     check=True,
                 )
-                cas = np.load(out_path, allow_pickle=True)
-                probs_2d_cas  = cas['cascade_probs']   # (n_cells, n_frames)
-                spikes_cas    = list(cas['cascade_spikes'])
+                with np.load(out_path, allow_pickle=True) as cas:
+                    probs_cas  = list(cas['cascade_probs'])   # one full-length array per cell
+                    spikes_cas = list(cas['cascade_spikes'])
                 for i in range(n_cells):
-                    probs_list.append(probs_2d_cas[i].astype(np.float32))
+                    probs_list.append(np.asarray(probs_cas[i], dtype=np.float32))
                     spikes_list.append(np.asarray(spikes_cas[i], dtype=np.float64))
             except subprocess.CalledProcessError as exc:
-                print('  Warning: CASCADE subprocess failed: {}.'.format(exc))
-                for cell in cells:
-                    probs_list.append(np.zeros(len(cell['fluo']), dtype=np.float32))
-                    spikes_list.append(np.array([], dtype=np.float64))
+                # Skip the dataset rather than saving zero spikes, which would be
+                # scored as CASCADE detecting nothing.
+                print('  ERROR: CASCADE LOO failed for {}; dataset skipped for CASCADE: {}.'.format(
+                    ds_folder, exc))
+                return [], None
 
     elapsed = time.time() - t0_bench
     print('  Finished in {:.1f}s ({:.2f}s/cell).'.format(elapsed, elapsed/n_cells))
@@ -746,7 +880,7 @@ def process_dataset(ds_folder, ground_truth_dir, model):
     return records, traces
 
 
-def test_figure(data_dir, ground_truth_dir, methods=None):
+def test_figure(data_dir, ground_truth_dir, methods=None, loo_models_dir=None):
     """Run benchmark inference for all datasets and save results.
 
     Parameters
@@ -757,9 +891,14 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
         Root directory of the CASCADE Ground_truth data.
     methods : list of str or None, optional
         Methods to evaluate (default: all four).
+    loo_models_dir : str or None, optional
+        Where leave-one-out CASCADE models are trained and cached
+        (default: data_dir/cascade_loo_models).
     """
 
     os.makedirs(data_dir, exist_ok=True)
+    if loo_models_dir is None:
+        loo_models_dir = os.path.join(data_dir, 'cascade_loo_models')
     if methods is None:
         methods = ['omsi', 'oasis', 'matlab', 'cascade_loo']
 
@@ -777,6 +916,7 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
         os.makedirs(traces_dir, exist_ok=True)
 
         all_records = []
+        skipped = []
         t_total = time.time()
         print('\n' + '='*65)
         print('  Method: {}'.format(model))
@@ -785,9 +925,19 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
         for ds_folder in ds_folders:
             print('\n' + '─'*55)
             print('  Dataset: {}'.format(ds_folder))
-            records, traces = process_dataset(ds_folder, ground_truth_dir, model)
+            # Each CASCADE LOO dataset costs a model trained from scratch, so skip
+            # the ones the figure drops by sensor. They still serve as training
+            # data for the other datasets' models.
+            if model == 'cascade_loo' and _get_sensor(ds_folder) in _EXCLUDED_SENSORS:
+                print('  Skipped: sensor {} is excluded from the figure.'.format(
+                    _get_sensor(ds_folder)))
+                continue
+            records, traces = process_dataset(ds_folder, ground_truth_dir, model,
+                                              loo_models_dir=loo_models_dir)
             if records:
                 all_records.extend(records)
+            else:
+                skipped.append(ds_folder)
             if traces is not None:
                 npz_path = os.path.join(traces_dir, f'{ds_folder}_traces.npz')
                 np.savez(npz_path, **traces)
@@ -796,6 +946,8 @@ def test_figure(data_dir, ground_truth_dir, methods=None):
         print('\n' + '='*65)
         print('  Total elapsed: {:.1f} min.'.format((time.time()-t_total)/60))
         print('  Total cells evaluated: {}.'.format(len(all_records)))
+        if skipped:
+            print('  Datasets with no results: {}.'.format(', '.join(skipped)))
 
         out_path = os.path.join(data_dir, f'ground_truth_results_{model}.npz')
         _save_records(all_records, out_path)
@@ -915,6 +1067,11 @@ def _build_snr_lookup(data_dir):
 def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
     """Select example cells for the spike raster panel and save to NPZ.
 
+    One cell per sensor in RASTER_SENSORS. A pinned cell (RASTER_PINS) is used
+    when its SNR lies in RASTER_SNR_RANGE; otherwise the cell whose SNR is
+    closest to the middle of the range is chosen, and if no cell of that sensor
+    falls in the range, the closest one outside it (with a warning).
+
     Parameters
     ----------
     data_dir : str
@@ -947,7 +1104,8 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
     if not sets:
         print("  No trace directories found.")
         return []
-    common_ds = sorted(sets[0].intersection(*sets[1:]))
+    common_ds = sorted(d for d in sets[0].intersection(*sets[1:])
+                       if d not in _EXCLUDED_DATASETS)
 
     cas_td       = _traces_dir(data_dir, 'cascade_loo')
     has_cascade  = os.path.isdir(cas_td)
@@ -1011,6 +1169,12 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
                 't_start': t_start,
             })
 
+    snr_lo, snr_hi = RASTER_SNR_RANGE
+    snr_mid = (snr_lo + snr_hi) / 2.0
+
+    def _range_dist(c):
+        return max(snr_lo - c['snr'], 0.0, c['snr'] - snr_hi)
+
     selected = []
     for slot_i, sensor in enumerate(RASTER_SENSORS):
         pool = by_sensor[sensor]
@@ -1024,15 +1188,21 @@ def _load_raster_cells(data_dir, raster_cells_npz, window=30.0, min_spikes=5):
                 print('  Warning: pinned cell ({}, {}) not found -- falling back to auto.'.format(
                     ds_pin, ci_pin))
                 pin = None
+            elif _range_dist(match) > 0:
+                print('  Pinned cell ({}, {}) has SNR {:.1f}, outside {}-{} -- choosing by SNR.'.format(
+                    ds_pin, ci_pin, match['snr'], snr_lo, snr_hi))
+                pin = None
             else:
                 selected.append(match)
         if pin is None:
             if not pool:
                 print('  Warning: no candidate for sensor {}.'.format(sensor))
                 continue
-            mean_kurt = np.mean([c['kurtosis'] for c in pool])
-            selected.append(
-                min(pool, key=lambda c: abs(c['kurtosis'] - mean_kurt)))
+            best = min(pool, key=lambda c: (_range_dist(c), abs(c['snr'] - snr_mid)))
+            if _range_dist(best) > 0:
+                print('  Warning: no {} cell with SNR in {}-{}; using SNR {:.1f}.'.format(
+                    sensor, snr_lo, snr_hi, best['snr']))
+            selected.append(best)
 
     os.makedirs(os.path.dirname(raster_cells_npz), exist_ok=True)
     save = {'n_cells': len(selected)}
@@ -1116,7 +1286,7 @@ def _plot_raster(ax, cells, window=60.0):
                 fontweight='bold')
         ax.text(window + 0.8, base + cell_h / 2 - gap / 2,
                 f'{cell["ds"].split("-")[0]}\n{cell["sensor"]}\n'
-                f'SNR={cell["snr"]:.1f}',
+                f'SNR={cell["snr"]:.1f}\nkurt={cell["kurtosis"]:.1f}',
                 va='center', ha='left', fontsize=5, linespacing=1.3)
         if i < n - 1:
             ax.axhline(base - gap / 2, color='0.75', lw=0.4, ls='--')
@@ -1195,22 +1365,24 @@ def _draw_grouped_violins(ax, all_records, values_fn, ylabel):
     ax.tick_params(axis='both', labelsize=6)
 
 
-def plot_figure(data_dir):
-    """Load all benchmark data and save figure 4.
+def _load_filtered(data_dir):
+    """Load all records and drop cells below SNR_THRESHOLD.
 
     Parameters
     ----------
     data_dir : str
         Directory containing ground-truth result NPZ files.
+
+    Returns
+    -------
+    dict
+        Records keyed by method name (empty if no result files were found).
     """
-
-    raster_cells_npz = os.path.join(data_dir, 'raster_cells.npz')
-
     print('Loading results...')
     all_records = _load_all(data_dir)
     if not all_records:
         print('No result files found in {}. Run --mode test first.'.format(data_dir))
-        return
+        return {}
     print('Loaded {} records across {} methods.'.format(
         sum(len(v) for v in all_records.values()), len(all_records)))
 
@@ -1225,6 +1397,23 @@ def plot_figure(data_dir):
     n_after = sum(len(v) for v in all_records.values())
     print('  Excluded {} cells (SNR < {}), {} remaining.'.format(
         n_before - n_after, SNR_THRESHOLD, n_after))
+    return all_records
+
+
+def plot_figure(data_dir):
+    """Load all benchmark data and save figure 4.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing ground-truth result NPZ files.
+    """
+
+    raster_cells_npz = os.path.join(data_dir, 'raster_cells.npz')
+
+    all_records = _load_filtered(data_dir)
+    if not all_records:
+        return
 
     print('  Loading example cells for raster...')
     cells = _load_raster_cells(data_dir, raster_cells_npz, window=30.0)
@@ -1262,17 +1451,141 @@ def plot_figure(data_dir):
     plt.close(fig)
 
 
+def _print_omsi_snr_exclusions(data_dir):
+    """Print how many cells OMSI skipped because their SNR was below its floor.
+
+    OMSI (cont_ca_sampler) skips inference on traces with SNR below 2.0, using
+    the same formula as _snr_from_fluo on the full trace it receives. The
+    figure's own SNR_THRESHOLD filter uses the same formula and cutoff, so
+    these cells are also left out of the figure for every method.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing the OMSI traces directory.
+    """
+    td = _traces_dir(data_dir, 'omsi')
+    if not os.path.isdir(td):
+        print('\nNo OMSI traces in {}; cannot count low-SNR skips.'.format(td))
+        return
+    per_sensor = {}
+    for fname in sorted(os.listdir(td)):
+        if not fname.endswith('_traces.npz'):
+            continue
+        ds = fname.replace('_traces.npz', '')
+        if ds in _EXCLUDED_DATASETS or _is_interneuron_dataset(ds):
+            continue
+        sensor = _get_sensor(ds)
+        if sensor in _EXCLUDED_SENSORS:
+            continue
+        try:
+            with np.load(os.path.join(td, fname), allow_pickle=False) as npz:
+                fluos = [np.asarray(npz[f'dff_{ci}'], dtype=np.float64)
+                         for ci in range(int(npz['n_cells']))]
+        except Exception as exc:
+            print('  Warning: could not load {}: {}.'.format(fname, exc))
+            continue
+        row = per_sensor.setdefault(sensor, [0, 0])
+        for f in fluos:
+            row[0] += 1
+            row[1] += int(_snr_from_fluo(f) < 2.0)
+
+    print('\nCells skipped by OMSI for low SNR (SNR < 2; also dropped from the figure '
+          'for all methods)')
+    hdr = '{:<10} {:>7} {:>8} {:>7}'.format('Sensor', 'n', 'skipped', '%')
+    print(hdr)
+    print('-' * len(hdr))
+    order = [s for s in _SENSOR_ORDER if s in per_sensor] +             [s for s in per_sensor if s not in _SENSOR_ORDER]
+    tot = [0, 0]
+    for sensor in order:
+        n, n_skip = per_sensor[sensor]
+        tot = [tot[0] + n, tot[1] + n_skip]
+        print('{:<10} {:>7} {:>8} {:>6.1f}%'.format(sensor, n, n_skip, 100.0 * n_skip / max(n, 1)))
+    print('-' * len(hdr))
+    print('{:<10} {:>7} {:>8} {:>6.1f}%'.format(
+        'TOTAL', tot[0], tot[1], 100.0 * tot[1] / max(tot[0], 1)))
+
+
+def print_stats(data_dir):
+    """Print per-sensor medians and Wilcoxon signed-rank tests for the violin panels.
+
+    Each test pairs OMSI with one other method on the cells of one sensor
+    that both were run on, matched by (dataset, cell_idx).
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing ground-truth result NPZ files.
+    """
+    all_records = _load_filtered(data_dir)
+    if not all_records:
+        return
+    if 'omsi' not in all_records:
+        print('No OMSI results; nothing to compare against.')
+        return
+
+    all_flat = [r for recs in all_records.values() for r in recs]
+    present  = sorted(set(_get_sensor(r['dataset']) for r in all_flat) - _EXCLUDED_SENSORS)
+    sensor_order  = [s for s in _SENSOR_ORDER if s in present]
+    sensor_order += [s for s in present if s not in sensor_order]
+    others  = [m for m in _METHOD_ORDER if m != 'omsi' and m in all_records]
+    metrics = [(r'F_beta', _get_fbeta), ('CosMIC', lambda r: r.get('cosmic', np.nan))]
+
+    def _by_cell(method_key, sensor, fn):
+        return {(r['dataset'], r['cell_idx']): float(fn(r))
+                for r in all_records[method_key]
+                if _get_sensor(r['dataset']) == sensor}
+
+    print('\n' + '=' * 72)
+    print('FIGURE 4 STATISTICS')
+    print('=' * 72)
+    _print_omsi_snr_exclusions(data_dir)
+    print('\n{:<10} {:<10} {:>18} {:>18} {:>6}'.format(
+        'Sensor', 'Method', 'F_beta (med ± MAD)', 'CosMIC (med ± MAD)', 'n'))
+    print('-' * 66)
+    for sensor in sensor_order:
+        for method_key in _METHOD_ORDER:
+            if method_key not in all_records:
+                continue
+            cells = [r for r in all_records[method_key] if _get_sensor(r['dataset']) == sensor]
+            fb = np.array([_get_fbeta(r) for r in cells], dtype=float)
+            cs = np.array([r.get('cosmic', np.nan) for r in cells], dtype=float)
+            print('{:<10} {:<10} {:>18} {:>18} {:>6}'.format(
+                sensor, _METHODS[method_key]['label'],
+                '{:.3f} ± {:.3f}'.format(np.nanmedian(fb), _mad(fb)),
+                '{:.3f} ± {:.3f}'.format(np.nanmedian(cs), _mad(cs)),
+                int(np.sum(np.isfinite(fb)))))
+
+    print('\nWilcoxon signed-rank tests (two-sided, paired by cell, OMSI vs each method)')
+    print_test_header('Panel')
+    for metric, fn in metrics:
+        for sensor in sensor_order:
+            ref = _by_cell('omsi', sensor, fn)
+            for other in others:
+                cur    = _by_cell(other, sensor, fn)
+                common = sorted(set(ref) & set(cur))
+                if not common:
+                    continue
+                print_test_row('{} violin, {}'.format(metric, sensor), 'OMSI',
+                               _METHODS[other]['label'],
+                               signed_rank([ref[c] for c in common], [cur[c] for c in common]))
+    print('  p-values are uncorrected for multiple comparisons.')
+
+
 def main():
 
     parser = argparse.ArgumentParser(
         description='Figure 4 -- Full CASCADE ground-truth benchmark'
     )
-    parser.add_argument('--mode', required=True, choices=['test', 'plot'],
-                        help='test: run inference; plot: make figure')
+    parser.add_argument('--mode', required=True, choices=['test', 'plot', 'print'],
+                        help='test: run inference; plot: make figure; print: print stats')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for output data/figures')
-    parser.add_argument('--ground-truth-dir', default='/home/dylan/Documents/Github/Cascade/Ground_truth',
+    parser.add_argument('--ground-truth-dir', default=r'C:\Users\dmartins\Documents\GitHub\Cascade\Ground_truth',
                         help='Path to CASCADE Ground_truth/ folder (test mode)')
+    parser.add_argument('--loo-models-dir', default=None,
+                        help='Where leave-one-out CASCADE models are trained and cached '
+                             '(test mode; default: <data-dir>/cascade_loo_models)')
     parser.add_argument('--method', nargs='+',
                         choices=['omsi', 'matlab', 'oasis', 'cascade_loo'],
                         default=None,
@@ -1287,9 +1600,12 @@ def main():
             data_dir=args.data_dir,
             ground_truth_dir=args.ground_truth_dir,
             methods=args.method,
+            loo_models_dir=args.loo_models_dir,
         )
-    else:
+    elif args.mode == 'plot':
         plot_figure(data_dir=args.data_dir)
+    else:
+        print_stats(data_dir=args.data_dir)
 
 
 if __name__ == '__main__':

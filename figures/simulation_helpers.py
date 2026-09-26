@@ -21,6 +21,7 @@ import os
 import matplotlib.pyplot as plt
 import os
 from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d
 
 import OMSI
 
@@ -87,7 +88,12 @@ def generate_synthetic_data(
         snr=None,
         use_real_data=False,
         target_kurtosis_range=(4.0, 50.0),
-        suite2p_dir=None
+        suite2p_dir=None,
+        amp_cv=0.0,
+        tau_cv=0.0,
+        drift_sd=0.0,
+        drift_timescale=60.0,
+        return_params=False
     ):
     """ Generate synthetic calcium traces and ground-truth spike trains.
 
@@ -109,6 +115,20 @@ def generate_synthetic_data(
         (min, max) kurtosis range for synthetic noise calibration.
     suite2p_dir : str, optional
         Suite2p directory, required when use_real_data is True.
+    amp_cv : float, optional
+        Coefficient of variation of per-spike amplitude, drawn lognormal with
+        mean 1 (default 0: every spike has amplitude 1).
+    tau_cv : float, optional
+        Coefficient of variation of per-cell decay time constant, lognormal
+        around tau (default 0: every cell uses tau).
+    drift_sd : float, optional
+        SD of a slow baseline drift, in units of a single-spike peak
+        (default 0: baseline fixed at 0). Added after the noise level is set,
+        so SNR keeps its meaning.
+    drift_timescale : float, optional
+        Timescale of the drift in seconds (Gaussian smoothing SD of white noise).
+    return_params : bool, optional
+        If True, also return a dict of the per-cell simulation parameters.
 
     Returns
     -------
@@ -124,6 +144,9 @@ def generate_synthetic_data(
         Simulated firing rates in Hz for each cell.
     gen_kurtosis : np.ndarray
         Kurtosis of each noisy trace.
+    params : dict
+        Only if return_params: 'tau' (per-cell decay constants, s) and
+        'drift_sd' (realized SD of each cell's drift).
     """
     n_frames = int(fs * duration)
     t = np.arange(n_frames) / fs
@@ -188,8 +211,23 @@ def generate_synthetic_data(
     for i in range(n_cells):
         true_spike_times.append(np.where(spikes_high[i])[0] / fs_high)
 
+    if amp_cv > 0:
+        # Lognormal with mean 1 and the requested CV; spike train entries become amplitudes.
+        s2 = np.log(1.0 + amp_cv ** 2)
+        amps = np.random.lognormal(mean=-s2 / 2.0, sigma=np.sqrt(s2), size=spikes_high.shape)
+        spikes_high = spikes_high * amps
+
     dummy_snr = np.full(n_cells, 1000.0)
-    _, clean_traces = OMSI.spikes_to_calcium(spikes_high, fs_high, fs, tau, dummy_snr)
+    if tau_cv > 0:
+        s2 = np.log(1.0 + tau_cv ** 2)
+        cell_tau = tau * np.random.lognormal(mean=-s2 / 2.0, sigma=np.sqrt(s2), size=n_cells)
+        clean_traces = np.vstack([
+            OMSI.spikes_to_calcium(spikes_high[i:i + 1], fs_high, fs, cell_tau[i],
+                                   dummy_snr[i:i + 1])[1]
+            for i in range(n_cells)])
+    else:
+        cell_tau = np.full(n_cells, float(tau))
+        _, clean_traces = OMSI.spikes_to_calcium(spikes_high, fs_high, fs, tau, dummy_snr)
 
     noisy_traces = np.zeros_like(clean_traces)
 
@@ -242,6 +280,21 @@ def generate_synthetic_data(
         noisy_traces[i] = trace + noise
         actual_snrs.append(peak_signal / sigma if sigma > 1e-9 else 100.0)
 
+    drift_real = np.zeros(n_cells)
+    if drift_sd > 0:
+        # Slow baseline drift: smoothed white noise scaled to drift_sd single-spike
+        # peaks. Added after the noise level was set from the spike-only trace.
+        for i in range(n_cells):
+            d = gaussian_filter1d(np.random.normal(size=n_frames), drift_timescale * fs,
+                                  mode='reflect')
+            d = (d - d.mean()) / (d.std() + 1e-12) * drift_sd
+            clean_traces[i] += d
+            noisy_traces[i] += d
+            drift_real[i] = d.std()
+
     gen_kurtosis = OMSI.compute_kurtosis(noisy_traces)
 
+    if return_params:
+        return (noisy_traces, true_spike_times, clean_traces, t, firing_rates, gen_kurtosis,
+                {'tau': cell_tau, 'drift_sd': drift_real})
     return noisy_traces, true_spike_times, clean_traces, t, firing_rates, gen_kurtosis
