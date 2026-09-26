@@ -58,16 +58,24 @@ plot_combined_opt
     Plot combined optimization parameter sweep figure.
 run_add_move_sweep
     Run sweep over add/remove proposal counts and save results.
-_plot_add_move_row
-    Draw add/remove sweep panels into a row of axes.
+_band
+    Median line with +/- MAD band.
+_default_line
+    Dashed vertical line at a default parameter value.
+plot_combined_opt_add_move
+    Compact combined figure of all parameter sweeps, add/remove proposals first.
 plot_add_move_sweep
-    Plot combined_opt with add/remove sweep as extra top row.
+    Plot the compact combined figure with the add/remove sweeps.
+run_combined_opt_add_move
+    Run every sweep the compact combined figure reads, then plot it.
 _rel_err_curves
     Smoothed relative distance of spike-count traces from their plateau.
 _pop_conv_sweeps
     Sweeps until the median-over-cells error drops below threshold for good.
 _add_move_dur_task
     Worker: run one chain and return its spike-count trace.
+_add_move_conv
+    Sweeps to converge per duration and add/remove count, with bootstrap over cells.
 run_add_move_duration_sweep
     Sweep recording duration and add/remove count together, save chains.
 plot_add_move_duration
@@ -97,6 +105,7 @@ import time
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import matplotlib as mpl
 from scipy.signal import lfilter as _lfilter, find_peaks as _find_peaks
 from scipy.optimize import minimize as _minimize
@@ -129,6 +138,9 @@ _DURATION = 2400.
 _FS       = 30.0
 _TAU      = 1.2
 _COLOR    = '#4C72B0'
+# Accuracy metrics when drawn together; cyan and plum appear in no other figure.
+_FB_COLOR     = '#1AA7C4'
+_COSMIC_COLOR = '#9C2F8F'
 
 
 def _init_tau(Y_cell, fs, p=2):
@@ -1447,18 +1459,14 @@ def plot_burn_tol_sweep(data_dir):
                     'burn-in completion threshold', 'burn_tol_sweep')
 
 
-def plot_combined_opt(data_dir, add_move=False):
+def plot_combined_opt(data_dir):
     """Plot a 4x3 combined figure of all optimization parameter sweeps.
 
     Parameters
     ----------
     data_dir : str
         Directory containing T_supp_sweep.npz, conv_tol_sweep.npz,
-        burn_tol_sweep.npz, and snr_threshold_sweep.npz (plus
-        add_move_sweep.npz if add_move).
-    add_move : bool, optional
-        Prepend a row of F_beta and CosMIC vs. add/remove proposal count and
-        save as combined_opt_add_move instead of combined_opt. Default is False.
+        burn_tol_sweep.npz, and snr_threshold_sweep.npz.
     """
     t_supp_path   = os.path.join(data_dir, 'T_supp_sweep.npz')
     conv_tol_path = os.path.join(data_dir, 'conv_tol_sweep.npz')
@@ -1468,12 +1476,7 @@ def plot_combined_opt(data_dir, add_move=False):
         if not os.path.exists(p):
             raise FileNotFoundError(f'No data at {p}.')
 
-    if add_move:
-        fig, all_axes = plt.subplots(5, 3, figsize=(7.2, 11.25), dpi=300)
-        _plot_add_move_row(data_dir, all_axes[0])
-        axes = all_axes[1:]
-    else:
-        fig, axes = plt.subplots(4, 3, figsize=(7.2, 9.0), dpi=300)
+    fig, axes = plt.subplots(4, 3, figsize=(7.2, 9.0), dpi=300)
 
     def _sweeps_panel(ax, x, mns, sns, xlabel):
         """Plot median sweep count with MAD shading on ax."""
@@ -1627,8 +1630,7 @@ def plot_combined_opt(data_dir, add_move=False):
 
     fig.tight_layout()
     for sfx in ('png', 'svg'):
-        stem = 'combined_opt_add_move' if add_move else 'combined_opt'
-        out = os.path.join(data_dir, '{}.{}'.format(stem, sfx))
+        out = os.path.join(data_dir, 'combined_opt.{}'.format(sfx))
         fig.savefig(out, dpi=300, bbox_inches='tight')
         print('Saved to {}.'.format(out))
     plt.close(fig)
@@ -1697,41 +1699,191 @@ def run_add_move_sweep(data_dir):
     print('\nSaved to {}.'.format(out_path))
 
 
-def _plot_add_move_row(data_dir, axes):
+def _band(ax, x, y, e, color, label=None, clip01=False):
+    """Median line with +/- MAD band."""
 
-    path = os.path.join(data_dir, 'add_move_sweep.npz')
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f'No data at {path}. Run --mode add-move-test first.')
+    lo, hi = y - e, y + e
+    if clip01:
+        lo, hi = np.clip(lo, 0, 1), np.clip(hi, 0, 1)
+    ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
+    ax.plot(x, y, '.-', color=color, zorder=3, label=label)
 
-    d = np.load(path)
-    x = d['add_move'].astype(float)
-    default_val = float(d['default_val'][0])
 
-    for ax, med, mad, ylabel in [
-        (axes[0], d['med_fb'],     d['mad_fb'],     '$F_\\beta$'),
-        (axes[1], d['med_cosmic'], d['mad_cosmic'], 'CosMIC'),
-    ]:
-        valid = np.isfinite(med) & np.isfinite(mad)
-        xv, y, ye = x[valid], med[valid], mad[valid]
-        ax.fill_between(xv, np.clip(y - ye, 0, 1), np.clip(y + ye, 0, 1),
-                        color=_COLOR, alpha=0.25, linewidth=0)
-        ax.plot(xv, y, '.-', color=_COLOR, zorder=3)
-        ax.axvline(default_val, color='k', linestyle='--',
-                   linewidth=0.8, alpha=0.6)
-        ax.set_xlabel('spike add/remove proposals per sweep')
+def _default_line(ax, x):
+    """Dashed vertical line at a default parameter value."""
+
+    ax.axvline(x, color='k', linestyle='--', linewidth=0.8, alpha=0.6)
+
+
+def plot_combined_opt_add_move(data_dir):
+    """ Compact combined figure of all parameter sweeps, add/remove proposals first.
+
+    One parameter per row on a uniform 3-column grid. Row 1: sweeps to converge
+    (from add_move_duration.npz), accuracy, and time per cell vs. add/remove
+    proposals per sweep. Row 2: T_supp. Rows 3-4: convergence and burn-in
+    thresholds, time and F-beta (their sweep counts are constant or track time).
+    Row 5: SNR threshold. F-beta and CosMIC share axes wherever both exist; the
+    legend sits in the first panel that has both.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory holding add_move_sweep.npz, add_move_duration.npz,
+        T_supp_sweep.npz, conv_tol_sweep.npz, burn_tol_sweep.npz, and
+        snr_threshold_sweep.npz.
+    """
+
+    from matplotlib.lines import Line2D
+
+    names = ('add_move_sweep', 'add_move_duration', 'T_supp_sweep', 'conv_tol_sweep',
+             'burn_tol_sweep', 'snr_threshold_sweep')
+    paths = {n: os.path.join(data_dir, n + '.npz') for n in names}
+    for pth in paths.values():
+        if not os.path.exists(pth):
+            raise FileNotFoundError(f'No data at {pth}.')
+
+    fig = plt.figure(figsize=(7.2, 10.0), dpi=300)
+    gs = gridspec.GridSpec(5, 3, figure=fig, hspace=0.6, wspace=0.4)
+
+    # Row 1: add/remove proposals per sweep.
+    d = np.load(paths['add_move_duration'])
+    grid, secs = d['grid'].astype(float), d['frames'] / _FS
+    conv, lo_c, hi_c, _ = _add_move_conv(d['ns'])
+    # Gray ramp, light = short: teal/olive are taken by the accuracy metrics.
+    shades = [str(v) for v in np.linspace(0.75, 0.1, len(secs))]
+    ax = fig.add_subplot(gs[0, 0])
+    for i in range(len(secs)):
+        ax.fill_between(grid, lo_c[i], hi_c[i], color=shades[i], alpha=0.15, linewidth=0)
+        ax.plot(grid, conv[i], '-', color=shades[i], lw=0.9,
+                label='{:g} s'.format(round(secs[i])))
+    ax.set_xscale('log', base=2)
+    ax.set_xlim(grid.min(), grid.max())
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel('add/remove proposals per sweep')
+    ax.set_ylabel('sweeps to converge')
+    ax.legend(frameon=False, fontsize=5, title='duration', title_fontsize=5,
+              handlelength=1.2, loc='upper right')
+
+    d = np.load(paths['add_move_sweep'])
+    x, default_am = d['add_move'].astype(float), float(d['default_val'][0])
+    ax = fig.add_subplot(gs[0, 1])
+    _band(ax, x, d['med_fb'], d['mad_fb'], _FB_COLOR, label='$F_\\beta$', clip01=True)
+    _band(ax, x, d['med_cosmic'], d['mad_cosmic'], _COSMIC_COLOR, label='CosMIC',
+          clip01=True)
+    ax.set_ylabel('accuracy')
+    ax.set_ylim(0, 1)
+    ax_acc = ax
+    ax_t = fig.add_subplot(gs[0, 2])
+    ax_t.plot(x, d['med_time'], '.-', color=_COLOR)
+    ax_t.set_ylabel('time per cell (sec)')
+    ax_t.set_ylim(bottom=0)
+    for a in (ax, ax_t):
+        _default_line(a, default_am)
+        a.set_xscale('log', base=2)
+        a.set_xlim(x.min(), x.max())
+        a.set_xlabel('add/remove proposals per sweep')
+
+    # Row 2: T_supp. First/last points and two noisy ones left out, as in combined_opt.
+    d = np.load(paths['T_supp_sweep'])
+    idx = np.arange(len(d['T_supp']))[1:-1]
+    idx = np.hstack([idx[0:4], idx[5], idx[7:]]).astype(int)
+    xs = d['T_supp'].astype(float)[idx] / _FS
+    for k, (y, e, ylabel, color, ylim) in enumerate([
+            (d['med_time'], d['mad_time'], 'time per cell (sec)', _COLOR, (0, 500)),
+            (d['med_f1'], d['mad_f1'], '$F_\\beta$', _FB_COLOR, (0, 1)),
+            (d['med_nsweeps'], d['mad_nsweeps'], 'sweep count', _COLOR,
+             (0, _MAX_SWEEPS_DEFAULT))]):
+        ax = fig.add_subplot(gs[1, k])
+        _band(ax, xs, y[idx], e[idx], color)
+        _default_line(ax, int(d['default_supp'][0]) / _FS)
+        ax.set_xscale('log')
+        ax.set_xlim(xs.min(), xs.max())
+        ax.set_ylim(*ylim)
+        ax.set_xlabel('$T_{supp}$ (sec)')
         ax.set_ylabel(ylabel)
-        ax.set_xscale('log', base=2)
-        ax.set_xlim(x.min(), x.max())
-        ax.set_ylim(0, 1)
 
-    for ax in axes[2:]:
-        ax.axis('off')
+    # Rows 3-4: convergence and burn-in thresholds. npz defaults predate the current
+    # ones, so the module defaults mark the dashed lines.
+    for j, (name, default, xlabel) in enumerate([
+            ('conv_tol_sweep', _DEFAULT_CONV_TOL, 'convergence threshold'),
+            ('burn_tol_sweep', _DEFAULT_BURN_TOL, 'burn-in threshold')]):
+        d = np.load(paths[name])
+        xt = d['tol'].astype(float)
+        for k, (y, e, ylabel, color) in enumerate([
+                (d['med_time'], d['mad_time'], 'time per cell (sec)', _COLOR),
+                (d['med_f1'], d['mad_f1'], '$F_\\beta$', _FB_COLOR)]):
+            ax = fig.add_subplot(gs[2 + j, k])
+            _band(ax, xt, y, e, color)
+            _default_line(ax, default)
+            ax.set_xscale('log')
+            ax.set_xlim(xt.min(), xt.max())
+            ax.set_ylim(0, 1) if k == 1 else ax.set_ylim(bottom=0)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+
+    # Row 5: SNR threshold.
+    d = np.load(paths['snr_threshold_sweep'])
+    snr, thr = d['snr_levels'].astype(float), float(d['threshold'][0])
+    ax = fig.add_subplot(gs[4, 0])
+    for med, mad, color in [(d['med_fb'], d['mad_fb'], _FB_COLOR),
+                            (d['med_cosmic'], d['mad_cosmic'], _COSMIC_COLOR)]:
+        ok = np.isfinite(med) & np.isfinite(mad)
+        _band(ax, snr[ok], med[ok], mad[ok], color, clip01=True)
+    ax.set_ylabel('accuracy')
+    ax.set_ylim(0, 1)
+    ax_n = fig.add_subplot(gs[4, 1])
+    ok = np.isfinite(d['med_nsweeps']) & np.isfinite(d['mad_nsweeps'])
+    _band(ax_n, snr[ok], d['med_nsweeps'][ok], d['mad_nsweeps'][ok], _COLOR)
+    ax_n.set_ylabel('sweep count')
+    ax_n.set_ylim(0, _MAX_SWEEPS_DEFAULT)
+    for a in (ax, ax_n):
+        _default_line(a, thr)
+        a.set_xlim(snr.min(), snr.max())
+        a.set_xlabel('SNR')
+
+    # Legend in the first panel with both metrics; the dashed default line is the
+    # same in every panel.
+    handles, _ = ax_acc.get_legend_handles_labels()
+    handles.append(Line2D([], [], color='k', ls='--', lw=0.8, alpha=0.6, label='default'))
+    ax_acc.legend(handles=handles, loc='lower right', frameon=False, fontsize=6,
+                  handlelength=1.5)
+
+    for sfx in ('png', 'svg'):
+        out = os.path.join(data_dir, 'combined_opt_add_move.{}'.format(sfx))
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print('Saved to {}.'.format(out))
+    plt.close(fig)
 
 
 def plot_add_move_sweep(data_dir):
 
-    plot_combined_opt(data_dir, add_move=True)
+    plot_combined_opt_add_move(data_dir)
+
+
+def run_combined_opt_add_move(data_dir):
+    """ Run every sweep the compact combined figure reads, then plot it.
+
+    Same as running add-move-test, add-move-dur-test, test, tol-conv-test,
+    tol-burn-test, and snr-thresh-test in turn, then add-move-plot. Each sweep
+    overwrites its own npz in data_dir.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory for the sweep npz files and the figure.
+    """
+
+    for name, run in [('add/remove proposals', run_add_move_sweep),
+                      ('add/remove x duration', run_add_move_duration_sweep),
+                      ('T_supp', run_T_supp_sweep),
+                      ('convergence threshold', run_conv_tol_sweep),
+                      ('burn-in threshold', run_burn_tol_sweep),
+                      ('SNR threshold', run_snr_threshold_sweep)]:
+        print('\n=== {} sweep ==='.format(name))
+        t0 = time.time()
+        run(data_dir)
+        print('=== {} sweep done in {:.1f} min ==='.format(name, (time.time() - t0) / 60))
+    plot_combined_opt_add_move(data_dir)
 
 
 # Duration x add_move sweep. Durations are chosen so n_frames = 500 * 2^k,
@@ -1822,14 +1974,26 @@ def run_add_move_duration_sweep(data_dir, n_workers=None):
     print('\nSaved to {}.'.format(out_path))
 
 
-def plot_add_move_duration(data_dir):
+def _add_move_conv(ns, n_boot=200):
+    """ Sweeps to converge per duration and add/remove count, with bootstrap over cells.
 
-    path = os.path.join(data_dir, 'add_move_duration.npz')
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f'No data at {path}. Run --mode add-move-dur-test first.')
-    d = np.load(path)
-    frames, grid, ns, times = d['frames'], d['grid'], d['ns'], d['times']
+    Parameters
+    ----------
+    ns : np.ndarray
+        Spike-count traces, shape (n_durations, n_add_move, n_cells, n_sweeps).
+    n_boot : int, optional
+        Bootstrap resamples of cells.
+
+    Returns
+    -------
+    conv : np.ndarray
+        Sweeps to converge, shape (n_durations, n_add_move).
+    lo, hi : np.ndarray
+        25th and 75th bootstrap percentiles, same shape as conv.
+    conv_b : np.ndarray
+        Bootstrap values, shape (n_durations, n_add_move, n_boot).
+    """
+
     nT, nA, nC, nS = ns.shape
     rng = np.random.RandomState(0)
 
@@ -1839,11 +2003,24 @@ def plot_add_move_duration(data_dir):
     err = _rel_err_curves(ns, ref[:, None, :])                   # (nT, nA, nC, steps)
     conv = np.array([[_pop_conv_sweeps(err[i, a]) for a in range(nA)] for i in range(nT)])
 
-    n_boot = 200
     boot_idx = rng.randint(0, nC, (n_boot, nC))
     conv_b = np.array([[[_pop_conv_sweeps(err[i, a][idx]) for idx in boot_idx]
                         for a in range(nA)] for i in range(nT)])      # (nT, nA, n_boot)
-    lo_c, hi_c = np.percentile(conv_b, 25, axis=-1), np.percentile(conv_b, 75, axis=-1)
+    lo, hi = np.percentile(conv_b, 25, axis=-1), np.percentile(conv_b, 75, axis=-1)
+    return conv, lo, hi, conv_b
+
+
+def plot_add_move_duration(data_dir):
+
+    path = os.path.join(data_dir, 'add_move_duration.npz')
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'No data at {path}. Run --mode add-move-dur-test first.')
+    d = np.load(path)
+    frames, grid, times = d['frames'], d['grid'], d['times']
+    nT, nA, nC, nS = d['ns'].shape
+    conv, lo_c, hi_c, conv_b = _add_move_conv(d['ns'])
+    n_boot = conv_b.shape[-1]
 
     cmap = plt.get_cmap('viridis')
     colors = [cmap(v) for v in np.linspace(0.05, 0.9, nT)]
@@ -2307,6 +2484,7 @@ if __name__ == '__main__':
             'add-move-plot',
             'add-move-dur-test',
             'add-move-dur-plot',
+            'combined-opt-add-move-test',
         ],
     )
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
@@ -2317,46 +2495,49 @@ if __name__ == '__main__':
         help='figure4 data directory (required for snr-stats mode)',
     )
     args = parser.parse_args()
-
-    if args.mode == 'test':
-        run_T_supp_sweep(args.data_dir)
-    elif args.mode == 'plot':
-        plot_T_supp_sweep(args.data_dir)
-    elif args.mode == 'init-test':
-        run_init_comparison(args.data_dir)
-    elif args.mode == 'init-plot':
-        plot_init_comparison(args.data_dir)
-    elif args.mode == 'conv-test':
-        run_omsi_init_comparison(args.data_dir)
-    elif args.mode == 'conv-plot':
-        plot_omsi_init_comparison(args.data_dir)
-    elif args.mode == 'combined-plot':  ### THIS ONE
-        plot_combined_init(args.data_dir)
-    elif args.mode == 'tol-conv-test':
-        run_conv_tol_sweep(args.data_dir)
-    elif args.mode == 'tol-conv-plot':
-        plot_conv_tol_sweep(args.data_dir)
-    elif args.mode == 'tol-burn-test':
-        run_burn_tol_sweep(args.data_dir)
-    elif args.mode == 'tol-burn-plot':
-        plot_burn_tol_sweep(args.data_dir)
-    elif args.mode == 'combined-opt-plot': ### AND THIS ONE
-        plot_combined_opt(args.data_dir)
-    elif args.mode == 'snr-filter-test':
-        run_snr_filter_sweep(args.data_dir)
-    elif args.mode == 'snr-filter-plot':
-        plot_snr_filter_sweep(args.data_dir)
-    elif args.mode == 'snr-thresh-test':
-        run_snr_threshold_sweep(args.data_dir)
-    elif args.mode == 'snr-thresh-plot':
-        plot_snr_threshold_sweep(args.data_dir)
-    elif args.mode == 'add-move-test':
-        run_add_move_sweep(args.data_dir)
-    elif args.mode == 'add-move-plot':
-        plot_add_move_sweep(args.data_dir)
-    elif args.mode == 'add-move-dur-test':
-        run_add_move_duration_sweep(args.data_dir)
-    elif args.mode == 'add-move-dur-plot':
-        plot_add_move_duration(args.data_dir)
-    elif args.mode == 'snr-stats':
-        print_snr_stats(args.fig4_data_dir)
+    
+    with no_power_throttling(verbose=True):
+        if args.mode == 'test':
+            run_T_supp_sweep(args.data_dir)
+        elif args.mode == 'plot':
+            plot_T_supp_sweep(args.data_dir)
+        elif args.mode == 'init-test':
+            run_init_comparison(args.data_dir)
+        elif args.mode == 'init-plot':
+            plot_init_comparison(args.data_dir)
+        elif args.mode == 'conv-test':
+            run_omsi_init_comparison(args.data_dir)
+        elif args.mode == 'conv-plot':
+            plot_omsi_init_comparison(args.data_dir)
+        elif args.mode == 'combined-plot':  ### THIS ONE
+            plot_combined_init(args.data_dir)
+        elif args.mode == 'tol-conv-test':
+            run_conv_tol_sweep(args.data_dir)
+        elif args.mode == 'tol-conv-plot':
+            plot_conv_tol_sweep(args.data_dir)
+        elif args.mode == 'tol-burn-test':
+            run_burn_tol_sweep(args.data_dir)
+        elif args.mode == 'tol-burn-plot':
+            plot_burn_tol_sweep(args.data_dir)
+        elif args.mode == 'combined-opt-plot': ### AND THIS ONE
+            plot_combined_opt(args.data_dir)
+        elif args.mode == 'snr-filter-test':
+            run_snr_filter_sweep(args.data_dir)
+        elif args.mode == 'snr-filter-plot':
+            plot_snr_filter_sweep(args.data_dir)
+        elif args.mode == 'snr-thresh-test':
+            run_snr_threshold_sweep(args.data_dir)
+        elif args.mode == 'snr-thresh-plot':
+            plot_snr_threshold_sweep(args.data_dir)
+        elif args.mode == 'add-move-test':
+            run_add_move_sweep(args.data_dir)
+        elif args.mode == 'add-move-plot':
+            plot_add_move_sweep(args.data_dir)
+        elif args.mode == 'add-move-dur-test':
+            run_add_move_duration_sweep(args.data_dir)
+        elif args.mode == 'add-move-dur-plot':
+            plot_add_move_duration(args.data_dir)
+        elif args.mode == 'combined-opt-add-move-test':
+            run_combined_opt_add_move(args.data_dir)
+        elif args.mode == 'snr-stats':
+            print_snr_stats(args.fig4_data_dir)

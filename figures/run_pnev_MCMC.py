@@ -21,6 +21,10 @@ _write_shims
     Write base-MATLAB stand-ins for the Statistics Toolbox functions used.
 _write_wrapper
     Fill the MATLAB wrapper template and write it next to the input file.
+_write_rise_fix
+    Write a copy of the installed cont_ca_sampler.m with the rise-time fix.
+_init_cells
+    Per-cell init dicts as a MATLAB cell array of structs.
 run_matlab_pnevMCMC
     Run MCMC inference on dF/F traces by calling MATLAB as a subprocess.
 
@@ -66,6 +70,14 @@ try
         addpath(genpath(caiman_root));
     end
 
+    % Optional copy of cont_ca_sampler with the rise-time fix. Added last so it is
+    % first on the path; empty unless the caller asked for it.
+    fix_root = '__FIX_ROOT__';
+    if ~isempty(fix_root)
+        addpath(fix_root);
+        fprintf('Using cont_ca_sampler with rise-time fix: %s\\n', which('cont_ca_sampler'));
+    end
+
     % Statistics Toolbox stand-ins, appended so a real installation wins.
     % Kept outside the genpath tree above so it cannot jump the queue.
     addpath('__SHIM_DIR__', '-end');
@@ -100,10 +112,15 @@ try
 
     params.Nsamples = n_sweeps;
     params.B = floor(n_sweeps / 2);
+    if burn_in >= 0
+        params.B = burn_in;
+    end
     params.p = 2;
     params.f = fs;
 
     all_spikes = cell(n_cells, 1);
+    all_ss = cell(n_cells, 1);
+    all_init = cell(n_cells, 1);
     all_probs = zeros(n_cells, n_frames);
     model_traces = zeros(n_cells, n_frames);
     cell_times = nan(n_cells, 1);
@@ -116,6 +133,19 @@ try
         y = double(dff(i, :))';
 
         try
+            if has_inits
+                params.init = inits{i};
+            elseif has_shifts
+                % CaImAn's own start (the call cont_ca_sampler makes when no
+                % init is given), with every spike moved by init_shifts(i) frames.
+                p0 = params;
+                p0.c = []; p0.b = []; p0.c1 = []; p0.g = []; p0.sn = []; p0.sp = [];
+                p0.bas_nonneg = 0;
+                SAM = get_initial_sample(y, p0);
+                SAM.spiketimes_ = min(max(SAM.spiketimes_ + init_shifts(i), 1e-3), n_frames);
+                params.init = SAM;
+                all_init{i} = SAM.spiketimes_;
+            end
             t_cell = tic;
             res = cont_ca_sampler(y, params);
             cell_times(i) = toc(t_cell);
@@ -137,6 +167,9 @@ try
             if ~isempty(samples)
                 all_spikes{i} = samples{end};
             end
+            if save_samples
+                all_ss{i} = samples;
+            end
 
             temp_trace = make_mean_sample(res, y);
             model_traces(i, :) = temp_trace(:)';
@@ -146,7 +179,11 @@ try
         end
     end
 
-    save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'cell_times');
+    if save_samples
+        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'all_ss', 'all_init');
+    else
+        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces');
+    end
     exit(0);
 
 catch ME
@@ -476,7 +513,7 @@ def _write_shims(shim_dir):
 
 
 def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
-                   shim_dir):
+                   shim_dir, fix_root=''):
     """ Fill the MATLAB wrapper template and write it next to the input file.
 
     Forward slashes are used throughout: MATLAB accepts them on Windows too,
@@ -498,6 +535,8 @@ def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
         CaImAn-MATLAB directory, or empty string.
     shim_dir : str
         Directory holding the Statistics Toolbox stand-ins.
+    fix_root : str, optional
+        Directory holding the rise-time-fixed cont_ca_sampler, or empty string.
     """
 
     def _posix(p):
@@ -511,14 +550,73 @@ def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
     code = code.replace('__CVX_ROOT__',    _posix(cvx_root))
     code = code.replace('__CAIMAN_ROOT__', _posix(caiman_root))
     code = code.replace('__SHIM_DIR__',    _posix(shim_dir))
+    code = code.replace('__FIX_ROOT__',    _posix(fix_root))
 
     with open(path, 'w') as fh:
         fh.write(code)
 
 
+# Rise-time Metropolis step in cont_ca_sampler scores the proposal with the current
+# calcium shape Gs instead of the proposed Gs_, so every rise-time proposal is
+# accepted. The decay step a few lines later uses Gs_ correctly.
+_RISE_BUG_LINE = 'logC_ = -norm(E*(Y(:)-A_*Gs-b_-C_in*ge))^2;'
+_RISE_FIX_LINE = 'logC_ = -norm(E*(Y(:)-A_*Gs_-b_-C_in*ge))^2;'
+
+
+def _write_rise_fix(caiman_root, out_dir):
+    """ Write a copy of the installed cont_ca_sampler.m with the rise-time fix.
+
+    The installed CaImAn is only read, never modified; the copy goes to out_dir.
+
+    Parameters
+    ----------
+    caiman_root : str
+        CaImAn-MATLAB directory.
+    out_dir : str
+        Directory for the patched copy. Created if absent.
+
+    Returns
+    -------
+    str
+        out_dir.
+    """
+
+    hits = glob.glob(os.path.join(caiman_root, '**', 'cont_ca_sampler.m'), recursive=True)
+    if len(hits) != 1:
+        raise FileNotFoundError('Expected one cont_ca_sampler.m under {}, found {}.'.format(
+            caiman_root, len(hits)))
+    with open(hits[0]) as fh:
+        code = fh.read()
+    if code.count(_RISE_BUG_LINE) != 1:
+        raise ValueError('Rise-time line not found exactly once in {} -- '
+                         'CaImAn version differs, fix not applied.'.format(hits[0]))
+    code = code.replace(_RISE_BUG_LINE, _RISE_FIX_LINE + '  % rise-time fix (fMCSI)')
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'cont_ca_sampler.m'), 'w') as fh:
+        fh.write(code)
+    return out_dir
+
+
+def _init_cells(inits, n_cells):
+    """ Per-cell init dicts as a MATLAB cell array of structs (empty when None). """
+
+    arr = np.empty((n_cells, 1), dtype=object)
+    for i in range(n_cells):
+        if inits is None:
+            arr[i, 0] = np.zeros((0, 0))
+            continue
+        d = inits[i]
+        arr[i, 0] = {k: (np.asarray(d[k], dtype=np.float64).reshape(-1, 1)
+                         if k in ('spiketimes_', 'g') else float(d[k]))
+                     for k in ('lam_', 'spiketimes_', 'A_', 'b_', 'C_in', 'sg', 'g')}
+    return arr
+
+
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
-                        verbose=True, return_cell_times=False):
+                        verbose=True, return_samples=False, inits=None, burn_in=None,
+                        init_shifts=None, fix_rise_bug=False):
     """ Run MCMC spike inference via MATLAB subprocess.
 
     Parameters
@@ -542,6 +640,20 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         MATLAB executable. Discovered automatically when omitted.
     verbose : bool, optional
         Print progress and discovery details.
+    return_samples : bool, optional
+        Also return every post-burn-in posterior sample.
+    inits : list of dict, optional
+        Per-cell starting sample passed as cont_ca_sampler's params.init. Keys:
+        lam_, spiketimes_ (1-based frame units), A_, b_, C_in, sg, g.
+    burn_in : int, optional
+        Burn-in sweeps (params.B). Default is half of n_sweeps; 0 keeps every sweep.
+    init_shifts : array-like, optional
+        Per-cell shift in frames applied to every spike of CaImAn's own starting
+        sample. Ignored when inits is given.
+    fix_rise_bug : bool, optional
+        Run a copy of cont_ca_sampler whose rise-time Metropolis step scores the
+        proposed calcium shape (Gs_) instead of the current one (Gs). The
+        installed CaImAn is not modified.
     return_cell_times : bool, optional
         If True, also return each cell's cont_ca_sampler time in seconds.
 
@@ -555,6 +667,12 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         Posterior spike probability traces, shape (n_cells, n_frames).
     sweeps_per_cell : np.ndarray
         Number of MCMC sweeps run for each cell.
+    samples : list of list of np.ndarray
+        Only when return_samples is True: per cell, each posterior sample's spike
+        times in 0-based frame units.
+    init_spikes : list of np.ndarray
+        Only when return_samples is True and init_shifts is given: per cell, the
+        shifted starting spike times in 0-based frame units.
     cell_times : np.ndarray
         Only if return_cell_times: seconds spent in cont_ca_sampler per cell,
         timed inside MATLAB (NaN for cells that errored or on failure).
@@ -578,6 +696,11 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         """Null result in the shape callers expect, used on any failure."""
         out = ([np.array([]) for _ in range(n_cells)],
                np.zeros_like(dff), np.zeros_like(dff), np.zeros(n_cells))
+        if not return_samples:
+            return out
+        out = out + ([[] for _ in range(n_cells)],)
+        if init_shifts is not None and inits is None:
+            out = out + ([np.array([]) for _ in range(n_cells)],)
         return out + (np.full(n_cells, np.nan),) if return_cell_times else out
 
     exe = find_matlab(matlab_exe)
@@ -605,6 +728,13 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         'tau': float(tau),
         'n_sweeps': n_sweeps_val,
         'sparsity_scale': float(sparsity_scale),
+        'save_samples': bool(return_samples),
+        'burn_in': -1 if burn_in is None else int(burn_in),
+        'has_inits': inits is not None,
+        'has_shifts': init_shifts is not None and inits is None,
+        'init_shifts': np.zeros(n_cells) if init_shifts is None
+                       else np.asarray(init_shifts, dtype=np.float64).ravel(),
+        'inits': _init_cells(inits, n_cells),
     })
 
     # Shims live outside work_dir so the wrapper's genpath(pwd) cannot pull
@@ -612,8 +742,16 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     shim_dir = _write_shims(os.path.join(tempfile.gettempdir(),
                                          'omsi_matlab_shims'))
 
+    fix_root = ''
+    if fix_rise_bug:
+        if not caiman_root:
+            print('CaImAn-MATLAB not found -- cannot apply the rise-time fix.')
+            return _empty()
+        fix_root = _write_rise_fix(caiman_root, os.path.join(tempfile.gettempdir(),
+                                                             'omsi_caiman_rise_fix'))
+
     _write_wrapper(wrapper_script, work_dir, input_mat, output_mat,
-                   cvx_root, caiman_root, shim_dir)
+                   cvx_root, caiman_root, shim_dir, fix_root)
 
     # Stale output from an earlier run would otherwise be read back as if it
     # were this run's result.
@@ -678,6 +816,22 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
 
     sweeps_per_cell = np.full(n_cells, n_sweeps_val, dtype=np.int32)
 
+    if not return_samples:
+        return final_spikes, model_traces, all_probs, sweeps_per_cell
+
+    # Same 1-based to 0-based frame shift as the called spikes.
+    samples = []
+    for i in range(n_cells):
+        cell_ss = np.atleast_1d(res['all_ss'][i][0]).ravel() \
+            if 'all_ss' in res and res['all_ss'][i][0].size > 0 else []
+        samples.append([np.asarray(st, dtype=np.float64).ravel() - 1.0
+                        for st in cell_ss])
+    if init_shifts is None or inits is not None:
+        return final_spikes, model_traces, all_probs, sweeps_per_cell, samples
+
+    init_spikes = [np.asarray(res['all_init'][i][0], dtype=np.float64).ravel() - 1.0
+                   for i in range(n_cells)]
+    return final_spikes, model_traces, all_probs, sweeps_per_cell, samples, init_spikes
     if return_cell_times:
         cell_times = (np.asarray(res['cell_times'], dtype=float).ravel()
                       if 'cell_times' in res else np.full(n_cells, np.nan))
