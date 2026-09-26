@@ -1146,8 +1146,8 @@ def plot_combined_init(data_dir):
     plt.close(fig)
 
 
-_DEFAULT_CONV_TOL = 10 ** -1.5  # Was 0.00067; weakened, see combined_opt sweep.
-_DEFAULT_BURN_TOL = 1e-4        # Was 0.005; moved into burn-in trough.
+_DEFAULT_CONV_TOL = 0.05        # Was 10**-1.5 (and before that 0.00067); loosened after opt_ablation.
+_DEFAULT_BURN_TOL = 1e-3        # Was 1e-4 (and before that 0.005); loosened after opt_ablation.
 
 # Min_sweeps=300 (the default) gates how soon the post-burn-in convergence
 # check can fire, which floors total sweep count regardless of how loose
@@ -1186,7 +1186,7 @@ _TEST_DURATION = 1200.0
 # None of these sweeps override max_sweeps, so they all run against the
 # sampler's default cap -- used to draw a reference line on sweep-count
 # panels marking "ran out the clock" vs. genuine convergence.
-_MAX_SWEEPS_DEFAULT = 2000
+_MAX_SWEEPS_DEFAULT = 1000
 
 def _build_tol_grid(default_val, lower_mult, upper_mult, n_below=4, n_above=5):
     """Build a geometric grid of tolerance values spanning a specified multiplier range.

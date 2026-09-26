@@ -19,7 +19,7 @@ run_test
 _best_window_sim
     Find the best window for visualizing a simulated trace.
 _select_example_cells
-    Select example cells spanning a range of kurtosis values.
+    Select example cells spanning a range of SNR values.
 _plot_raster
     Draw spike rasters and raw traces for example cells.
 _with_window_metrics
@@ -56,6 +56,7 @@ from oasis.functions import deconvolve as oasis_deconv
 import OMSI
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
+from stats_helpers import signed_rank, print_test_header, print_test_row
 from OMSI._win_perf import no_power_throttling
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig1')
@@ -73,6 +74,18 @@ FS       = 30.0
 DURATION = 60 * 20
 TAU      = 1.2
 N_CELLS  = 500
+# Simulated SNR is drawn log-uniformly over this range. SNR here is the
+# generator's definition, (99th - 1st percentile of the clean trace) / noise SD,
+# the same one used for the SNR axis of figure 2.
+SNR_RANGE = (2.0, 20.0)
+# Departures from the idealized model: small spike-to-spike amplitude
+# variation (CV), a slow baseline drift (SD in single-spike peaks, timescale in
+# seconds), and small cell-to-cell variation in the decay constant (CV around
+# TAU). Every method is still given TAU.
+AMP_CV          = 0.1
+DRIFT_SD        = 0.2
+DRIFT_TIMESCALE = 60.0
+TAU_CV          = 0.05
 BETA     = 0.5
 USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
 
@@ -237,9 +250,11 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
     os.makedirs(data_dir, exist_ok=True)
 
     print('Generating synthetic spikes and calcium traces...')
-    noisy, true_spikes, clean, timestamps, firing_rates, kurtosis = generate_synthetic_data(
-        n_cells=N_CELLS, fs=FS, duration=DURATION, tau=TAU,
-        target_kurtosis_range=(0.0, 25.0)
+    sim_snr = np.exp(np.random.uniform(np.log(SNR_RANGE[0]), np.log(SNR_RANGE[1]), N_CELLS))
+    noisy, true_spikes, clean, timestamps, firing_rates, kurtosis, sim_params = generate_synthetic_data(
+        n_cells=N_CELLS, fs=FS, duration=DURATION, tau=TAU, snr=sim_snr,
+        amp_cv=AMP_CV, tau_cv=TAU_CV, drift_sd=DRIFT_SD, drift_timescale=DRIFT_TIMESCALE,
+        return_params=True
     )
     timestamps = np.arange(noisy.shape[1]) / FS
 
@@ -263,6 +278,9 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
         'time':          timestamps,
         'firing_rates':  firing_rates,
         'kurtosis':      kurtosis,
+        'sim_snr':       sim_snr,
+        'sim_tau':       sim_params['tau'],
+        'sim_settings':  np.array([AMP_CV, DRIFT_SD, DRIFT_TIMESCALE, TAU_CV]),
     }
 
     if run_omsi:
@@ -282,8 +300,9 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
 
         print('\nRunning MATLAB...')
         t0 = time.time()
-        trad_spikes, trad_traces, trad_probs, _ = run_matlab_pnevMCMC(
-            noisy, fs=FS, tau=TAU, n_sweeps=500, true_spikes=true_spikes
+        trad_spikes, trad_traces, trad_probs, _, trad_tpc = run_matlab_pnevMCMC(
+            noisy, fs=FS, tau=TAU, n_sweeps=500, true_spikes=true_spikes,
+            return_cell_times=True
         )
         matlab_time = time.time() - t0
         trad_prec, trad_rec, trad_F1 = OMSI.compute_accuracy_strict(true_spikes, trad_spikes)
@@ -295,6 +314,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
             'tradmat_traces':    trad_traces,
             'tradmat_probs':     trad_probs,
             'tradmat_time':      matlab_time,
+            'tradmat_times_per_cell': trad_tpc,
             'tradmat_precision': trad_prec,
             'tradmat_recall':    trad_rec,
             'tradmat_F1':        trad_F1,
@@ -306,13 +326,16 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
         print('\nRunning OASIS...')
         t0 = time.time()
         oasis_spikes = []
+        oasis_tpc = np.zeros(N_CELLS)
         diff_oasis = np.diff(noisy, axis=1)
         sigmas = np.median(np.abs(diff_oasis), axis=1) / (0.6745 * np.sqrt(2))
         sigmas = np.maximum(sigmas, 1e-9)
         for i in range(N_CELLS):
+            t_cell = time.time()
             g = np.exp(-1 / (FS * TAU))
             _, s, _, _, _ = oasis_deconv(noisy[i], g=(g,), sn=sigmas[i], penalty=1)
             oasis_spikes.append(_oasis_spikes_from_s(s, sigmas[i], FS))
+            oasis_tpc[i] = time.time() - t_cell
         oasis_time = time.time() - t0
         oasis_prec, oasis_rec, oasis_F1 = OMSI.compute_accuracy_strict(true_spikes, oasis_spikes)
         print('  OASIS took {:.1f}s  P={:.3f} ± {:.3f}  R={:.3f} ± {:.3f}'.format(
@@ -321,6 +344,7 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
             **shared,
             'oasis_spikes':    np.array(oasis_spikes, dtype=object),
             'oasis_time':      oasis_time,
+            'oasis_times_per_cell': oasis_tpc,
             'oasis_precision': oasis_prec,
             'oasis_recall':    oasis_rec,
             'oasis_F1':        oasis_F1,
@@ -343,6 +367,9 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
                 'cascade_spikes':    np.array(_spikes, dtype=object),
                 'cascade_probs':     _probs,
                 'cascade_time':      _time,
+                # CASCADE predicts all cells in one GPU batch, so there is no
+                # per-cell time; this is the batch time divided evenly.
+                'cascade_times_per_cell_avg': np.full(N_CELLS, _time / N_CELLS),
                 'cascade_precision': _prec,
                 'cascade_recall':    _rec,
                 'cascade_F1':        _F1,
@@ -401,9 +428,8 @@ def _best_window_sim(raw_trace, fs, true_spk, det_list, window=60.0, target_spik
 
 
 def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
-                           n_cells=4, window=60.0, min_spikes=10,
-                           target_kurts=(0.2, 0.5, 1.0, 2.0)):
-    """ Select example cells spanning a range of kurtosis values.
+                           window=60.0, min_spikes=10, target_snrs=(2, 4, 6, 10)):
+    """ Select example cells spanning a range of SNR values.
 
     Parameters
     ----------
@@ -415,24 +441,25 @@ def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
         CASCADE results.
     matlab_res : np.lib.npyio.NpzFile
         MATLAB results.
-    n_cells : int, optional
-        Number of cells to select.
     window : float, optional
         Visualization window in seconds.
     min_spikes : int, optional
         Minimum ground-truth spikes required in the window.
-    target_kurts : tuple, optional
-        Target kurtosis values for cell selection.
+    target_snrs : tuple, optional
+        One cell is chosen per target: the unused cell with the closest SNR.
+        SNR is the simulated SNR ('sim_snr', see SNR_RANGE); results saved
+        before it was stored fall back to the SNR measured from the trace.
 
     Returns
     -------
     list of dict
-        Selected cells with trace and spike data.
+        Selected cells with trace and spike data, in increasing SNR.
     """
     fs              = float(mine_res['f'])
     true_spikes_arr = list(mine_res['true_spikes'])
     noisy_traces    = mine_res['noisy_traces']
     kurtosis_arr    = mine_res['kurtosis']
+    sim_snr         = mine_res['sim_snr'] if 'sim_snr' in mine_res else None
     optim_spikes    = list(mine_res['optim_spikes'])
     oasis_spikes    = list(oasis_res['oasis_spikes'])
     cascade_spikes  = list(cascade_res['cascade_spikes'])
@@ -466,33 +493,25 @@ def _select_example_cells(mine_res, oasis_res, cascade_res, matlab_res,
             'trad_spikes':   mat_spk,
             'raw':           raw,
             'kurtosis':      float(kurtosis_arr[i]),
-            'snr':           _snr,
+            'snr':           float(sim_snr[i]) if sim_snr is not None else _snr,
             'fs':            fs,
             't_start':       t_start,
         })
 
-    cells.sort(key=lambda c: c['kurtosis'])
-    available_kurts = np.array([c['kurtosis'] for c in cells])
-    clipped = np.clip(target_kurts, available_kurts[0], available_kurts[-1])
-    if len(np.unique(clipped)) < n_cells:
-        effective_targets = np.percentile(available_kurts, np.linspace(10, 90, n_cells))
-    else:
-        effective_targets = clipped
-
     selected, used_idx = [], set()
-    for tk in effective_targets:
+    for target in target_snrs:
         best_i, best_d = None, np.inf
         for j, c in enumerate(cells):
             if j in used_idx:
                 continue
-            d = abs(c['kurtosis'] - tk)
+            d = abs(c['snr'] - target)
             if d < best_d:
                 best_d, best_i = d, j
         if best_i is not None:
             used_idx.add(best_i)
             selected.append(cells[best_i])
 
-    selected.sort(key=lambda c: c['kurtosis'])
+    selected.sort(key=lambda c: c['snr'])
     return selected
 
 
@@ -570,7 +589,8 @@ def _plot_raster(ax, cells, window=60.0):
                 fontweight='bold')
 
         ax.text(window + 0.8, base + cell_h / 2 - gap / 2,
-                f'SNR={cell["snr"]:.1f}', va='center', ha='left', fontsize=6)
+                f'SNR={cell["snr"]:.1f}\nkurt={cell["kurtosis"]:.1f}',
+                va='center', ha='left', fontsize=6, linespacing=1.3)
         if i < n - 1:
             ax.axhline(base - gap / 2, color='0.75', lw=0.4, ls='--')
 
@@ -672,15 +692,14 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
     speed_tick_labels[labels.index('CASCADE_GPU')] = 'CASCADE (GPU)'
     speed_total_times = [t for *_, t in METHOD_INFO] + [float(CASCADE_CPU_RESULTS['cascade_time'])]
-    speed_tpc_means   = (
-        [total_t / n_cells for *_, total_t in METHOD_INFO]
-        + [float(CASCADE_CPU_RESULTS['cascade_time']) / n_cells]
-    )
+    # Total / n_cells for every method. OMSI's per-cell times are measured
+    # inside parallel workers, so they are not comparable to batch totals.
+    speed_tpc = [total_t / n_cells for total_t in speed_total_times]
     speed_bar_colors  = [COLORS[n] for n in speed_labels]
 
     example_cells = _select_example_cells(
         MINE_RESULTS, OASIS_RESULTS, CASCADE_GPU_RESULTS, MATLAB_RESULTS,
-        n_cells=4, window=60.0
+        window=60.0, target_snrs=(2, 4, 6, 10)
     )
 
     fig = plt.figure(figsize=(5.5, 7), dpi=300)
@@ -765,9 +784,9 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
     print('\n{:<14} {:>16} {:>14}'.format('Method', 'Total time (s)', 'Time/cell (s)'))
     print('-' * 46)
-    for name, total_t, tpc in zip(speed_labels, speed_total_times, speed_tpc_means):
+    for name, total_t, tpc in zip(speed_labels, speed_total_times, speed_tpc):
         print('{:<14} {:>16.1f} {:>14.3f}'.format(name, total_t, tpc))
-    time_per_cell.bar(speed_positions, speed_tpc_means, color=speed_bar_colors, width=0.65)
+    time_per_cell.bar(speed_positions, speed_tpc, color=speed_bar_colors, width=0.65)
     time_per_cell.set_xticks(speed_positions)
     time_per_cell.set_xticklabels(speed_tick_labels, fontsize=5, rotation=90, ha='right')
     time_per_cell.set_ylabel('time per cell (sec)')
@@ -849,12 +868,12 @@ def plot_running_median(ax, x, y, n_bins=7, vertical=False, fb=True, color='k'):
         ax.plot(centers, bin_medians, '-', color=color)
         if fb:
             ax.fill_between(centers, bin_medians - tuning_err, bin_medians + tuning_err,
-                            color=color, alpha=0.2)
+                            color=color, alpha=0.2, edgecolor='none', linewidth=0)
     else:
         ax.plot(bin_medians, centers, '-', color=color)
         if fb:
             ax.fill_betweenx(centers, bin_medians - tuning_err, bin_medians + tuning_err,
-                             color=color, alpha=0.2)
+                             color=color, alpha=0.2, edgecolor='none', linewidth=0)
 
     # Do a linear regression and print the slope.
     if len(x_use) > 1:
@@ -912,13 +931,14 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
 
     print('\n{:<14}  {:>20}  {:>20}'.format('Method', 'F_beta (med ± MAD)', 'CosMIC (med ± MAD)'))
     print('-'*58)
-    fb_data = {}
+    fb_data, cosmic_data = {}, {}
     for label, res, prec_k, rec_k, spk_k, total_t in method_entries:
         prec   = np.array(res[prec_k], dtype=float)
         rec    = np.array(res[rec_k],  dtype=float)
         fb     = _fbeta(prec, rec)
         cosmic = compute_cosmic(true_spikes, list(res[spk_k]), fs)
-        fb_data[label] = fb
+        fb_data[label]     = fb
+        cosmic_data[label] = cosmic
         fb_med = np.nanmedian(fb);     fb_mad = np.nanmedian(np.abs(fb     - fb_med))
         co_med = np.nanmedian(cosmic); co_mad = np.nanmedian(np.abs(cosmic - co_med))
         print('{:<14}  {:>20}  {:>20}'.format(
@@ -948,6 +968,14 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     if omsi_total_s and omsi_total_s > 0:
         oom = np.log10(matlab_t / omsi_total_s)
         print('\nOrder-of-magnitude difference (OMSI vs MATLAB): {:.2f}  (MATLAB is ~{:.1f}x slower, 10^{:.2f})'.format(oom, 10**oom, oom))
+
+    print('\nWilcoxon signed-rank tests (two-sided, paired by cell, OMSI vs each method)')
+    print_test_header('Panel')
+    for panel, data in [('F_beta violin', fb_data), ('CosMIC violin', cosmic_data)]:
+        for other in ('MATLAB', 'OASIS', 'CASCADE_GPU'):
+            print_test_row(panel, 'OMSI', other, signed_rank(data['OMSI'], data[other]))
+    print('  Total-time and time/cell bars: one wall-clock measurement per method, so they')
+    print('  cannot be tested.')
 
 
 if __name__ == '__main__':

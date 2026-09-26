@@ -18,6 +18,8 @@ _save_records
     Save a list of record dicts to a .npz file, merging with existing data.
 _load_records
     Load a .npz record table and return it as a dict of arrays.
+_per_cell_metrics
+    Decode the per-cell metric arrays stored in a table's PerCell column.
 _tbl_len
     Return the number of rows in a table dict.
 _tbl_filter
@@ -34,6 +36,14 @@ _trad_mcmc_from_json
     Load CaImAn MCMC records from a JSON benchmark file.
 _load_external_matlab_data
     Load all precomputed external MATLAB benchmark records.
+_timing_seed
+    Deterministic RNG seed for one (experiment, x, repeat) timing run.
+_backup_once
+    Copy a results file aside the first time it is about to be overwritten.
+_check_matlab_ok
+    Raise if a MATLAB run returned the empty failure result.
+_run_caiman_checkpointed
+    Run one CaImAn MCMC timing point, or load it from its checkpoint file.
 benchmark_sweeps
     Benchmark accuracy and speed as a function of MCMC sweep count.
 benchmark_scalability
@@ -64,6 +74,16 @@ _plot_cascade_comparison
     Plot violin comparison of CASCADE accuracy at 7.5 Hz vs 30 Hz.
 _running_median_mad
     Compute running median and median absolute deviation over a sliding window.
+_median_mad_rows
+    Median and across-cell MAD of one metric for each row of a table.
+_plot_median_band
+    Plot a median trace with a MAD band and no point markers.
+_time_by_x
+    Median and MAD of compute time across repeats at each x value.
+_population_curve
+    Median across populations of a per-population metric, with MAD across populations.
+_noise_curve
+    Precision or recall vs SNR from the cell-level noise table.
 _load_benchmark_tables
     Load and merge the scaling/sensitivity benchmark tables.
 _load_noise_cells
@@ -72,6 +92,12 @@ plot_figure
     Load benchmark results and render figure 2 panels A and B.
 _print_experiment
     Print one row per model and x value for a benchmark experiment.
+_print_time_experiment
+    Print median +/- MAD compute time across repeats for one timing panel.
+_curve
+    Return one plotted trace as {x: value}, filtered the way the figure filters it.
+_print_signed_rank_tests
+    Print Wilcoxon signed-rank tests for every line and violin panel.
 print_stats
     Print the values plotted in figure 2 without rendering the figure.
 
@@ -85,6 +111,12 @@ To create figure:
 To print the plotted values:
     $ python figure2.py --mode print --data-dir /path/to/results
 
+To re-run only the timing benchmarks (sweeps, cell count, duration) with repeats:
+    $ python figure2.py --mode timing --repeats 6 --matlab-repeats 3 --data-dir /path/to/results
+
+To re-run only the tau and noise sweeps (bottom row of 2A) on 5 independent populations:
+    $ python figure2.py --mode tau-noise --populations 5 --data-dir /path/to/results
+
 To re-run only the sample-rate sweep (keeps all other results):
     $ python figure2.py --mode fs-sensitivity --no-matlab --data-dir /path/to/results
 
@@ -97,6 +129,7 @@ import os
 import shutil
 import subprocess
 import time
+import zlib
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -108,6 +141,7 @@ import OMSI.helpers as helpers
 from run_pnev_MCMC import run_matlab_pnevMCMC
 from simulation_helpers import generate_synthetic_data
 from OMSI._win_perf import no_power_throttling
+from stats_helpers import signed_rank, rank_sum, print_test_header, print_test_row
 
 _MATLAB_PRECOMPUTED_DIR    = '/home/dylan/Fast2/spike_deconv/sweeping_benchmarks/all_other_methods'
 _CASCADE_DURATION_ALT_DIR  = '/home/dylan/Fast2/spike_deconv/sweeping_benchmarks/cascade'
@@ -135,6 +169,14 @@ COLORS = {
 }
 
 OASIS_SPIKE_DETECTION = 'peaks'
+
+# Opacity of the median +/- MAD bands.
+_MAD_ALPHA = 0.2
+
+# CaImAn MCMC repeats beyond the first only run up to these sizes; the larger
+# points (3000 cells, 120 min) take hours to days and are run once.
+_MATLAB_REPEAT_MAX_CELLS    = 1000
+_MATLAB_REPEAT_MAX_DURATION = 3600
 
 
 def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
@@ -220,12 +262,12 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu', max_cells_pe
     return cascade_probs, cascade_spikes, cascade_time
 
 
-class _MetricTuple(tuple):
-    """ Tuple of mean metrics that also carries the per-cell values.
+class _MetricDict(dict):
+    """ Dict of median metrics that also carries the per-cell values.
 
-    Behaves exactly like the plain tuple returned previously, so existing
-    unpacking is unchanged. The per-cell arrays, keyed by metric name, are in
-    the per_cell attribute.
+    Behaves exactly like a plain dict, so existing unpacking is unchanged. The
+    per-cell arrays, keyed by metric name, are in the per_cell attribute, which
+    _row serializes into the PerCell column.
     """
     per_cell = None
 
@@ -265,10 +307,11 @@ def _metrics(true_spk, pred_spk, true_ev, fs_):
         'Fbeta':        _fbeta(prec, rec),
         'Fbeta_window': _fbeta(prec_w, rec_w),
     }
-    out = {}
+    out = _MetricDict()
     for key, vals in per_cell.items():
         out[key]          = float(np.nanmedian(vals))
         out[key + '_mad'] = float(_mad(vals))
+    out.per_cell = per_cell
     return out
 
 
@@ -409,7 +452,47 @@ def _load_records(path):
         Mapping of column names to numpy arrays.
     """
     d = np.load(path, allow_pickle=True)
-    return {k: d[k] for k in d.files}
+    tbl = {k: d[k] for k in d.files}
+    # Results saved before the rename label OMSI as 'fMCSI'.
+    for col in ('Model', 'model'):
+        if col in tbl:
+            tbl[col] = np.array(['OMSI' if str(m) == 'fMCSI' else m for m in tbl[col]],
+                                dtype=tbl[col].dtype)
+    return tbl
+
+
+def _per_cell_metrics(tbl):
+    """
+    Decode the per-cell metric arrays stored in a table's PerCell column.
+
+    Parameters
+    ----------
+    tbl : dict
+        Columnar table as returned by _load_records.
+
+    Returns
+    -------
+    list of dict or None
+        One dict per row mapping metric name to a per-cell array (empty for
+        rows without per-cell data), with 'Fbeta' and 'Fbeta_window' derived
+        from the per-cell precision and recall when not stored. None when the
+        table has no PerCell column.
+    """
+    if 'PerCell' not in tbl:
+        return None
+    out = []
+    for raw in tbl['PerCell']:
+        raw = str(raw)
+        if not raw:
+            out.append({})
+            continue
+        pc = {k: np.asarray(v, dtype=float) for k, v in json.loads(raw).items()}
+        for fb_key, p_key, r_key in [('Fbeta', 'Precision', 'Recall'),
+                                     ('Fbeta_window', 'Precision_window', 'Recall_window')]:
+            if fb_key not in pc and p_key in pc and r_key in pc:
+                pc[fb_key] = _fbeta(pc[p_key], pc[r_key])
+        out.append(pc)
+    return out
 
 
 def _tbl_len(tbl):
@@ -611,8 +694,154 @@ def _load_external_matlab_data():
     }
 
 
+def _timing_seed(experiment, x, rep):
+    """
+    Deterministic RNG seed for one (experiment, x, repeat) timing run.
+
+    Seeding per point means a resumed CaImAn checkpoint was run on exactly the
+    same synthetic data as the other methods in that repeat.
+
+    Parameters
+    ----------
+    experiment : str
+        Experiment name.
+    x : float
+        Value of the swept variable.
+    rep : int
+        Repeat index.
+
+    Returns
+    -------
+    int
+        Seed for np.random.seed.
+    """
+    return zlib.crc32('{}|{:g}|{}'.format(experiment, float(x), rep).encode()) & 0x7fffffff
+
+
+def _backup_once(path):
+    """
+    Copy a results file aside the first time it is about to be overwritten.
+
+    _save_records replaces every existing row of a model it is given, so the
+    first save of a new run would drop that model's older results. The copy
+    ('<name>.bak.npz') is never overwritten afterwards.
+
+    Parameters
+    ----------
+    path : str
+        Results .npz file.
+    """
+    bak = path[:-len('.npz')] + '.bak.npz'
+    if os.path.exists(path) and not os.path.exists(bak):
+        shutil.copy2(path, bak)
+        print('  Backed up existing results to {}'.format(bak))
+
+
+def _check_matlab_ok(sweeps):
+    """
+    Raise if a MATLAB run returned the empty failure result.
+
+    run_matlab_pnevMCMC reports failure by returning zero sweeps for every cell
+    rather than raising; its elapsed time must not be recorded as a benchmark.
+
+    Parameters
+    ----------
+    sweeps : array-like
+        Sweeps per cell returned by run_matlab_pnevMCMC.
+    """
+    if sweeps is None or np.all(np.asarray(sweeps) == 0):
+        raise RuntimeError('MATLAB returned no result (see its output above)')
+
+
+def _run_caiman_checkpointed(data_dir, experiment, x, rep, run_fn):
+    """
+    Run one CaImAn MCMC timing point, or load it from its checkpoint file.
+
+    Each completed run is written to data_dir/caiman_runs/ as its own .npz
+    before anything else happens, so a crash later in the benchmark loses at
+    most the run in progress. Re-running the benchmark reuses these files.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory for result files.
+    experiment : str
+        Experiment name, e.g. 'Cell_Scaling'.
+    x : float
+        Value of the swept variable.
+    rep : int
+        Repeat index.
+    run_fn : callable
+        Runs MATLAB and returns (record dict, dict of arrays to store).
+
+    Returns
+    -------
+    record : dict
+        Result record for the benchmark table.
+    arrays : dict
+        Stored arrays (e.g. 'spikes').
+    """
+    ckpt_dir = os.path.join(data_dir, 'caiman_runs')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    path = os.path.join(ckpt_dir, '{}_{:g}_rep{}.npz'.format(experiment, float(x), rep))
+    if os.path.exists(path):
+        d = np.load(path, allow_pickle=True)
+        record = json.loads(str(d['record']))
+        arrays = {k: d[k] for k in d.files if k != 'record'}
+        print('    CaImAn MCMC: {:.1f}s (loaded checkpoint {})'.format(record['Time'], path))
+        return record, arrays
+    record, arrays = run_fn()
+    # Write to a temporary name first so a crash mid-write cannot leave a
+    # truncated file that would later be loaded as a finished run.
+    tmp = path[:-len('.npz')] + '.tmp.npz'
+    np.savez(tmp, record=json.dumps(record, default=float), **arrays)
+    os.replace(tmp, path)
+    print('    CaImAn MCMC: {:.1f}s (saved {})'.format(record['Time'], path))
+    return record, arrays
+
+
+def _run_caiman_accuracy(data_dir, experiment, x, pop, dff, fs, tau):
+    """
+    Run CaImAn MCMC for one accuracy point, checkpointed to its own file.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory for result files.
+    experiment : str
+        Experiment name, e.g. 'Tau_Sensitivity'.
+    x : float
+        Value of the swept variable.
+    pop : int
+        Population index.
+    dff : ndarray
+        Traces to deconvolve.
+    fs, tau : float
+        Sampling rate (Hz) and decay time constant (s).
+
+    Returns
+    -------
+    spikes : list of ndarray
+        Inferred spike times per cell.
+    t_trad : float
+        Wall-clock time in seconds.
+    sweeps : ndarray
+        Sweeps per cell.
+    """
+    def _run():
+        t0 = time.time()
+        spikes, _, _, sweeps = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps='auto')
+        t_trad = time.time() - t0
+        _check_matlab_ok(sweeps)
+        return ({'Experiment': experiment, 'Model': 'CaImAn MCMC', 'Time': t_trad,
+                 'Population': pop},
+                {'spikes': np.array(spikes, dtype=object), 'sweeps': np.asarray(sweeps)})
+    record, arrays = _run_caiman_checkpointed(data_dir, experiment, x, pop, _run)
+    return list(arrays['spikes']), float(record['Time']), arrays['sweeps']
+
+
 def benchmark_sweeps(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
-                     run_cascade=True, matlab_records=None):
+                     run_cascade=True, matlab_records=None, repeats=1, matlab_repeats=1):
     """
     Benchmark accuracy and speed as a function of MCMC sweep count.
 
@@ -633,6 +862,10 @@ def benchmark_sweeps(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
         Whether to run CASCADE.
     matlab_records : list of dict or None, optional
         Precomputed CaImAn MCMC records to inject instead of running MATLAB.
+    repeats : int, optional
+        Number of repeats, each on freshly simulated data.
+    matlab_repeats : int, optional
+        Number of those repeats that also run CaImAn MCMC.
     """
     n_cells     = 50
     duration    = 600
@@ -640,102 +873,117 @@ def benchmark_sweeps(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
     tau         = 1.2
     sweeps_list = [10, 50, 100, 250, 500, 1000, 2000, 3000]
 
-    print('Generating synthetic data (n_cells={}, duration={}s)...'.format(n_cells, duration))
-    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-        n_cells=n_cells, fs=fs, duration=duration, tau=tau
-    )
-    n_frames   = dff.shape[1]
-    true_events = [helpers.make_event_ground_truth(s, tau) for s in true_spikes]
-
-    results   = []
-    npz_spikes = {'true': true_spikes}
-    npz_calcium = {}
-
+    results = []
     partial_path = os.path.join(data_dir, 'benchmark_sweeps_partial.npz')
+    _backup_once(partial_path)
 
-    if run_oasis:
-        print('\nRunning OASIS (baseline)...')
-        t0 = time.time()
-        oas_spk, oas_cal = _oasis_spikes(dff, fs, tau, n_cells)
-        time_oasis = time.time() - t0
-        results.append(_row('Sweeps', 'OASIS', tau, fs, time_oasis,
-                            _metrics(true_spikes, oas_spk, true_events, fs),
-                            sweeps=0, n_cells=n_cells, duration=duration,
-                            Samples_per_sec=np.nan))
-        npz_spikes['oasis'] = oas_spk
-        npz_calcium['oasis'] = np.array(oas_cal)
-        print('  OASIS: {:.1f}s  F1={:.3f} ± {:.3f}'.format(time_oasis, results[-1]['F1'], results[-1]['F1_mad']))
-        _save_records(results, partial_path)
+    for rep in range(repeats):
+        print('\n=== Sweeps: repeat {}/{} ==='.format(rep + 1, repeats))
+        print('Generating synthetic data (n_cells={}, duration={}s)...'.format(n_cells, duration))
+        np.random.seed(_timing_seed('Sweeps', 0, rep))
+        dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+            n_cells=n_cells, fs=fs, duration=duration, tau=tau
+        )
+        n_frames    = dff.shape[1]
+        true_events = [helpers.make_event_ground_truth(s, tau) for s in true_spikes]
 
-    if run_cascade:
-        for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
-            print('\nRunning CASCADE (subprocess, {}, baseline)...'.format(_dev.upper()))
-            _, cascade_spikes, time_cascade = _run_cascade_inference(
-                dff, fs, data_dir, f'bench_sweeps_cascade_baseline_{_dev}', device=_dev
-            )
-            results.append(_row('Sweeps', _model, tau, fs, time_cascade,
-                                _metrics(true_spikes, cascade_spikes, true_events, fs),
+        npz_spikes  = {'true': true_spikes}
+        npz_calcium = {}
+
+        if run_oasis:
+            print('\nRunning OASIS (baseline)...')
+            t0 = time.time()
+            oas_spk, oas_cal = _oasis_spikes(dff, fs, tau, n_cells)
+            time_oasis = time.time() - t0
+            results.append(_row('Sweeps', 'OASIS', tau, fs, time_oasis,
+                                _metrics(true_spikes, oas_spk, true_events, fs),
                                 sweeps=0, n_cells=n_cells, duration=duration,
-                                Samples_per_sec=np.nan))
-            npz_spikes[f'cascade_{_dev}'] = cascade_spikes
-            print('  CASCADE ({}): {:.1f}s  F1={:.3f} ± {:.3f}'.format(_dev.upper(), time_cascade, results[-1]['F1'], results[-1]['F1_mad']))
+                                Samples_per_sec=np.nan, Repeat=rep))
+            npz_spikes['oasis'] = oas_spk
+            npz_calcium['oasis'] = np.array(oas_cal)
+            print('  OASIS: {:.1f}s  F1={:.3f} ± {:.3f}'.format(time_oasis, results[-1]['F1'], results[-1]['F1_mad']))
             _save_records(results, partial_path)
 
-    print('\n--- Varying sweeps: {} ---'.format(sweeps_list))
-    for s in sweeps_list:
-        print('  sweeps={}...'.format(s))
-        if run_mine:
-            try:
-                t0 = time.time()
-                burn_in = int(s * 0.25)
-                params  = {'f': fs, 'p': 2, 'Nsamples': s - burn_in, 'B': burn_in, 'auto_stop': False}
-                res = OMSI.deconv(dff, params=params, benchmark=True)
-                elapsed = time.time() - t0
-                sps = (s * n_cells * n_frames) / elapsed
-                results.append(_row('Sweeps', 'OMSI', tau, fs, elapsed,
-                                    _metrics(true_spikes, res['optim_spikes'], true_events, fs),
-                                    sweeps=s, n_cells=n_cells, duration=duration,
-                                    Samples_per_sec=sps))
-                npz_spikes['my_method'] = res['optim_spikes']
-                print('    OMSI: {:.1f}s  F1={:.3f} ± {:.3f}'.format(elapsed, results[-1]['F1'], results[-1]['F1_mad']))
-            except Exception as exc:
-                print('    OMSI failed: {}'.format(exc))
+        if run_cascade:
+            for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
+                print('\nRunning CASCADE (subprocess, {}, baseline)...'.format(_dev.upper()))
+                _, cascade_spikes, time_cascade = _run_cascade_inference(
+                    dff, fs, data_dir, f'bench_sweeps_cascade_baseline_{_dev}', device=_dev
+                )
+                results.append(_row('Sweeps', _model, tau, fs, time_cascade,
+                                    _metrics(true_spikes, cascade_spikes, true_events, fs),
+                                    sweeps=0, n_cells=n_cells, duration=duration,
+                                    Samples_per_sec=np.nan, Repeat=rep))
+                npz_spikes[f'cascade_{_dev}'] = cascade_spikes
+                print('  CASCADE ({}): {:.1f}s  F1={:.3f} ± {:.3f}'.format(_dev.upper(), time_cascade, results[-1]['F1'], results[-1]['F1_mad']))
+                _save_records(results, partial_path)
 
-        if run_matlab and matlab_records is None:
-            try:
-                t0 = time.time()
-                trad_spikes, _, _, _ = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps=s)
-                elapsed = time.time() - t0
-                sps = (s * n_cells * n_frames) / elapsed
-                results.append(_row('Sweeps', 'CaImAn MCMC', tau, fs, elapsed,
-                                    _metrics(true_spikes, trad_spikes, true_events, fs),
-                                    sweeps=s, n_cells=n_cells, duration=duration,
-                                    Samples_per_sec=sps))
-                npz_spikes['trad_mcmc'] = trad_spikes
-                print('    CaImAn MCMC: {:.1f}s  F1={:.3f} ± {:.3f}'.format(elapsed, results[-1]['F1'], results[-1]['F1_mad']))
-            except Exception as exc:
-                print('    CaImAn MCMC failed: {}'.format(exc))
+        print('\n--- Varying sweeps: {} ---'.format(sweeps_list))
+        for s in sweeps_list:
+            print('  sweeps={}...'.format(s))
+            if run_mine:
+                try:
+                    t0 = time.time()
+                    burn_in = int(s * 0.25)
+                    params  = {'f': fs, 'p': 2, 'Nsamples': s - burn_in, 'B': burn_in, 'auto_stop': False}
+                    res = OMSI.deconv(dff, params=params, benchmark=True)
+                    elapsed = time.time() - t0
+                    sps = (s * n_cells * n_frames) / elapsed
+                    results.append(_row('Sweeps', 'OMSI', tau, fs, elapsed,
+                                        _metrics(true_spikes, res['optim_spikes'], true_events, fs),
+                                        sweeps=s, n_cells=n_cells, duration=duration,
+                                        Samples_per_sec=sps, Repeat=rep))
+                    npz_spikes['my_method'] = res['optim_spikes']
+                    print('    OMSI: {:.1f}s  F1={:.3f} ± {:.3f}'.format(elapsed, results[-1]['F1'], results[-1]['F1_mad']))
+                except Exception as exc:
+                    print('    OMSI failed: {}'.format(exc))
 
-        _save_records(results, partial_path)
+            if run_matlab and matlab_records is None and rep < matlab_repeats:
+                def _run_trad():
+                    t0 = time.time()
+                    trad_spikes, _, _, sweeps = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps=s)
+                    elapsed = time.time() - t0
+                    _check_matlab_ok(sweeps)
+                    sps = (s * n_cells * n_frames) / elapsed
+                    record = _row('Sweeps', 'CaImAn MCMC', tau, fs, elapsed,
+                                  _metrics(true_spikes, trad_spikes, true_events, fs),
+                                  sweeps=s, n_cells=n_cells, duration=duration,
+                                  Samples_per_sec=sps, Repeat=rep)
+                    return record, {'spikes': np.array(trad_spikes, dtype=object)}
+                try:
+                    record, arrays = _run_caiman_checkpointed(data_dir, 'Sweeps', s, rep, _run_trad)
+                    results.append(record)
+                    npz_spikes['trad_mcmc'] = list(arrays['spikes'])
+                except Exception as exc:
+                    print('    CaImAn MCMC failed: {}'.format(exc))
+
+            _save_records(results, partial_path)
+
+        if rep == 0:
+            npz_save = {'dff': dff, 'fs': fs, 'tau': tau}
+            for k, v in npz_spikes.items():
+                npz_save[f'spikes_{k}'] = np.array(v, dtype=object)
+            for k, v in npz_calcium.items():
+                npz_save[f'calcium_{k}'] = v
+            np.savez(os.path.join(data_dir, 'benchmark_sweeps_traces.npz'), **npz_save)
 
     if run_matlab and matlab_records is not None:
         print('\nInjecting {} precomputed CaImAn MCMC (sweeps) records...'.format(len(matlab_records)))
         results.extend(matlab_records)
         _save_records(results, partial_path)
-
-    npz_save = {'dff': dff, 'fs': fs, 'tau': tau}
-    for k, v in npz_spikes.items():
-        npz_save[f'spikes_{k}'] = np.array(v, dtype=object)
-    for k, v in npz_calcium.items():
-        npz_save[f'calcium_{k}'] = v
-    np.savez(os.path.join(data_dir, 'benchmark_sweeps_traces.npz'), **npz_save)
     return
 
 
 def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
-                           run_cascade=True, matlab_records=None):
+                           run_cascade=True, matlab_records=None, repeats=1, matlab_repeats=1):
     """
     Benchmark inference speed across cell counts and recording durations.
+
+    Every point is timed once per repeat on freshly simulated data (seeded per
+    point, see _timing_seed). CaImAn MCMC runs in the first matlab_repeats
+    repeats, and after the first only up to _MATLAB_REPEAT_MAX_CELLS cells and
+    _MATLAB_REPEAT_MAX_DURATION seconds. Each CaImAn run is checkpointed to its
+    own file (see _run_caiman_checkpointed).
 
     Parameters
     ----------
@@ -751,6 +999,10 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
         Whether to run CASCADE.
     matlab_records : list of dict or None, optional
         Precomputed CaImAn MCMC records to inject instead of running MATLAB.
+    repeats : int, optional
+        Number of repeats.
+    matlab_repeats : int, optional
+        Number of those repeats that also run CaImAn MCMC.
     """
     fs  = 30.0
     tau = 1.2
@@ -761,43 +1013,48 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
 
     results = []
     partial_path = os.path.join(data_dir, 'benchmark_scalability_partial.npz')
+    _backup_once(partial_path)
 
-    print('\n--- Cell-count scaling ---')
-    for n_cells in cell_counts:
-        print('  n_cells={}...'.format(n_cells))
+    def _time_point(experiment, xcol, x, n_cells, duration, rep, matlab_cap):
+        """Time every enabled method on one simulated dataset."""
         try:
-            dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-                n_cells=n_cells, fs=fs, duration=fixed_duration, tau=tau
+            np.random.seed(_timing_seed(experiment, x, rep))
+            dff, _, _, _, _, _ = generate_synthetic_data(
+                n_cells=n_cells, fs=fs, duration=duration, tau=tau
             )
         except MemoryError:
-            print('  Skipping n_cells={}: MemoryError'.format(n_cells))
-            continue
+            print('  Skipping {}={}: MemoryError'.format(xcol, x))
+            return
         n_frames = dff.shape[1]
+        base = {'Experiment': experiment, 'N_Cells': n_cells, 'Duration': duration,
+                'Frames': n_frames, 'Repeat': rep}
 
         if run_mine:
             try:
                 t0 = time.time()
                 res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
-                                       benchmark=True)
+                                  benchmark=True)
                 t_my = time.time() - t0
                 sps  = (np.mean(res['optim_nsamples']) * n_cells * n_frames) / t_my
-                results.append({'Experiment': 'Cell_Scaling', 'Model': 'OMSI',
-                                'N_Cells': n_cells, 'Time': t_my, 'Samples_per_sec': sps,
-                                'Duration': fixed_duration, 'Frames': n_frames})
+                results.append({**base, 'Model': 'OMSI', 'Time': t_my, 'Samples_per_sec': sps})
                 print('    OMSI: {:.1f}s'.format(t_my))
             except Exception as exc:
                 print('    OMSI failed: {}'.format(exc))
 
-        if run_matlab and matlab_records is None:
-            try:
+        if (run_matlab and matlab_records is None and rep < matlab_repeats
+                and (rep == 0 or x <= matlab_cap)):
+            def _run_trad():
                 t0 = time.time()
-                _, _, _, sweeps = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps='auto')
+                trad_spikes, _, _, sweeps = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps='auto')
                 t_trad = time.time() - t0
-                sps    = (np.mean(sweeps) * n_cells * n_frames) / t_trad
-                results.append({'Experiment': 'Cell_Scaling', 'Model': 'CaImAn MCMC',
-                                'N_Cells': n_cells, 'Time': t_trad, 'Samples_per_sec': sps,
-                                'Duration': fixed_duration, 'Frames': n_frames})
-                print('    CaImAn MCMC: {:.1f}s'.format(t_trad))
+                _check_matlab_ok(sweeps)
+                sps = (np.mean(sweeps) * n_cells * n_frames) / t_trad
+                record = {**base, 'Model': 'CaImAn MCMC', 'Time': t_trad, 'Samples_per_sec': sps}
+                return record, {'spikes': np.array(trad_spikes, dtype=object),
+                                'sweeps': np.asarray(sweeps)}
+            try:
+                record, _ = _run_caiman_checkpointed(data_dir, experiment, x, rep, _run_trad)
+                results.append(record)
             except Exception as exc:
                 print('    CaImAn MCMC failed: {}'.format(exc))
 
@@ -806,95 +1063,39 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
                 t0 = time.time()
                 _oasis_spikes(dff, fs, tau, n_cells)
                 t_oasis = time.time() - t0
-                results.append({'Experiment': 'Cell_Scaling', 'Model': 'OASIS',
-                                'N_Cells': n_cells, 'Time': t_oasis,
-                                'Samples_per_sec': np.nan,
-                                'Duration': fixed_duration, 'Frames': n_frames})
+                results.append({**base, 'Model': 'OASIS', 'Time': t_oasis,
+                                'Samples_per_sec': np.nan})
                 print('    OASIS: {:.1f}s'.format(t_oasis))
             except Exception as exc:
                 print('    OASIS failed: {}'.format(exc))
 
         if run_cascade:
+            tag = 'cells' if experiment == 'Cell_Scaling' else 'dur'
             for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
                 try:
                     _, _, t_cascade = _run_cascade_inference(
-                        dff, fs, data_dir, f'bench_scale_cells_{n_cells}_{_dev}', device=_dev)
-                    results.append({'Experiment': 'Cell_Scaling', 'Model': _model,
-                                    'N_Cells': n_cells, 'Time': t_cascade,
-                                    'Samples_per_sec': np.nan,
-                                    'Duration': fixed_duration, 'Frames': n_frames})
+                        dff, fs, data_dir, f'bench_scale_{tag}_{x:g}_{_dev}', device=_dev)
+                    results.append({**base, 'Model': _model, 'Time': t_cascade,
+                                    'Samples_per_sec': np.nan})
                     print('    CASCADE ({}): {:.1f}s'.format(_dev.upper(), t_cascade))
                 except Exception as exc:
                     print('    CASCADE ({}) failed: {}'.format(_dev.upper(), exc))
 
         _save_records(results, partial_path)
 
-    print('\n--- Duration scaling ---')
-    for dur in durations:
-        print('  duration={}s...'.format(dur))
-        try:
-            dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-                n_cells=fixed_cells, fs=fs, duration=dur, tau=tau
-            )
-        except MemoryError:
-            print('  Skipping duration={}: MemoryError'.format(dur))
-            continue
-        n_frames = dff.shape[1]
+    for rep in range(repeats):
+        print('\n=== Scalability: repeat {}/{} ==='.format(rep + 1, repeats))
+        print('\n--- Cell-count scaling ---')
+        for n_cells in cell_counts:
+            print('  n_cells={}...'.format(n_cells))
+            _time_point('Cell_Scaling', 'N_Cells', n_cells, n_cells, fixed_duration, rep,
+                        _MATLAB_REPEAT_MAX_CELLS)
 
-        if run_mine:
-            try:
-                t0 = time.time()
-                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
-                                       benchmark=True)
-                t_my = time.time() - t0
-                sps  = (np.mean(res['optim_nsamples']) * fixed_cells * n_frames) / t_my
-                results.append({'Experiment': 'Duration_Scaling', 'Model': 'OMSI',
-                                'Duration': dur, 'Time': t_my, 'Samples_per_sec': sps,
-                                'N_Cells': fixed_cells, 'Frames': n_frames})
-                print('    OMSI: {:.1f}s'.format(t_my))
-            except Exception as exc:
-                print('    OMSI failed: {}'.format(exc))
-
-        if run_matlab and matlab_records is None:
-            try:
-                t0 = time.time()
-                _, _, _, sweeps = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps='auto')
-                t_trad = time.time() - t0
-                sps    = (np.mean(sweeps) * fixed_cells * n_frames) / t_trad
-                results.append({'Experiment': 'Duration_Scaling', 'Model': 'CaImAn MCMC',
-                                'Duration': dur, 'Time': t_trad, 'Samples_per_sec': sps,
-                                'N_Cells': fixed_cells, 'Frames': n_frames})
-                print('    CaImAn MCMC: {:.1f}s'.format(t_trad))
-            except Exception as exc:
-                print('    CaImAn MCMC failed: {}'.format(exc))
-
-        if run_oasis:
-            try:
-                t0 = time.time()
-                _oasis_spikes(dff, fs, tau, fixed_cells)
-                t_oasis = time.time() - t0
-                results.append({'Experiment': 'Duration_Scaling', 'Model': 'OASIS',
-                                'Duration': dur, 'Time': t_oasis,
-                                'Samples_per_sec': np.nan,
-                                'N_Cells': fixed_cells, 'Frames': n_frames})
-                print('    OASIS: {:.1f}s'.format(t_oasis))
-            except Exception as exc:
-                print('    OASIS failed: {}'.format(exc))
-
-        if run_cascade:
-            for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
-                try:
-                    _, _, t_cascade = _run_cascade_inference(
-                        dff, fs, data_dir, f'bench_scale_dur_{dur}_{_dev}', device=_dev)
-                    results.append({'Experiment': 'Duration_Scaling', 'Model': _model,
-                                    'Duration': dur, 'Time': t_cascade,
-                                    'Samples_per_sec': np.nan,
-                                    'N_Cells': fixed_cells, 'Frames': n_frames})
-                    print('    CASCADE ({}): {:.1f}s'.format(_dev.upper(), t_cascade))
-                except Exception as exc:
-                    print('    CASCADE ({}) failed: {}'.format(_dev.upper(), exc))
-
-        _save_records(results, partial_path)
+        print('\n--- Duration scaling ---')
+        for dur in durations:
+            print('  duration={}s...'.format(dur))
+            _time_point('Duration_Scaling', 'Duration', dur, fixed_cells, float(dur), rep,
+                        _MATLAB_REPEAT_MAX_DURATION)
 
     if run_matlab and matlab_records is not None:
         print('\nInjecting {} precomputed CaImAn MCMC (scalability) records...'.format(len(matlab_records)))
@@ -905,9 +1106,14 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
 
 
 def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
-                     run_cascade=True, matlab_records=None, experiments=('tau', 'fs')):
+                     run_cascade=True, matlab_records=None, experiments=('tau', 'fs'),
+                     populations=1):
     """
     Benchmark accuracy across calcium decay time constants and frame rates.
+
+    Each x value is run on `populations` independently simulated cell
+    populations, seeded per (experiment, x, population), so the spread of the
+    per-population medians gives the uncertainty of each plotted point.
 
     Parameters
     ----------
@@ -916,7 +1122,7 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
     run_oasis : bool, optional
         Whether to run OASIS.
     run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
+        Whether to run CaImAn MCMC via MATLAB (each run is checkpointed).
     run_mine : bool, optional
         Whether to run OMSI.
     run_cascade : bool, optional
@@ -924,8 +1130,10 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
     matlab_records : list of dict or None, optional
         Precomputed CaImAn MCMC records to inject instead of running MATLAB.
     experiments : tuple of str, optional
-        Which sweeps to run: 'tau' and/or 'fs'. When only 'fs' is run, existing
-        Tau_Sensitivity rows in the partial file are left untouched.
+        Which sweeps to run: 'tau' and/or 'fs'. Rows of a sweep that is not
+        run are left untouched in the partial file.
+    populations : int, optional
+        Number of independent cell populations per x value.
     """
     n_cells  = 50
     duration = 300
@@ -936,115 +1144,71 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
 
     results = []
     partial_path = os.path.join(data_dir, 'benchmark_params_partial.npz')
-    save_exp = None if 'tau' in experiments else 'Fs_Sensitivity'
+    _backup_once(partial_path)
+    if 'tau' in experiments and 'fs' in experiments:
+        save_exp = None
+    else:
+        save_exp = 'Tau_Sensitivity' if 'tau' in experiments else 'Fs_Sensitivity'
 
+    sweeps_to_run = []
     if 'tau' in experiments:
-        print('\n--- Tau sensitivity ---')
-    for tau in (tau_values if 'tau' in experiments else []):
-        print('  tau={}s...'.format(tau))
-        try:
-            dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-                n_cells=n_cells, fs=fixed_fs, duration=duration, tau=tau
-            )
-            true_events = [helpers.make_event_ground_truth(s, tau) for s in true_spikes]
-
-            if run_mine:
-                t0  = time.time()
-                res = OMSI.deconv(dff, params={'f': fixed_fs, 'p': 2, 'auto_stop': True},
-                                       benchmark=True)
-                t_my = time.time() - t0
-                results.append(_row('Tau_Sensitivity', 'OMSI', tau, fixed_fs, t_my,
-                                    _metrics(true_spikes, res['optim_spikes'], true_events, fixed_fs),
-                                    sweeps=np.median(res['optim_nsamples']),
-                                    n_cells=n_cells, duration=duration))
-                print('    OMSI: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
-
-            if run_matlab and matlab_records is None:
-                t0 = time.time()
-                trad_spikes, _, _, sweeps = run_matlab_pnevMCMC(
-                    dff, fs=fixed_fs, tau=tau, n_sweeps='auto')
-                t_trad = time.time() - t0
-                results.append(_row('Tau_Sensitivity', 'CaImAn MCMC', tau, fixed_fs, t_trad,
-                                    _metrics(true_spikes, trad_spikes, true_events, fixed_fs),
-                                    sweeps=np.median(sweeps),
-                                    n_cells=n_cells, duration=duration))
-                print('    CaImAn MCMC: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
-
-            if run_oasis:
-                t0 = time.time()
-                oas_spk, _ = _oasis_spikes(dff, fixed_fs, tau, n_cells)
-                t_oasis = time.time() - t0
-                results.append(_row('Tau_Sensitivity', 'OASIS', tau, fixed_fs, t_oasis,
-                                    _metrics(true_spikes, oas_spk, true_events, fixed_fs),
-                                    n_cells=n_cells, duration=duration))
-                print('    OASIS: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
-
-            if run_cascade:
-                for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
-                    _, cascade_spikes, t_cascade = _run_cascade_inference(
-                        dff, fixed_fs, data_dir, f'bench_tau_{tau}_{_dev}', device=_dev)
-                    results.append(_row('Tau_Sensitivity', _model, tau, fixed_fs, t_cascade,
-                                        _metrics(true_spikes, cascade_spikes, true_events, fixed_fs),
-                                        n_cells=n_cells, duration=duration))
-                    print('    CASCADE ({}): F1={:.3f} ± {:.3f}'.format(_dev.upper(), results[-1]['F1'], results[-1]['F1_mad']))
-
-        except Exception as exc:
-            print('  Failed for tau={}: {}'.format(tau, exc))
-        _save_records(results, partial_path)
-
+        sweeps_to_run += [('Tau_Sensitivity', 'tau', tau, tau, fixed_fs) for tau in tau_values]
     if 'fs' in experiments:
-        print('\n--- Frame-rate sensitivity ---')
-    for fs in (fs_values if 'fs' in experiments else []):
-        print('  fs={}Hz...'.format(fs))
-        try:
-            dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-                n_cells=n_cells, fs=fs, duration=duration, tau=fixed_tau
-            )
-            true_events = [helpers.make_event_ground_truth(s, fixed_tau) for s in true_spikes]
+        sweeps_to_run += [('Fs_Sensitivity', 'fs', fs, fixed_tau, fs) for fs in fs_values]
 
-            if run_mine:
-                t0  = time.time()
-                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
-                                       benchmark=True)
-                t_my = time.time() - t0
-                results.append(_row('Fs_Sensitivity', 'OMSI', fixed_tau, fs, t_my,
-                                    _metrics(true_spikes, res['optim_spikes'], true_events, fs),
-                                    sweeps=np.median(res['optim_nsamples']),
-                                    n_cells=n_cells, duration=duration))
-                print('    OMSI: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+    for pop in range(populations):
+        print('\n=== Parameter sensitivity: population {}/{} ==='.format(pop + 1, populations))
+        for experiment, name, x, tau, fs in sweeps_to_run:
+            print('  {}={} (population {})...'.format(name, x, pop))
+            try:
+                np.random.seed(_timing_seed(experiment, x, pop))
+                dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+                    n_cells=n_cells, fs=fs, duration=duration, tau=tau
+                )
+                true_events = [helpers.make_event_ground_truth(s, tau) for s in true_spikes]
+                extra = dict(n_cells=n_cells, duration=duration, Population=pop)
 
-            if run_matlab and matlab_records is None:
-                t0 = time.time()
-                trad_spikes, _, _, sweeps = run_matlab_pnevMCMC(
-                    dff, fs=fs, tau=fixed_tau, n_sweeps='auto')
-                t_trad = time.time() - t0
-                results.append(_row('Fs_Sensitivity', 'CaImAn MCMC', fixed_tau, fs, t_trad,
-                                    _metrics(true_spikes, trad_spikes, true_events, fs),
-                                    sweeps=np.median(sweeps),
-                                    n_cells=n_cells, duration=duration))
-                print('    CaImAn MCMC: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                if run_mine:
+                    t0  = time.time()
+                    res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+                                      benchmark=True)
+                    t_my = time.time() - t0
+                    results.append(_row(experiment, 'OMSI', tau, fs, t_my,
+                                        _metrics(true_spikes, res['optim_spikes'], true_events, fs),
+                                        sweeps=np.median(res['optim_nsamples']), **extra))
+                    print('    OMSI: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
 
-            if run_oasis:
-                t0 = time.time()
-                oas_spk, _ = _oasis_spikes(dff, fs, fixed_tau, n_cells)
-                t_oasis = time.time() - t0
-                results.append(_row('Fs_Sensitivity', 'OASIS', fixed_tau, fs, t_oasis,
-                                    _metrics(true_spikes, oas_spk, true_events, fs),
-                                    n_cells=n_cells, duration=duration))
-                print('    OASIS: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                if run_matlab and matlab_records is None:
+                    try:
+                        trad_spikes, t_trad, sweeps = _run_caiman_accuracy(
+                            data_dir, experiment, x, pop, dff, fs, tau)
+                        results.append(_row(experiment, 'CaImAn MCMC', tau, fs, t_trad,
+                                            _metrics(true_spikes, trad_spikes, true_events, fs),
+                                            sweeps=np.median(sweeps), **extra))
+                        print('    CaImAn MCMC: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                    except Exception as exc:
+                        print('    CaImAn MCMC failed: {}'.format(exc))
 
-            if run_cascade:
-                for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
-                    _, cascade_spikes, t_cascade = _run_cascade_inference(
-                        dff, fs, data_dir, f'bench_fs_{fs}_{_dev}', device=_dev)
-                    results.append(_row('Fs_Sensitivity', _model, fixed_tau, fs, t_cascade,
-                                        _metrics(true_spikes, cascade_spikes, true_events, fs),
-                                        n_cells=n_cells, duration=duration))
-                    print('    CASCADE ({}): F1={:.3f} ± {:.3f}'.format(_dev.upper(), results[-1]['F1'], results[-1]['F1_mad']))
+                if run_oasis:
+                    t0 = time.time()
+                    oas_spk, _ = _oasis_spikes(dff, fs, tau, n_cells)
+                    t_oasis = time.time() - t0
+                    results.append(_row(experiment, 'OASIS', tau, fs, t_oasis,
+                                        _metrics(true_spikes, oas_spk, true_events, fs), **extra))
+                    print('    OASIS: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
 
-        except Exception as exc:
-            print('  Failed for fs={}: {}'.format(fs, exc))
-        _save_records(results, partial_path, experiment=save_exp)
+                if run_cascade:
+                    for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
+                        _, cascade_spikes, t_cascade = _run_cascade_inference(
+                            dff, fs, data_dir, f'bench_{name}_{x}_{_dev}', device=_dev)
+                        results.append(_row(experiment, _model, tau, fs, t_cascade,
+                                            _metrics(true_spikes, cascade_spikes, true_events, fs),
+                                            **extra))
+                        print('    CASCADE ({}): F1={:.3f} ± {:.3f}'.format(_dev.upper(), results[-1]['F1'], results[-1]['F1_mad']))
+
+            except Exception as exc:
+                print('  Failed for {}={}: {}'.format(name, x, exc))
+            _save_records(results, partial_path, experiment=save_exp)
 
     if run_matlab and matlab_records is not None:
         print('\nInjecting {} precomputed CaImAn MCMC (params) records...'.format(len(matlab_records)))
@@ -1055,9 +1219,15 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
 
 
 def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
-                                  run_cascade=True, matlab_records=None, cells_only=False):
+                                  run_cascade=True, matlab_records=None, cells_only=False,
+                                  populations=1):
     """
     Benchmark accuracy across a range of SNR levels.
+
+    Each population is one simulated set of clean traces, re-noised at every
+    SNR level. Populations use independent seeds, and the noise at each
+    (population, SNR) is seeded separately, so a resumed CaImAn checkpoint saw
+    the same traces as the other methods.
 
     Parameters
     ----------
@@ -1066,7 +1236,7 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
     run_oasis : bool, optional
         Whether to run OASIS.
     run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
+        Whether to run CaImAn MCMC via MATLAB (each run is checkpointed).
     run_mine : bool, optional
         Whether to run OMSI.
     run_cascade : bool, optional
@@ -1075,6 +1245,8 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
         Precomputed CaImAn MCMC records to inject instead of running MATLAB.
     cells_only : bool, optional
         If True, only save per-cell results without updating the main table.
+    populations : int, optional
+        Number of independent cell populations.
     """
     n_cells    = 50
     duration   = 300
@@ -1086,88 +1258,100 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
     cell_records = []
     partial_path = os.path.join(data_dir, 'benchmark_noise_sensitivity_partial.npz')
     cells_path   = os.path.join(data_dir, 'benchmark_noise_sensitivity_cells.npz')
+    if not cells_only:
+        _backup_once(partial_path)
+    _backup_once(cells_path)
 
-    print('Generating fixed cell population (n_cells={}, duration={}s)...'.format(n_cells, duration))
-    _, true_spikes, clean_traces, _, _, _ = generate_synthetic_data(
-        n_cells=n_cells, fs=fs, duration=duration, tau=tau, snr=1e6
-    )
-    true_events = [helpers.make_event_ground_truth(s, tau) for s in true_spikes]
+    for pop in range(populations):
+        print('\n=== Noise sensitivity: population {}/{} ==='.format(pop + 1, populations))
+        print('Generating cell population (n_cells={}, duration={}s)...'.format(n_cells, duration))
+        np.random.seed(_timing_seed('Noise_Population', 0, pop))
+        _, true_spikes, clean_traces, _, _, _ = generate_synthetic_data(
+            n_cells=n_cells, fs=fs, duration=duration, tau=tau, snr=1e6
+        )
+        true_events = [helpers.make_event_ground_truth(s, tau) for s in true_spikes]
 
-    peak_signals = np.array([
-        np.percentile(clean_traces[i], 99) - np.percentile(clean_traces[i], 1)
-        for i in range(n_cells)
-    ])
-    peak_signals = np.maximum(peak_signals, 1e-9)
+        peak_signals = np.array([
+            np.percentile(clean_traces[i], 99) - np.percentile(clean_traces[i], 1)
+            for i in range(n_cells)
+        ])
+        peak_signals = np.maximum(peak_signals, 1e-9)
 
-    def _append_cell_rows(model_name, snr_val, pred_spk):
-        """Record per-cell precision and recall for a given model and SNR level."""
-        p, r, _   = OMSI.compute_accuracy_strict(true_spikes, pred_spk, tolerance=0.1)
-        pw, rw, _ = helpers.compute_accuracy_window(true_spikes, pred_spk)
-        for i in range(n_cells):
-            cell_records.append({
-                'Model':            model_name,
-                'SNR':              float(snr_val),
-                'Precision':        float(p[i]),
-                'Recall':           float(r[i]),
-                'Precision_window': float(pw[i]),
-                'Recall_window':    float(rw[i]),
-            })
+        def _append_cell_rows(model_name, snr_val, pred_spk):
+            """Record per-cell precision and recall for a given model and SNR level."""
+            p, r, _   = OMSI.compute_accuracy_strict(true_spikes, pred_spk, tolerance=0.1)
+            pw, rw, _ = helpers.compute_accuracy_window(true_spikes, pred_spk)
+            for i in range(n_cells):
+                cell_records.append({
+                    'Model':            model_name,
+                    'SNR':              float(snr_val),
+                    'Population':       pop,
+                    'Precision':        float(p[i]),
+                    'Recall':           float(r[i]),
+                    'Precision_window': float(pw[i]),
+                    'Recall_window':    float(rw[i]),
+                })
 
-    for snr_val in snr_levels:
-        print('  SNR={}...'.format(snr_val))
-        try:
-            sigmas = peak_signals / snr_val
-            dff = clean_traces + np.random.normal(0, sigmas[:, None],
-                                                   size=clean_traces.shape)
+        def km(pred_spk):
+            """Shorthand for computing all accuracy metrics against ground-truth spikes."""
+            return _metrics(true_spikes, pred_spk, true_events, fs)
 
-            base = {'Experiment': 'Noise_Sensitivity', 'SNR': snr_val,
-                    'N_Cells': n_cells, 'Duration': duration}
+        for snr_val in snr_levels:
+            print('  SNR={} (population {})...'.format(snr_val, pop))
+            try:
+                sigmas = peak_signals / snr_val
+                np.random.seed(_timing_seed('Noise_Sensitivity', snr_val, pop))
+                dff = clean_traces + np.random.normal(0, sigmas[:, None],
+                                                       size=clean_traces.shape)
 
-            def km(pred_spk):
-                """Shorthand for computing all accuracy metrics against ground-truth spikes."""
-                return _metrics(true_spikes, pred_spk, true_events, fs)
+                base = {'Experiment': 'Noise_Sensitivity', 'SNR': snr_val,
+                        'N_Cells': n_cells, 'Duration': duration, 'Population': pop}
 
-            if run_mine:
-                t0  = time.time()
-                res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
-                                       benchmark=True)
-                t_my = time.time() - t0
-                results.append({**base, 'Model': 'OMSI', 'Time': t_my,
-                                 **km(res['optim_spikes'])})
-                _append_cell_rows('OMSI', snr_val, res['optim_spikes'])
-                print('    OMSI: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                if run_mine:
+                    t0  = time.time()
+                    res = OMSI.deconv(dff, params={'f': fs, 'p': 2, 'auto_stop': True},
+                                      benchmark=True)
+                    t_my = time.time() - t0
+                    results.append({**base, 'Model': 'OMSI', 'Time': t_my,
+                                    **km(res['optim_spikes'])})
+                    _append_cell_rows('OMSI', snr_val, res['optim_spikes'])
+                    print('    OMSI: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
 
-            if run_matlab and matlab_records is None:
-                t0 = time.time()
-                trad_spikes, _, _, _ = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps='auto')
-                t_trad = time.time() - t0
-                results.append({**base, 'Model': 'CaImAn MCMC', 'Time': t_trad,
-                                 **km(trad_spikes)})
-                _append_cell_rows('CaImAn MCMC', snr_val, trad_spikes)
-                print('    CaImAn MCMC: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                if run_matlab and matlab_records is None:
+                    try:
+                        trad_spikes, t_trad, _ = _run_caiman_accuracy(
+                            data_dir, 'Noise_Sensitivity', snr_val, pop, dff, fs, tau)
+                        results.append({**base, 'Model': 'CaImAn MCMC', 'Time': t_trad,
+                                        **km(trad_spikes)})
+                        _append_cell_rows('CaImAn MCMC', snr_val, trad_spikes)
+                        print('    CaImAn MCMC: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                    except Exception as exc:
+                        print('    CaImAn MCMC failed: {}'.format(exc))
 
-            if run_oasis:
-                t0 = time.time()
-                oas_spk, _ = _oasis_spikes(dff, fs, tau, n_cells)
-                t_oasis = time.time() - t0
-                results.append({**base, 'Model': 'OASIS', 'Time': t_oasis,
-                                 **km(oas_spk)})
-                _append_cell_rows('OASIS', snr_val, oas_spk)
-                print('    OASIS: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
+                if run_oasis:
+                    t0 = time.time()
+                    oas_spk, _ = _oasis_spikes(dff, fs, tau, n_cells)
+                    t_oasis = time.time() - t0
+                    results.append({**base, 'Model': 'OASIS', 'Time': t_oasis,
+                                    **km(oas_spk)})
+                    _append_cell_rows('OASIS', snr_val, oas_spk)
+                    print('    OASIS: F1={:.3f} ± {:.3f}'.format(results[-1]['F1'], results[-1]['F1_mad']))
 
-            if run_cascade:
-                for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
-                    _, cascade_spikes, t_cascade = _run_cascade_inference(
-                        dff, fs, data_dir, f'bench_noise_snr{snr_val}_{_dev}', device=_dev)
-                    results.append({**base, 'Model': _model, 'Time': t_cascade,
-                                     **km(cascade_spikes)})
-                    _append_cell_rows(_model, snr_val, cascade_spikes)
-                    print('    CASCADE ({}): F1={:.3f} ± {:.3f}'.format(_dev.upper(), results[-1]['F1'], results[-1]['F1_mad']))
+                if run_cascade:
+                    for _dev, _model in [('gpu', 'CASCADE_GPU'), ('cpu', 'CASCADE_CPU')]:
+                        _, cascade_spikes, t_cascade = _run_cascade_inference(
+                            dff, fs, data_dir, f'bench_noise_snr{snr_val}_{_dev}', device=_dev)
+                        results.append({**base, 'Model': _model, 'Time': t_cascade,
+                                        **km(cascade_spikes)})
+                        _append_cell_rows(_model, snr_val, cascade_spikes)
+                        print('    CASCADE ({}): F1={:.3f} ± {:.3f}'.format(_dev.upper(), results[-1]['F1'], results[-1]['F1_mad']))
 
-        except Exception as exc:
-            print('  Failed for SNR={}: {}'.format(snr_val, exc))
-        if not cells_only:
-            _save_records(results, partial_path)
+            except Exception as exc:
+                print('  Failed for SNR={}: {}'.format(snr_val, exc))
+            if not cells_only:
+                _save_records(results, partial_path)
+            if cell_records:
+                _save_records(cell_records, cells_path)
 
     if not cells_only and run_matlab and matlab_records is not None:
         print('\nInjecting {} precomputed CaImAn MCMC (noise) records...'.format(len(matlab_records)))
@@ -1175,7 +1359,6 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
         _save_records(results, partial_path)
 
     if cell_records:
-        _save_records(cell_records, cells_path)
         print('  Saved {} cell-level rows: {}'.format(len(cell_records), cells_path))
 
     return
@@ -1434,7 +1617,7 @@ def print_summary(data_dir=_DEFAULT_DATA_DIR):
     prec_col = 'Precision' if USE_STRICT_ACCURACY else 'Precision_window'
     rec_col  = 'Recall'    if USE_STRICT_ACCURACY else 'Recall_window'
     fb_col   = 'F1'        if USE_STRICT_ACCURACY else 'F1_window'
-    models_order = ['fMCSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
+    models_order = ['OMSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
 
     header = '{:<14} {:<12} {:>8}  {:<14} {:<14} {:<14} {:<14} {:<12}'.format(
         'Experiment', 'Model', 'Var', 'Fbeta', 'Precision', 'Recall', 'CosMIC', 'Time (s)')
@@ -1625,8 +1808,11 @@ def print_summary(data_dir=_DEFAULT_DATA_DIR):
     print('normal-consistent estimate comparable to standard deviation.')
 
 
-def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
-             run_oasis=True, run_cascade=True):
+def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
+             run_oasis=True, run_cascade=True, repeats=1, matlab_repeats=1,
+             populations=1):
+    """
+    Run all benchmark functions and save results to data_dir.
 
     Parameters
     ----------
@@ -1640,6 +1826,12 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
         Whether to run OASIS.
     run_cascade : bool, optional
         Whether to run CASCADE.
+    repeats : int, optional
+        Repeats of the timing benchmarks (sweeps, cell count, duration).
+    matlab_repeats : int, optional
+        Number of those repeats that also run CaImAn MCMC.
+    populations : int, optional
+        Independent cell populations for the tau, frame-rate and noise sweeps.
     """
     os.makedirs(data_dir, exist_ok=True)
 
@@ -1654,16 +1846,16 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_fmcsi=True, run_matlab=True,
                      run_matlab=run_matlab)
 
     print('=== Sweeps benchmark ===')
-    benchmark_sweeps(data_dir, **kw_shared,
+    benchmark_sweeps(data_dir, **kw_shared, repeats=repeats, matlab_repeats=matlab_repeats,
                      matlab_records=(ext['sweeps'] or None) if ext else None)
     print('\n=== Scalability benchmark ===')
-    benchmark_scalability(data_dir, **kw_shared,
+    benchmark_scalability(data_dir, **kw_shared, repeats=repeats, matlab_repeats=matlab_repeats,
                           matlab_records=(ext['scalability'] or None) if ext else None)
     print('\n=== Parameter sensitivity benchmark ===')
-    benchmark_params(data_dir, **kw_shared,
+    benchmark_params(data_dir, **kw_shared, populations=populations,
                      matlab_records=(ext['params'] or None) if ext else None)
     print('\n=== Noise sensitivity benchmark ===')
-    benchmark_noise_sensitivity(data_dir, **kw_shared,
+    benchmark_noise_sensitivity(data_dir, **kw_shared, populations=populations,
                                 matlab_records=(ext['noise_sensitivity'] or None) if ext else None)
     print('\n=== Firing-rate sensitivity benchmark ===')
     benchmark_firing_rate_sensitivity(data_dir, **kw_shared,
@@ -1907,6 +2099,170 @@ def _running_median_mad(x, y, x_out, bandwidth):
     return medians, mads
 
 
+def _median_mad_rows(subset, col):
+    """
+    Median and across-cell MAD of one metric for each row of a table.
+
+    Parameters
+    ----------
+    subset : dict
+        Columnar table rows (one row per x value).
+    col : str
+        Metric column, e.g. 'Precision_window' or 'Fbeta_window'.
+
+    Returns
+    -------
+    med : ndarray
+        The stored median column when present, else the median of the per-cell
+        values, else (for F-beta columns) F-beta of the stored precision/recall.
+    mad : ndarray
+        MAD across cells from the per-cell values (NaN where not recorded).
+    """
+    n   = _tbl_len(subset)
+    pcs = _per_cell_metrics(subset)
+    med = np.full(n, np.nan)
+    mad = np.full(n, np.nan)
+    for i in range(n):
+        vals = pcs[i].get(col) if pcs else None
+        if col in subset and np.isfinite(float(subset[col][i])):
+            med[i] = float(subset[col][i])
+        elif vals is not None and len(vals):
+            med[i] = float(np.nanmedian(vals))
+        elif col.startswith('Fbeta'):
+            sfx = col[len('Fbeta'):]
+            med[i] = float(_fbeta(subset['Precision' + sfx][i], subset['Recall' + sfx][i]))
+        if vals is not None and len(vals):
+            mad[i] = float(_mad(vals))
+    return med, mad
+
+
+def _plot_median_band(ax, x, med, mad, color):
+    """
+    Plot a median trace with a MAD band and no point markers.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes to draw on.
+    x, med, mad : array-like
+        x values, medians, and MADs (the band is skipped where MAD is NaN).
+    color : str
+        Line and band color.
+    """
+    x, med, mad = (np.asarray(v, dtype=float) for v in (x, med, mad))
+    ax.plot(x, med, '-', color=color)
+    if np.any(np.isfinite(mad)):
+        ax.fill_between(x, med - mad, med + mad, color=color, alpha=_MAD_ALPHA,
+                        edgecolor='none', linewidth=0)
+
+
+def _time_by_x(subset, xcol, x_scale=1.0):
+    """
+    Median and MAD of compute time across repeats at each x value.
+
+    Parameters
+    ----------
+    subset : dict
+        Timing rows for one model and experiment (one row per repeat and x).
+    xcol : str
+        Column holding the swept variable.
+    x_scale : float, optional
+        Divisor applied to x values.
+
+    Returns
+    -------
+    xs : ndarray
+        Distinct x values, divided by x_scale.
+    med : ndarray
+        Median time in minutes.
+    mad : ndarray
+        MAD of time in minutes (NaN where only one repeat exists).
+    """
+    x = subset[xcol].astype(float)
+    t = subset['Time'].astype(float) / 60.0
+    xs = np.unique(x[np.isfinite(x)])
+    med = np.array([np.nanmedian(t[x == v]) for v in xs])
+    mad = np.array([_mad(t[x == v]) if np.sum(np.isfinite(t[x == v])) > 1 else np.nan
+                    for v in xs])
+    return xs / x_scale, med, mad
+
+
+def _population_curve(subset, xcol, col):
+    """
+    Median across populations of a per-population metric, with MAD across populations.
+
+    Falls back to one row per x with the across-cell MAD when fewer than two
+    populations were run (results saved before populations existed).
+
+    Parameters
+    ----------
+    subset : dict
+        Rows for one model and experiment.
+    xcol : str
+        Column holding the swept variable.
+    col : str
+        Metric column (see _median_mad_rows).
+
+    Returns
+    -------
+    xs, med, mad : ndarray
+        Sorted x values, median, and MAD.
+    """
+    x = subset[xcol].astype(float)
+    row_med, row_mad = _median_mad_rows(subset, col)
+    pops = subset['Population'].astype(float) if 'Population' in subset else np.full(len(x), np.nan)
+    if len(np.unique(pops[np.isfinite(pops)])) < 2:
+        order = np.argsort(x)
+        return x[order], row_med[order], row_mad[order]
+    xs  = np.unique(x)
+    med = np.array([np.nanmedian(row_med[x == v]) for v in xs])
+    mad = np.array([_mad(row_med[x == v]) for v in xs])
+    return xs, med, mad
+
+
+def _noise_curve(noise_cells, model, col):
+    """
+    Precision or recall vs SNR from the cell-level noise table.
+
+    With several populations the curve is the median of the per-population
+    medians and the band their MAD; with one population it is the median and
+    MAD across cells.
+
+    Parameters
+    ----------
+    noise_cells : dict
+        Cell-level noise table from _load_noise_cells.
+    model : str
+        Model to extract.
+    col : str
+        Metric column.
+
+    Returns
+    -------
+    xs, med, mad : ndarray
+        SNR values in descending order, median, and MAD.
+    """
+    snr   = noise_cells['SNR'].astype(float)
+    vals  = noise_cells[col].astype(float)
+    pops  = (noise_cells['Population'].astype(float) if 'Population' in noise_cells
+             else np.zeros(len(snr)))
+    m     = noise_cells['Model'] == model
+    multi = len(np.unique(pops[m & np.isfinite(pops)])) >= 2
+    xs, med, mad = [], [], []
+    for sv in np.sort(np.unique(snr[m]))[::-1]:
+        ms = m & (snr == sv)
+        if ms.sum() < 2:
+            continue
+        if multi:
+            pop_meds = np.array([np.nanmedian(vals[ms & (pops == pv)])
+                                 for pv in np.unique(pops[ms])])
+            med.append(np.nanmedian(pop_meds)); mad.append(_mad(pop_meds))
+        else:
+            med.append(np.nanmedian(vals[ms])); mad.append(_mad(vals[ms]))
+        xs.append(sv)
+    return np.array(xs), np.array(med), np.array(mad)
+
+
 def _load_benchmark_tables(data_dir):
     """
     Load and merge the scaling/sensitivity benchmark tables used by figure 2.
@@ -2088,7 +2444,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         'CASCADE_GPU': 'CASCADE (GPU)', 'CASCADE_CPU': 'CASCADE (CPU)',
     }
     legend_handles = [
-        plt.Line2D([0], [0], color=COLORS[m], marker='.', linestyle='-',
+        plt.Line2D([0], [0], color=COLORS[m], linestyle='-',
                    label=_legend_labels[m])
         for m in ['OMSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
     ]
@@ -2098,7 +2454,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         'CASCADE_GPU': 'CASCADE',
     }
     legend_handles1 = [
-        plt.Line2D([0], [0], color=COLORS[m], marker='.', linestyle='-',
+        plt.Line2D([0], [0], color=COLORS[m], linestyle='-',
                    label=_legend_labels1[m])
         for m in ['OMSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU']
     ]
@@ -2122,8 +2478,8 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
             continue
         subset = _tbl_sort(_tbl_filter(m_rows, 'Experiment', 'Sweeps'), 'Sweeps')
         if _tbl_len(subset) > 0:
-            axA['sweeps'].plot(subset['Sweeps'], subset['Time'] / 60.0,
-                               '.-', label=model, color=COLORS.get(model, 'k'))
+            _plot_median_band(axA['sweeps'], *_time_by_x(subset, 'Sweeps'),
+                              COLORS.get(model, 'k'))
             r2l, r2p, c = _fit_scaling(subset['Sweeps'], subset['Time'])
             scaling_stats.append({'Experiment': 'Sweeps', 'Model': model,
                                    'Variable': 'Sweeps', 'Lin_R2': r2l,
@@ -2141,8 +2497,8 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
             subset = _filter_cascade_shared_x(
                 subset, _tbl_filter(combined, 'Experiment', 'Cell_Scaling'), 'N_Cells')
         if _tbl_len(subset) > 0:
-            axA['cells'].plot(subset['N_Cells'], subset['Time'] / 60.,
-                              '.-', label=model, color=COLORS.get(model, 'k'))
+            _plot_median_band(axA['cells'], *_time_by_x(subset, 'N_Cells'),
+                              COLORS.get(model, 'k'))
             r2l, r2p, c = _fit_scaling(subset['N_Cells'], subset['Time'])
             scaling_stats.append({'Experiment': 'Cell_Scaling', 'Model': model,
                                    'Variable': 'N_Cells', 'Lin_R2': r2l,
@@ -2161,28 +2517,12 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
             continue
         subset = _tbl_sort(_tbl_filter(m_rows, 'Experiment', 'Duration_Scaling'), 'Duration')
         if _tbl_len(subset) > 0:
-            axA['duration'].plot(subset['Duration'] / 60., subset['Time'] / 60.,
-                                 '.-', label=model, color=COLORS.get(model, 'k'))
+            _plot_median_band(axA['duration'], *_time_by_x(subset, 'Duration', 60.0),
+                              COLORS.get(model, 'k'))
             r2l, r2p, c = _fit_scaling(subset['Duration'], subset['Time'])
             scaling_stats.append({'Experiment': 'Duration_Scaling', 'Model': model,
                                    'Variable': 'Duration', 'Lin_R2': r2l,
                                    'Poly_R2': r2p, 'Conclusion': c})
-
-    _extrap = {'CaImAn MCMC': 496.0, 'CASCADE_CPU': 5.0}
-    for model, t_extrap in _extrap.items():
-        color = COLORS.get(model, 'k')
-
-        src = dur_cascade_tbl if model.startswith('CASCADE') and dur_cascade_tbl else combined
-        m_rows = _tbl_filter(src, 'Model', model)
-        subset = _tbl_sort(_tbl_filter(m_rows, 'Experiment', 'Duration_Scaling'), 'Duration')
-        if _tbl_len(subset) > 0:
-            last_dur  = float(subset['Duration'][-1]) / 60.
-            if last_dur >= 120.:
-                continue  # real data already reaches the extrapolation target
-            last_time = float(subset['Time'][-1]) / 60.
-            axA['duration'].plot([last_dur, 120.], [last_time, t_extrap],
-                                 '-', color=color)
-        axA['duration'].plot(120., t_extrap, '.', color=color)
 
     axA['duration'].set_xlabel('recording duration (min)')
     axA['duration'].set_ylabel('compute time (min)')
@@ -2199,10 +2539,11 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
             subset = _filter_cascade_shared_x(
                 subset, _tbl_filter(combined, 'Experiment', 'Tau_Sensitivity'), 'Tau')
         if _tbl_len(subset) > 0:
-            axA['tau_p'].plot(subset['Tau'][:-1], subset[prec_col][:-1], '.-',
-                              color=COLORS.get(model, 'k'))
-            axA['tau_r'].plot(subset['Tau'][:-1], subset[rec_col][:-1],  '.-',
-                              color=COLORS.get(model, 'k'))
+            tau_x  = subset['Tau'].astype(float)
+            subset = {k: v[tau_x < np.nanmax(tau_x)] for k, v in subset.items()}
+            for ax_key, col in [('tau_p', prec_col), ('tau_r', rec_col)]:
+                _plot_median_band(axA[ax_key], *_population_curve(subset, 'Tau', col),
+                                  COLORS.get(model, 'k'))
 
     for ax_key, xlabel, ylabel in [
         ('tau_p', r'$\tau$ (s)', 'Precision'),
@@ -2219,36 +2560,14 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     _rec_col_cell  = 'Recall_window'    if not USE_STRICT_ACCURACY else 'Recall'
 
     if _noise_cells is not None and _tbl_len(_noise_cells) > 0:
-        _all_snr = _noise_cells['SNR'].astype(float)
-        _snr_levels_sorted = np.sort(np.unique(_all_snr))[::-1]
-
         for model in ['CaImAn MCMC', 'CASCADE_GPU', 'CASCADE_CPU', 'OASIS', 'OMSI']:
-            _mask_m = _noise_cells['Model'] == model
-            if _mask_m.sum() == 0:
+            if (_noise_cells['Model'] == model).sum() == 0:
                 continue
             color = COLORS.get(model, 'k')
-            snr_vals, med_p, mad_p, med_r, mad_r = [], [], [], [], []
-            for snr_val in _snr_levels_sorted:
-                _mask_sn = _mask_m & (_all_snr == snr_val)
-                if _mask_sn.sum() < 2:
-                    continue
-                _py = _noise_cells[_prec_col_cell].astype(float)[_mask_sn]
-                _ry = _noise_cells[_rec_col_cell].astype(float)[_mask_sn]
-                snr_vals.append(snr_val)
-                med_p.append(np.nanmedian(_py))
-                mad_p.append(_mad(_py))
-                med_r.append(np.nanmedian(_ry))
-                mad_r.append(_mad(_ry))
-            if len(snr_vals) >= 2:
-                sv   = np.array(snr_vals)
-                mp_  = np.array(med_p); sp_ = np.array(mad_p)
-                mr_  = np.array(med_r); sr_ = np.array(mad_r)
-                axA['noise_p'].plot(sv, mp_, '.-', color=color)
-                axA['noise_p'].fill_between(sv, mp_ - sp_, mp_ + sp_,
-                                             color=color, alpha=0.25, linewidth=0)
-                axA['noise_r'].plot(sv, mr_, '.-', color=color)
-                axA['noise_r'].fill_between(sv, mr_ - sr_, mr_ + sr_,
-                                             color=color, alpha=0.25, linewidth=0)
+            for ax_key, col in [('noise_p', _prec_col_cell), ('noise_r', _rec_col_cell)]:
+                sv, med, mad = _noise_curve(_noise_cells, model, col)
+                if len(sv) >= 2:
+                    _plot_median_band(axA[ax_key], sv, med, mad, color)
     else:
         for model in ['CaImAn MCMC', 'CASCADE_GPU', 'CASCADE_CPU', 'OASIS', 'OMSI']:
             m_rows = _tbl_filter(combined, 'Model', model)
@@ -2259,10 +2578,9 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
                 continue
             subset = _tbl_sort(subset, 'SNR')
             if _tbl_len(subset) > 0:
-                axA['noise_p'].plot(subset['SNR'], subset[prec_col], '.-',
-                                    color=COLORS.get(model, 'k'))
-                axA['noise_r'].plot(subset['SNR'], subset[rec_col], '.-',
-                                    color=COLORS.get(model, 'k'))
+                for ax_key, col in [('noise_p', prec_col), ('noise_r', rec_col)]:
+                    _plot_median_band(axA[ax_key], *_population_curve(subset, 'SNR', col),
+                                      COLORS.get(model, 'k'))
 
     for ax_key, xlabel, ylabel in [
         ('noise_p', 'SNR', 'Precision'),
@@ -2315,15 +2633,10 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
             subset_fs = _filter_cascade_shared_x(
                 subset_fs, _tbl_filter(combined, 'Experiment', 'Fs_Sensitivity'), 'Fs')
         if _tbl_len(subset_fs) > 0:
-            fb_fs = _fbeta(subset_fs[prec_col], subset_fs[rec_col])
-            axB['fs_p'].plot(subset_fs['Fs'], subset_fs[prec_col], '.-',
-                             color=COLORS.get(model, 'k'))
-            axB['fs_r'].plot(subset_fs['Fs'], subset_fs[rec_col],  '.-',
-                             color=COLORS.get(model, 'k'))
-            axB['fs_fb'].plot(subset_fs['Fs'], fb_fs, '.-',
-                              color=COLORS.get(model, 'k'))
-            axB['fs_cosmic'].plot(subset_fs['Fs'], subset_fs['COSMIC'], '.-',
-                                  color=COLORS.get(model, 'k'))
+            for ax_key, col in [('fs_p', prec_col), ('fs_r', rec_col),
+                                ('fs_fb', _FBETA_COL), ('fs_cosmic', 'COSMIC')]:
+                _plot_median_band(axB[ax_key], *_population_curve(subset_fs, 'Fs', col),
+                                  COLORS.get(model, 'k'))
 
     axB['fs_p'].set_ylim([0.45, 1.05])
     axB['fs_r'].set_ylim([0.45, 1.05])
@@ -2413,10 +2726,14 @@ def _print_experiment(tbl, experiment, xcol, cols, models, x_scale=1.0, x_label=
             subset = _filter_cascade_shared_x(
                 subset, _tbl_filter(full_tbl, 'Experiment', experiment), xcol)
         if drop_last:
-            subset = {k: v[:-1] for k, v in subset.items()}
+            xv = np.array(subset[xcol], dtype=float)
+            subset = {k: v[xv < np.nanmax(xv)] for k, v in subset.items()}
         vals = np.full((_tbl_len(subset), len(cols)), np.nan)
         for i in range(_tbl_len(subset)):
-            line = '  {:<14} {:>10.4g}'.format(model, float(subset[xcol][i]) / x_scale)
+            name = model
+            if 'Population' in subset and np.isfinite(float(subset['Population'][i])):
+                name = '{} p{}'.format(model, int(subset['Population'][i]))
+            line = '  {:<14} {:>10.4g}'.format(name, float(subset[xcol][i]) / x_scale)
             for j, (col, _, fmt, scale) in enumerate(cols):
                 if col == 'Fbeta' and show_mad and _FBETA_COL in subset \
                         and np.isfinite(float(subset[_FBETA_COL][i])):
@@ -2441,6 +2758,351 @@ def _print_experiment(tbl, experiment, xcol, cols, models, x_scale=1.0, x_label=
             print(line)
 
 
+def _print_time_experiment(tbl, experiment, xcol, models, x_scale=1.0, x_label=None,
+                           full_tbl=None):
+    """
+    Print median +/- MAD compute time across repeats for one timing panel.
+
+    Parameters
+    ----------
+    tbl : dict
+        Columnar benchmark table.
+    experiment : str
+        Experiment name to filter on.
+    xcol : str
+        Column used as the independent variable.
+    models : list of str
+        Models to print, in order.
+    x_scale : float, optional
+        Divisor applied to x values before printing.
+    x_label : str, optional
+        Header for the x column; defaults to xcol.
+    full_tbl : dict, optional
+        Table used to restrict CASCADE rows to x values shared with other methods.
+    """
+    header = '  {:<14} {:>10} {:>22} {:>4}'.format('Model', x_label or xcol,
+                                                   'Time (min, med ± MAD)', 'n')
+    print(header)
+    print('  ' + '-' * (len(header) - 2))
+    for model in models:
+        subset = _tbl_filter(_tbl_filter(tbl, 'Model', model), 'Experiment', experiment)
+        if _tbl_len(subset) == 0:
+            continue
+        if model.startswith('CASCADE') and full_tbl is not None:
+            subset = _filter_cascade_shared_x(
+                subset, _tbl_filter(full_tbl, 'Experiment', experiment), xcol)
+        xs, med, mad = _time_by_x(subset, xcol, x_scale)
+        x_all = subset[xcol].astype(float) / x_scale
+        for xv, m, d in zip(xs, med, mad):
+            cell = '{:.3f}'.format(m) if np.isnan(d) else '{:.3f} ± {:.3f}'.format(m, d)
+            print('  {:<14} {:>10.4g} {:>22} {:>4}'.format(model, xv, cell,
+                                                           int(np.sum(x_all == xv))))
+
+
+def _curve(tbl, experiment, xcol, col, model, exclude_x=(), drop_last=False,
+           full_tbl=None, x_scale=1.0):
+    """
+    Return one plotted trace as {x: value}, filtered the way the figure filters it.
+
+    Parameters
+    ----------
+    tbl : dict
+        Columnar benchmark table.
+    experiment : str
+        Experiment name to filter on.
+    xcol : str
+        Column used as the independent variable.
+    col : str
+        Plotted value column (see _median_mad_rows).
+    model : str
+        Model to extract.
+    exclude_x : tuple of float, optional
+        x values left out of the figure.
+    drop_last : bool, optional
+        Drop the largest x value, matching the figure.
+    full_tbl : dict, optional
+        Table used to restrict CASCADE rows to x values shared with other methods.
+    x_scale : float, optional
+        Divisor applied to x values.
+
+    Returns
+    -------
+    dict
+        Plotted value keyed by x.
+    """
+    subset = _tbl_sort(_tbl_filter(_tbl_filter(tbl, 'Model', model),
+                                   'Experiment', experiment), xcol)
+    if _tbl_len(subset) == 0:
+        return {}
+    if exclude_x:
+        keep = ~np.isin(np.array(subset[xcol], dtype=float), exclude_x)
+        subset = {k: v[keep] for k, v in subset.items()}
+    if model.startswith('CASCADE') and full_tbl is not None:
+        subset = _filter_cascade_shared_x(
+            subset, _tbl_filter(full_tbl, 'Experiment', experiment), xcol)
+    if drop_last:
+        xv = np.array(subset[xcol], dtype=float)
+        subset = {k: v[xv < np.nanmax(xv)] for k, v in subset.items()}
+    med, _ = _median_mad_rows(subset, col)
+    # Repeated timing runs give several rows per x; the plotted value is their median.
+    by_x = {}
+    for x, v in zip(subset[xcol], med):
+        by_x.setdefault(float(x) / x_scale, []).append(float(v))
+    return {x: float(np.nanmedian(v)) for x, v in by_x.items()}
+
+
+def _print_signed_rank_tests(combined, dur_tbl, noise_cells, data_dir):
+    """
+    Print Wilcoxon signed-rank tests for every line and violin panel.
+
+    Line panels are tested two ways: across x, pairing OMSI and each other
+    method at the x values both were run at (n = number of shared x values),
+    and, where per-cell results were saved, at each x across the simulated
+    cells both methods saw (n = cells).
+
+    Parameters
+    ----------
+    combined : dict
+        Merged benchmark table from _load_benchmark_tables.
+    dur_tbl : dict
+        Table used for the duration panel (CASCADE rows may come from the alt dir).
+    noise_cells : dict or None
+        Cell-level noise table from _load_noise_cells.
+    data_dir : str
+        Directory containing cascade_7p5_vs_30hz_data.npz.
+    """
+    others = ['CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
+
+    print('\n' + '=' * 72)
+    print('WILCOXON SIGNED-RANK TESTS (two-sided, OMSI = A)')
+    print('=' * 72)
+
+    print('\n--- Line panels, paired across x (the plotted medians) ---')
+    print('  Timing points are single wall-clock runs, so they can only be tested this way.')
+    panels = [
+        ('A: time vs sweeps',     combined, 'Sweeps',           'Sweeps',   'Time',     ['CaImAn MCMC'], {}),
+        ('A: time vs cells',      combined, 'Cell_Scaling',     'N_Cells',  'Time',     others, {'full_tbl': combined}),
+        ('A: time vs duration',   dur_tbl,  'Duration_Scaling', 'Duration', 'Time',     others, {}),
+        ('A: precision vs tau',   combined, 'Tau_Sensitivity',  'Tau',      _PREC_COL,  others, {'drop_last': True, 'full_tbl': combined}),
+        ('A: recall vs tau',      combined, 'Tau_Sensitivity',  'Tau',      _REC_COL,   others, {'drop_last': True, 'full_tbl': combined}),
+        ('B: precision vs Fs',    combined, 'Fs_Sensitivity',   'Fs',       _PREC_COL,  others, {'exclude_x': (100.0,), 'full_tbl': combined}),
+        ('B: recall vs Fs',       combined, 'Fs_Sensitivity',   'Fs',       _REC_COL,   others, {'exclude_x': (100.0,), 'full_tbl': combined}),
+        ('B: F_beta vs Fs',       combined, 'Fs_Sensitivity',   'Fs',       _FBETA_COL, others, {'exclude_x': (100.0,), 'full_tbl': combined}),
+        ('B: CosMIC vs Fs',       combined, 'Fs_Sensitivity',   'Fs',       'COSMIC',   others, {'exclude_x': (100.0,), 'full_tbl': combined}),
+    ]
+    noise_curves = {}
+    if noise_cells is not None and _tbl_len(noise_cells) > 0:
+        for col in (_PREC_COL, _REC_COL):
+            for model in ['OMSI'] + others:
+                xs, med, _ = _noise_curve(noise_cells, model, col)
+                noise_curves[(col, model)] = {float(x): float(v) for x, v in zip(xs, med)}
+    else:
+        panels += [
+            ('A: precision vs SNR', combined, 'Noise_Sensitivity', 'SNR', _PREC_COL, others, {}),
+            ('A: recall vs SNR',    combined, 'Noise_Sensitivity', 'SNR', _REC_COL,  others, {}),
+        ]
+
+    print_test_header('Panel')
+    for label, tbl, experiment, xcol, col, models, kw in panels:
+        ref = _curve(tbl, experiment, xcol, col, 'OMSI', **kw)
+        for other in models:
+            cur = _curve(tbl, experiment, xcol, col, other, **kw)
+            xs  = sorted(set(ref) & set(cur))
+            if not ref or not cur:
+                continue
+            print_test_row(label, 'OMSI', other,
+                           signed_rank([ref[x] for x in xs], [cur[x] for x in xs]))
+    for col, name in [(_PREC_COL, 'precision'), (_REC_COL, 'recall')]:
+        ref = noise_curves.get((col, 'OMSI'), {})
+        for other in others:
+            cur = noise_curves.get((col, other), {})
+            xs  = sorted(set(ref) & set(cur))
+            if not xs:
+                continue
+            print_test_row('A: {} vs SNR'.format(name), 'OMSI', other,
+                           signed_rank([ref[x] for x in xs], [cur[x] for x in xs]))
+
+    print('\n--- Timing panels, paired across repeats at each x ---')
+    print('  Repeat r of every method ran on the same simulated data. With n < 6 repeats')
+    print('  the smallest possible p is 0.0625.')
+
+    def _time_by_rep(tbl, experiment, xcol, model):
+        sub = _tbl_filter(_tbl_filter(tbl, 'Model', model), 'Experiment', experiment)
+        out = {}
+        if _tbl_len(sub) == 0 or 'Repeat' not in sub:
+            return out
+        for x, r, t in zip(sub[xcol], sub['Repeat'], sub['Time']):
+            if np.isfinite(float(r)):
+                out.setdefault(float(x), {})[int(r)] = float(t)
+        return out
+
+    n_tested = 0
+    print_test_header('Panel @ x')
+    for label, tbl, experiment, xcol, models, x_fmt in [
+        ('A: time', combined, 'Sweeps',           'Sweeps',   ['CaImAn MCMC'], 'sweeps={:g}'),
+        ('A: time', combined, 'Cell_Scaling',     'N_Cells',  others,          'cells={:g}'),
+        ('A: time', dur_tbl,  'Duration_Scaling', 'Duration', others,          'dur={:g}s'),
+    ]:
+        ref = _time_by_rep(tbl, experiment, xcol, 'OMSI')
+        for other in models:
+            cur = _time_by_rep(tbl, experiment, xcol, other)
+            for x in sorted(set(ref) & set(cur)):
+                reps = sorted(set(ref[x]) & set(cur[x]))
+                if len(reps) < 2:
+                    continue
+                n_tested += 1
+                print_test_row('{} @ {}'.format(label, x_fmt.format(x)), 'OMSI', other,
+                               signed_rank([ref[x][r] for r in reps], [cur[x][r] for r in reps]))
+    if n_tested == 0:
+        print('  (none: fewer than two repeats per point; run --mode timing --repeats N)')
+
+    print('\n--- Line panels, paired across cells at each x ---')
+    print_test_header('Panel @ x')
+
+    def _per_x(label, experiment, xcol, col, x_fmt, exclude_x=(), drop_last=False):
+        ref_tbl = _tbl_sort(_tbl_filter(_tbl_filter(combined, 'Model', 'OMSI'),
+                                        'Experiment', experiment), xcol)
+        if _tbl_len(ref_tbl) == 0:
+            return
+        xs = [float(x) for x in ref_tbl[xcol] if float(x) not in exclude_x]
+        if drop_last:
+            xs = xs[:-1]
+        def _by_pop(rows):
+            pcs  = _per_cell_metrics(rows) or [{}] * _tbl_len(rows)
+            pops = (rows['Population'].astype(float) if 'Population' in rows
+                    else np.zeros(_tbl_len(rows)))
+            return {float(pv): pc[col] for pv, pc in zip(pops, pcs) if col in pc}
+
+        for x in sorted(set(xs)):
+            ref = _by_pop(_tbl_filter(ref_tbl, xcol, x))
+            if not ref:
+                continue
+            for other in others:
+                oth_rows = _tbl_filter(_tbl_filter(_tbl_filter(combined, 'Model', other),
+                                                   'Experiment', experiment), xcol, x)
+                cur  = _by_pop(oth_rows) if _tbl_len(oth_rows) else {}
+                pops = [pv for pv in sorted(set(ref) & set(cur)) if len(ref[pv]) == len(cur[pv])]
+                if not pops:
+                    continue
+                print_test_row('{} @ {}'.format(label, x_fmt.format(x)), 'OMSI', other,
+                               signed_rank(np.concatenate([ref[pv] for pv in pops]),
+                                           np.concatenate([cur[pv] for pv in pops])))
+
+    for col, name in [(_PREC_COL, 'precision'), (_REC_COL, 'recall')]:
+        _per_x('A: ' + name, 'Tau_Sensitivity', 'Tau', col, 'tau={:g}s', drop_last=True)
+    if noise_cells is not None and _tbl_len(noise_cells) > 0:
+        snr_all = noise_cells['SNR'].astype(float)
+        for col, name in [(_PREC_COL, 'precision'), (_REC_COL, 'recall')]:
+            vals = noise_cells[col].astype(float)
+            ref_m = noise_cells['Model'] == 'OMSI'
+            pop_all = (noise_cells['Population'].astype(float) if 'Population' in noise_cells
+                       else np.zeros(len(snr_all)))
+            for snr in np.sort(np.unique(snr_all[ref_m]))[::-1]:
+                for other in others:
+                    oth_m = (noise_cells['Model'] == other) & (snr_all == snr)
+                    ref_parts, oth_parts = [], []
+                    for pv in np.unique(pop_all[ref_m & (snr_all == snr)]):
+                        r_ = vals[ref_m & (snr_all == snr) & (pop_all == pv)]
+                        o_ = vals[oth_m & (pop_all == pv)]
+                        if len(o_) and len(o_) == len(r_):
+                            ref_parts.append(r_); oth_parts.append(o_)
+                    if not ref_parts:
+                        continue
+                    print_test_row('A: {} @ SNR={:g}'.format(name, snr), 'OMSI', other,
+                                   signed_rank(np.concatenate(ref_parts), np.concatenate(oth_parts)))
+    for col, name in [(_PREC_COL, 'precision'), (_REC_COL, 'recall'),
+                      (_FBETA_COL, 'F_beta'), ('COSMIC', 'CosMIC')]:
+        _per_x('B: ' + name, 'Fs_Sensitivity', 'Fs', col, 'Fs={:g}Hz', exclude_x=(100.0,))
+
+    print('\n--- Accuracy panels, paired across populations at each x ---')
+    print('  Each value is one population\'s median across cells; population k of every')
+    print('  method ran on the same simulated cells. With n < 6 the smallest p is 0.0625.')
+    print_test_header('Panel @ x')
+
+    def _pop_medians(rows, col):
+        med, _ = _median_mad_rows(rows, col)
+        pops = rows['Population'].astype(float) if 'Population' in rows else np.full(len(med), np.nan)
+        return {float(pv): float(m) for pv, m in zip(pops, med) if np.isfinite(pv)}
+
+    n_pop_tests = 0
+    for label, experiment, xcol, cols, x_fmt, kw in [
+        ('A', 'Tau_Sensitivity', 'Tau', [(_PREC_COL, 'precision'), (_REC_COL, 'recall')],
+         'tau={:g}s', {'drop_last': True}),
+        ('B', 'Fs_Sensitivity',  'Fs',  [(_PREC_COL, 'precision'), (_REC_COL, 'recall'),
+                                         (_FBETA_COL, 'F_beta'), ('COSMIC', 'CosMIC')],
+         'Fs={:g}Hz', {'exclude_x': (100.0,)}),
+    ]:
+        ref_tbl = _tbl_filter(_tbl_filter(combined, 'Model', 'OMSI'), 'Experiment', experiment)
+        if _tbl_len(ref_tbl) == 0:
+            continue
+        xs = sorted(set(ref_tbl[xcol].astype(float)) - set(kw.get('exclude_x', ())))
+        if kw.get('drop_last'):
+            xs = xs[:-1]
+        for col, name in cols:
+            for x in xs:
+                ref = _pop_medians(_tbl_filter(ref_tbl, xcol, x), col)
+                for other in others:
+                    cur = _pop_medians(_tbl_filter(_tbl_filter(_tbl_filter(
+                        combined, 'Model', other), 'Experiment', experiment), xcol, x), col)
+                    pops = sorted(set(ref) & set(cur))
+                    if len(pops) < 2:
+                        continue
+                    n_pop_tests += 1
+                    print_test_row('{}: {} @ {}'.format(label, name, x_fmt.format(x)), 'OMSI', other,
+                                   signed_rank([ref[pv] for pv in pops], [cur[pv] for pv in pops]))
+    if noise_cells is not None and _tbl_len(noise_cells) > 0 and 'Population' in noise_cells:
+        snr_all = noise_cells['SNR'].astype(float)
+        pop_all = noise_cells['Population'].astype(float)
+        for col, name in [(_PREC_COL, 'precision'), (_REC_COL, 'recall')]:
+            vals = noise_cells[col].astype(float)
+
+            def _noise_pop_meds(model, snr):
+                m = (noise_cells['Model'] == model) & (snr_all == snr)
+                return {float(pv): float(np.nanmedian(vals[m & (pop_all == pv)]))
+                        for pv in np.unique(pop_all[m]) if np.isfinite(pv)}
+
+            for snr in np.sort(np.unique(snr_all))[::-1]:
+                ref = _noise_pop_meds('OMSI', snr)
+                for other in others:
+                    cur  = _noise_pop_meds(other, snr)
+                    pops = sorted(set(ref) & set(cur))
+                    if len(pops) < 2:
+                        continue
+                    n_pop_tests += 1
+                    print_test_row('A: {} @ SNR={:g}'.format(name, snr), 'OMSI', other,
+                                   signed_rank([ref[pv] for pv in pops], [cur[pv] for pv in pops]))
+    if n_pop_tests == 0:
+        print('  (none: only one population saved; run --mode tau-noise --populations N)')
+
+    print('\n--- Violin panel: CASCADE 7.5 Hz vs 30 Hz ---')
+    npz_path = os.path.join(data_dir, 'cascade_7p5_vs_30hz_data.npz')
+    if os.path.exists(npz_path):
+        d = np.load(npz_path)
+        ts7  = os.path.join(data_dir, 'cascade_samplerate_7.5hz_true_spikes.npz')
+        ts30 = os.path.join(data_dir, 'cascade_samplerate_30.0hz_true_spikes.npz')
+        paired = False
+        if os.path.exists(ts7) and os.path.exists(ts30):
+            s7  = np.load(ts7,  allow_pickle=True)['true_spikes']
+            s30 = np.load(ts30, allow_pickle=True)['true_spikes']
+            paired = len(s7) == len(s30) and all(
+                np.array_equal(np.asarray(a, dtype=float), np.asarray(b, dtype=float))
+                for a, b in zip(s7, s30))
+        if paired:
+            print('  Both rates share the same ground-truth cells: signed-rank, paired by cell.')
+        else:
+            print('  The two rates were simulated as different cells, so the samples are not')
+            print('  paired and a signed-rank test does not apply; Mann-Whitney rank-sum is used.')
+        test = signed_rank if paired else rank_sum
+        print_test_header('Metric')
+        for key, label in [('fb', 'F_beta'), ('cosmic', 'CosMIC')]:
+            print_test_row(label, '7.5 Hz', '30 Hz', test(d[f'{key}_7'], d[f'{key}_30']))
+    else:
+        print('  No data at {} (run --mode cascade-samplerate).'.format(npz_path))
+
+    print('\n  Figure 2 has no bar plots. p-values are uncorrected for multiple comparisons.')
+    print('  With n < 6 pairs the smallest two-sided signed-rank p is 0.0625.')
+
+
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
     """
     Print the values plotted in figure 2 without rendering the figure.
@@ -2454,7 +3116,6 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     noise_cells = _load_noise_cells(data_dir)
 
     all_models = ['OMSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
-    time_cols  = [('Time', 'Time (min)', '.3f', 60.0)]
     acc_cols   = [(_PREC_COL, 'Precision', '.3f', 1.0), (_REC_COL, 'Recall', '.3f', 1.0)]
 
     print('\n' + '=' * 72)
@@ -2462,12 +3123,12 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     print('=' * 72)
 
     print('\n--- Compute time vs # sweeps ---')
-    _print_experiment(combined, 'Sweeps', 'Sweeps', time_cols,
-                      ['OMSI', 'CaImAn MCMC'], x_label='Sweeps')
+    _print_time_experiment(combined, 'Sweeps', 'Sweeps', ['OMSI', 'CaImAn MCMC'],
+                           x_label='Sweeps')
 
     print('\n--- Compute time vs # cells ---')
-    _print_experiment(combined, 'Cell_Scaling', 'N_Cells', time_cols,
-                      all_models, x_label='Cells', full_tbl=combined)
+    _print_time_experiment(combined, 'Cell_Scaling', 'N_Cells', all_models,
+                           x_label='Cells', full_tbl=combined)
 
     print('\n--- Compute time vs recording duration ---')
     # Match the figure: CASCADE duration rows come from the alternate directory when available.
@@ -2475,8 +3136,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     if dur_cascade_tbl:
         not_cascade = np.array([not str(m).startswith('CASCADE') for m in combined['Model']], dtype=bool)
         dur_tbl = _tbl_concat([{k: v[not_cascade] for k, v in combined.items()}, dur_cascade_tbl])
-    _print_experiment(dur_tbl, 'Duration_Scaling', 'Duration', time_cols,
-                      all_models, x_scale=60.0, x_label='Dur (min)')
+    _print_time_experiment(dur_tbl, 'Duration_Scaling', 'Duration', all_models,
+                           x_scale=60.0, x_label='Dur (min)')
 
     print('\n--- Scaling fits (compute time) ---')
     print('  {:<18} {:<14} {:>8} {:>9}  {}'.format('Experiment', 'Model', 'Lin R^2', 'Poly R^2', 'Fit'))
@@ -2541,6 +3202,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
     else:
         print('  No data at {} (run --mode cascade-samplerate).'.format(npz_path))
 
+    _print_signed_rank_tests(combined, dur_tbl, noise_cells, data_dir)
+
 
 if __name__ == '__main__':
 
@@ -2549,7 +3212,7 @@ if __name__ == '__main__':
     )
     parser.add_argument('--mode', required=True,
                         choices=['test', 'plot', 'print', 'noise-cells', 'cascade-samplerate',
-                                 'fs-sensitivity'],
+                                 'fs-sensitivity', 'timing', 'tau-noise'],
                         help='"test" runs all benchmarks; "plot" generates the figure; '
                              '"print" prints the plotted values without rendering; '
                              '"noise-cells" runs only the noise sensitivity benchmark and writes '
@@ -2557,14 +3220,30 @@ if __name__ == '__main__':
                              '"cascade-samplerate" runs only the CASCADE 7.5Hz-vs-30Hz comparison '
                              'and writes cascade_7p5_vs_30hz_data.npz without touching other result files; '
                              '"fs-sensitivity" re-runs only the sample-rate sweep and replaces the '
-                             'Fs_Sensitivity rows of benchmark_params_partial.npz (tau rows are kept)')
+                             'Fs_Sensitivity rows of benchmark_params_partial.npz (tau rows are kept); '
+                             '"timing" re-runs only the sweeps, cell-count and duration timing '
+                             'benchmarks, --repeats times each; '
+                             '"tau-noise" re-runs only the tau and noise sweeps (bottom row of 2A) '
+                             'on --populations independent populations')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for reading/writing result files')
     parser.add_argument('--no-omsi',   action='store_true', help='Skip OMSI')
     parser.add_argument('--no-matlab',  action='store_true', help='Skip MATLAB')
     parser.add_argument('--no-oasis',   action='store_true', help='Skip OASIS')
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
+    parser.add_argument('--repeats', type=int, default=1,
+                        help='Repeats of each timing point (test and timing modes)')
+    parser.add_argument('--matlab-repeats', type=int, default=None,
+                        help='How many of those repeats also run CaImAn MCMC '
+                             '(default: min(repeats, 3)). Repeats after the first stop at '
+                             '{} cells and {} s; the larger points run once.'.format(
+                                 _MATLAB_REPEAT_MAX_CELLS, _MATLAB_REPEAT_MAX_DURATION))
+    parser.add_argument('--populations', type=int, default=1,
+                        help='Independent simulated populations for the tau, frame-rate and '
+                             'noise sweeps (test, tau-noise, noise-cells, fs-sensitivity modes)')
     args = parser.parse_args()
+    matlab_repeats = (min(args.repeats, 3) if args.matlab_repeats is None
+                      else args.matlab_repeats)
 
     with no_power_throttling(verbose=True):
         if args.mode == 'test':
@@ -2574,7 +3253,22 @@ if __name__ == '__main__':
                 run_matlab  = not args.no_matlab,
                 run_oasis   = not args.no_oasis,
                 run_cascade = not args.no_cascade,
+                repeats        = args.repeats,
+                matlab_repeats = matlab_repeats,
+                populations    = args.populations,
             )
+        elif args.mode == 'timing':
+            os.makedirs(args.data_dir, exist_ok=True)
+            timing_kw = dict(run_oasis   = not args.no_oasis,
+                             run_matlab  = not args.no_matlab,
+                             run_mine    = not args.no_omsi,
+                             run_cascade = not args.no_cascade,
+                             repeats        = args.repeats,
+                             matlab_repeats = matlab_repeats)
+            print('=== Sweeps benchmark ===')
+            benchmark_sweeps(args.data_dir, **timing_kw)
+            print('\n=== Scalability benchmark ===')
+            benchmark_scalability(args.data_dir, **timing_kw)
         elif args.mode == 'noise-cells':
             os.makedirs(args.data_dir, exist_ok=True)
             print('=== Noise sensitivity cell-level benchmark (cells_only) ===')
@@ -2585,6 +3279,7 @@ if __name__ == '__main__':
                 run_mine    = not args.no_omsi,
                 run_cascade = not args.no_cascade,
                 cells_only  = True,
+                populations = args.populations,
             )
         elif args.mode == 'cascade-samplerate':
             os.makedirs(args.data_dir, exist_ok=True)
@@ -2600,7 +3295,19 @@ if __name__ == '__main__':
                 run_mine    = not args.no_omsi,
                 run_cascade = not args.no_cascade,
                 experiments = ('fs',),
+                populations = args.populations,
             )
+        elif args.mode == 'tau-noise':
+            os.makedirs(args.data_dir, exist_ok=True)
+            acc_kw = dict(run_oasis   = not args.no_oasis,
+                          run_matlab  = not args.no_matlab,
+                          run_mine    = not args.no_omsi,
+                          run_cascade = not args.no_cascade,
+                          populations = args.populations)
+            print('=== Tau sensitivity ===')
+            benchmark_params(args.data_dir, experiments=('tau',), **acc_kw)
+            print('\n=== Noise sensitivity ===')
+            benchmark_noise_sensitivity(args.data_dir, **acc_kw)
         elif args.mode == 'print':
             print_stats(data_dir=args.data_dir)
         else:

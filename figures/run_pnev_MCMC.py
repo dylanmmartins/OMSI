@@ -123,6 +123,7 @@ try
     all_init = cell(n_cells, 1);
     all_probs = zeros(n_cells, n_frames);
     model_traces = zeros(n_cells, n_frames);
+    cell_times = nan(n_cells, 1);
 
     set(0, 'DefaultFigureVisible', 'off');
     fprintf('Running MCMC on %d cells...\\n', n_cells);
@@ -145,7 +146,9 @@ try
                 params.init = SAM;
                 all_init{i} = SAM.spiketimes_;
             end
+            t_cell = tic;
             res = cont_ca_sampler(y, params);
+            cell_times(i) = toc(t_cell);
 
             samples = res.ss;
             n_post = length(samples);
@@ -651,6 +654,8 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         Run a copy of cont_ca_sampler whose rise-time Metropolis step scores the
         proposed calcium shape (Gs_) instead of the current one (Gs). The
         installed CaImAn is not modified.
+    return_cell_times : bool, optional
+        If True, also return each cell's cont_ca_sampler time in seconds.
 
     Returns
     -------
@@ -668,6 +673,9 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     init_spikes : list of np.ndarray
         Only when return_samples is True and init_shifts is given: per cell, the
         shifted starting spike times in 0-based frame units.
+    cell_times : np.ndarray
+        Only if return_cell_times: seconds spent in cont_ca_sampler per cell,
+        timed inside MATLAB (NaN for cells that errored or on failure).
     """
 
     if dff.ndim == 1:
@@ -693,7 +701,7 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         out = out + ([[] for _ in range(n_cells)],)
         if init_shifts is not None and inits is None:
             out = out + ([np.array([]) for _ in range(n_cells)],)
-        return out
+        return out + (np.full(n_cells, np.nan),) if return_cell_times else out
 
     exe = find_matlab(matlab_exe)
     if exe is None:
@@ -824,3 +832,8 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     init_spikes = [np.asarray(res['all_init'][i][0], dtype=np.float64).ravel() - 1.0
                    for i in range(n_cells)]
     return final_spikes, model_traces, all_probs, sweeps_per_cell, samples, init_spikes
+    if return_cell_times:
+        cell_times = (np.asarray(res['cell_times'], dtype=float).ravel()
+                      if 'cell_times' in res else np.full(n_cells, np.nan))
+        return final_spikes, model_traces, all_probs, sweeps_per_cell, cell_times
+    return final_spikes, model_traces, all_probs, sweeps_per_cell
