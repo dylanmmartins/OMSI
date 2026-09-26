@@ -544,6 +544,9 @@ def get_init_sample(Y, params):
                 masses, centers = masses[keep], centers[keep]
 
     # Centroid gives sub-frame position; reflect any that land outside bounds.
+    # Centroid frame j used directly as sampler time. Sampler times are 1-based, so
+    # this puts the spike at 0-based frame j - 1 -- which is about right, since the
+    # fitted rise makes NNLS place its impulse roughly a frame after the true spike.
     spiketimes_ = np.abs(dt * centers)
     oob = spiketimes_ >= T * dt
     spiketimes_[oob] = 2.0 * T * dt - spiketimes_[oob]
