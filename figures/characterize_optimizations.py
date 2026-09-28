@@ -60,6 +60,10 @@ run_add_move_sweep
     Run sweep over add/remove proposal counts and save results.
 _band
     Median line with +/- MAD band.
+_mean_boot
+    Mean over cells with a 95% bootstrap interval, per row.
+_sweeps_mean
+    Mean sweep count over cells with a 95% bootstrap band.
 _default_line
     Dashed vertical line at a default parameter value.
 plot_combined_opt_add_move
@@ -247,12 +251,10 @@ def run_T_supp_sweep(data_dir):
     os.makedirs(data_dir, exist_ok=True)
     out_path = os.path.join(data_dir, 'T_supp_sweep.npz')
 
-    print('Generating synthetic population '
+    print('Generating figure-1 population '
           '(n={}, T={}s, fs={}Hz, tau={}s)...'.format(
               _N_CELLS, _DURATION, _FS, _TAU))
-    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-        n_cells=_N_CELLS, fs=_FS, duration=_DURATION, tau=_TAU
-    )
+    dff, true_spikes, _ = _fig1_population(_N_CELLS, _DURATION)
     true_events = [helpers.make_event_ground_truth(s, _TAU) for s in true_spikes]
     n_frames = dff.shape[1]
 
@@ -302,6 +304,7 @@ def run_T_supp_sweep(data_dir):
                 'mad_time':        float(_mad(per_cell_t)),
                 'med_nsweeps':     float(np.median(nsweeps)),
                 'mad_nsweeps':     float(_mad(nsweeps)),
+                'nsweeps_cells':   np.asarray(nsweeps, dtype=float),
                 'med_f1_window':   float(np.nanmedian(fb)),
                 'mad_f1_window':   float(_mad(fb)),
                 'med_f1_event':    float(np.nanmedian(f1_e)),
@@ -332,6 +335,7 @@ def run_T_supp_sweep(data_dir):
         mad_time     = np.array([r['mad_time']         for r in rows]),
         med_nsweeps = np.array([r['med_nsweeps']     for r in rows]),
         mad_nsweeps  = np.array([r['mad_nsweeps']      for r in rows]),
+        nsweeps_cells = np.stack([r['nsweeps_cells'] for r in rows]),
         med_f1      = np.array([r['med_f1_window']   for r in rows]),
         mad_f1       = np.array([r['mad_f1_window']    for r in rows]),
         med_cosmic  = np.array([r['med_cosmic']      for r in rows]),
@@ -1166,22 +1170,56 @@ _TEST_B           = 5
 _TEST_WIN         = 5
 _TEST_CHECK_EVERY = 5
 
-# Default generate_synthetic_data() population is too easy to show a sweep
-# effect (median SNR ~50, almost all cells far above the SNR=2.0 production
-# gate) -- a chain barely past burn-in already lands on the right answer
-# regardless of conv_tol/burn_tol. Override snr per-cell here, test-only, to
-# resemble a real post-filter population: most cells sit just above the gate,
-# with a shrinking tail of better-quality cells, rather than a flat box.
-_TEST_SNR_FLOOR = 2.0   # Matches the production skip_snr gate.
-_TEST_SNR_SCALE = 2.0   # Exponential decay scale above the floor.
-_TEST_SNR_MAX   = 20.0  # Clips the rare long tail.
-
 # Test-only cell count and session length for the conv_tol/burn_tol sweeps --
 # 100 cells over 20 min (vs. the default _N_CELLS=200 / _DURATION=2400s used
 # elsewhere) matches a typical real recording length and keeps these sweeps
 # fast to re-run.
 _TEST_N_CELLS  = 100
 _TEST_DURATION = 1200.0
+
+# Figure 1's simulation settings (figure1.py), so sweeps run on the same kind of
+# population as the main benchmark: per-cell SNR log-uniform over SNR_RANGE, spike
+# amplitude and decay-time jitter, and slow baseline drift.
+_FIG1_SNR_RANGE       = (2.0, 20.0)
+_FIG1_AMP_CV          = 0.1
+_FIG1_TAU_CV          = 0.05
+_FIG1_DRIFT_SD        = 0.2
+_FIG1_DRIFT_TIMESCALE = 60.0
+
+
+def _fig1_population(n_cells, duration, snr=None):
+    """ Simulate a population with figure 1's settings.
+
+    Parameters
+    ----------
+    n_cells : int
+        Number of cells.
+    duration : float
+        Recording duration in seconds.
+    snr : float, optional
+        Fixed SNR for every cell. None draws per-cell SNR log-uniform over
+        _FIG1_SNR_RANGE, as figure 1 does.
+
+    Returns
+    -------
+    dff : np.ndarray
+        Noisy dF/F traces, shape (n_cells, n_frames).
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds.
+    snr : np.ndarray
+        Per-cell SNR used.
+    """
+
+    if snr is None:
+        lo, hi = _FIG1_SNR_RANGE
+        snr = np.exp(np.random.uniform(np.log(lo), np.log(hi), n_cells))
+    else:
+        snr = np.full(n_cells, float(snr))
+    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
+        n_cells=n_cells, fs=_FS, duration=duration, tau=_TAU, snr=snr,
+        amp_cv=_FIG1_AMP_CV, tau_cv=_FIG1_TAU_CV, drift_sd=_FIG1_DRIFT_SD,
+        drift_timescale=_FIG1_DRIFT_TIMESCALE)
+    return dff, true_spikes, snr
 
 # None of these sweeps override max_sweeps, so they all run against the
 # sampler's default cap -- used to draw a reference line on sweep-count
@@ -1312,7 +1350,7 @@ def _save_tol_sweep(out_path, rows, default_val):
 
 
 def run_conv_tol_sweep(data_dir):
-    """Run a convergence tolerance sweep on a synthetic low-SNR population and save results.
+    """Run a convergence tolerance sweep on a figure-1 population and save results.
 
     Parameters
     ----------
@@ -1322,21 +1360,14 @@ def run_conv_tol_sweep(data_dir):
     os.makedirs(data_dir, exist_ok=True)
     out_path = os.path.join(data_dir, 'conv_tol_sweep.npz')
 
-    print('Generating synthetic population '
-          '(n={}, T={}s, fs={}Hz, tau={}s, '
-          'snr~floor={}+exp({}))...'.format(
-              _TEST_N_CELLS, _TEST_DURATION, _FS, _TAU,
-              _TEST_SNR_FLOOR, _TEST_SNR_SCALE))
-    snr = np.clip(_TEST_SNR_FLOOR + np.random.exponential(_TEST_SNR_SCALE, size=_TEST_N_CELLS),
-                  _TEST_SNR_FLOOR, _TEST_SNR_MAX)
-    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-        n_cells=_TEST_N_CELLS, fs=_FS, duration=_TEST_DURATION, tau=_TAU, snr=snr)
+    print('Generating figure-1 population (n={}, T={}s, fs={}Hz, tau={}s)...'.format(
+        _TEST_N_CELLS, _TEST_DURATION, _FS, _TAU))
+    dff, true_spikes, _ = _fig1_population(_TEST_N_CELLS, _TEST_DURATION)
 
-    # Measured mean_sweeps vs. conv_tol on this population: pinned at
-    # max_sweeps=2000 for everything from default_val/1000 up through
-    # ~default_val*10; the real decline runs from default_val itself out to
-    # default_val*1000. Range narrowed to where the curve actually moves.
-    grid = _build_tol_grid(_DEFAULT_CONV_TOL, lower_mult=1.0, upper_mult=1000.0)
+    # Spans stricter and looser than the default. At the default, runs already stop
+    # at the earliest check min_sweeps allows, so only stricter values can move
+    # the stop point; looser ones are kept to show the flat side.
+    grid = _build_tol_grid(_DEFAULT_CONV_TOL, lower_mult=0.001, upper_mult=10.0)
     print('  Sweep ({} conv_tol values): {}'.format(
         len(grid), ['{:.2e}'.format(v) for v in grid]))
 
@@ -1348,7 +1379,7 @@ def run_conv_tol_sweep(data_dir):
 
 
 def run_burn_tol_sweep(data_dir):
-    """Run a burn-in tolerance sweep on a synthetic low-SNR population and save results.
+    """Run a burn-in tolerance sweep on a figure-1 population and save results.
 
     Parameters
     ----------
@@ -1358,15 +1389,9 @@ def run_burn_tol_sweep(data_dir):
     os.makedirs(data_dir, exist_ok=True)
     out_path = os.path.join(data_dir, 'burn_tol_sweep.npz')
 
-    print('Generating synthetic population '
-          '(n={}, T={}s, fs={}Hz, tau={}s, '
-          'snr~floor={}+exp({}))...'.format(
-              _TEST_N_CELLS, _TEST_DURATION, _FS, _TAU,
-              _TEST_SNR_FLOOR, _TEST_SNR_SCALE))
-    snr = np.clip(_TEST_SNR_FLOOR + np.random.exponential(_TEST_SNR_SCALE, size=_TEST_N_CELLS),
-                  _TEST_SNR_FLOOR, _TEST_SNR_MAX)
-    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-        n_cells=_TEST_N_CELLS, fs=_FS, duration=_TEST_DURATION, tau=_TAU, snr=snr)
+    print('Generating figure-1 population (n={}, T={}s, fs={}Hz, tau={}s)...'.format(
+        _TEST_N_CELLS, _TEST_DURATION, _FS, _TAU))
+    dff, true_spikes, _ = _fig1_population(_TEST_N_CELLS, _TEST_DURATION)
 
     # Measured mean_sweeps vs. burn_tol on this population: pinned at
     # max_sweeps=2000 below ~default_val/500 (burn-in itself never
@@ -1653,11 +1678,7 @@ def run_add_move_sweep(data_dir):
     print('add_move sweep: {} (default={}, T={} frames, {} cells)'.format(
         grid, default_val, n_frames, _ADD_MOVE_N_CELLS))
 
-    # Same low-SNR population as the tolerance sweeps.
-    snr = np.clip(_TEST_SNR_FLOOR + np.random.exponential(_TEST_SNR_SCALE, size=_ADD_MOVE_N_CELLS),
-                  _TEST_SNR_FLOOR, _TEST_SNR_MAX)
-    dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-        n_cells=_ADD_MOVE_N_CELLS, fs=_FS, duration=_ADD_MOVE_DURATION, tau=_TAU, snr=snr)
+    dff, true_spikes, _ = _fig1_population(_ADD_MOVE_N_CELLS, _ADD_MOVE_DURATION)
 
     n = len(grid)
     med_fb, mad_fb = np.full(n, np.nan), np.full(n, np.nan)
@@ -1709,6 +1730,55 @@ def _band(ax, x, y, e, color, label=None, clip01=False):
     ax.plot(x, y, '.-', color=color, zorder=3, label=label)
 
 
+def _mean_boot(v, n_boot=1000, seed=0):
+    """ Mean over cells with a 95% bootstrap interval, per row.
+
+    Parameters
+    ----------
+    v : np.ndarray
+        Per-cell values, shape (n_points, n_cells). NaNs are ignored.
+    n_boot : int, optional
+        Bootstrap resamples of cells.
+    seed : int, optional
+        Random seed.
+
+    Returns
+    -------
+    mean, lo, hi : np.ndarray
+        Mean and 2.5th/97.5th bootstrap percentiles, each shape (n_points,).
+    """
+
+    rng = np.random.RandomState(seed)
+    mean, lo, hi = (np.full(len(v), np.nan) for _ in range(3))
+    for i, row in enumerate(np.asarray(v, dtype=float)):
+        row = row[np.isfinite(row)]
+        if len(row) == 0:
+            continue
+        boots = row[rng.randint(0, len(row), (n_boot, len(row)))].mean(axis=1)
+        mean[i] = row.mean()
+        lo[i], hi[i] = np.percentile(boots, [2.5, 97.5])
+    return mean, lo, hi
+
+
+def _sweeps_mean(ax, x, d, name, idx=None):
+    """ Mean sweep count over cells with a 95% bootstrap band.
+
+    Auto-stop only checks every check_every sweeps and mostly stops at min_sweeps
+    or runs to max_sweeps, so a median over cells jumps between those values; the
+    mean shows how the mix shifts.
+    """
+
+    if 'nsweeps_cells' not in d.files:
+        raise KeyError('{} has no per-cell sweep counts -- rerun its test mode.'.format(name))
+    cells = d['nsweeps_cells'] if idx is None else d['nsweeps_cells'][idx]
+    m, lo, hi = _mean_boot(cells)
+    ok = np.isfinite(m)
+    ax.fill_between(x[ok], lo[ok], hi[ok], color=_COLOR, alpha=0.2, linewidth=0)
+    ax.plot(x[ok], m[ok], '.-', color=_COLOR, zorder=3)
+    ax.set_ylabel('sweep count (mean)')
+    ax.set_ylim(0, _MAX_SWEEPS_DEFAULT)
+
+
 def _default_line(ax, x):
     """Dashed vertical line at a default parameter value."""
 
@@ -1723,7 +1793,9 @@ def plot_combined_opt_add_move(data_dir):
     proposals per sweep. Row 2: T_supp. Rows 3-4: convergence and burn-in
     thresholds, time and F-beta (their sweep counts are constant or track time).
     Row 5: SNR threshold. F-beta and CosMIC share axes wherever both exist; the
-    legend sits in the first panel that has both.
+    legend sits in the first panel that has both. Time and accuracy are median
+    +/- MAD over cells; sweep counts are the mean with a 95% bootstrap band,
+    since auto-stop's sweep count is nearly binary per cell.
 
     Parameters
     ----------
@@ -1790,17 +1862,17 @@ def plot_combined_opt_add_move(data_dir):
     xs = d['T_supp'].astype(float)[idx] / _FS
     for k, (y, e, ylabel, color, ylim) in enumerate([
             (d['med_time'], d['mad_time'], 'time per cell (sec)', _COLOR, (0, 500)),
-            (d['med_f1'], d['mad_f1'], '$F_\\beta$', _FB_COLOR, (0, 1)),
-            (d['med_nsweeps'], d['mad_nsweeps'], 'sweep count', _COLOR,
-             (0, _MAX_SWEEPS_DEFAULT))]):
+            (d['med_f1'], d['mad_f1'], '$F_\\beta$', _FB_COLOR, (0, 1))]):
         ax = fig.add_subplot(gs[1, k])
         _band(ax, xs, y[idx], e[idx], color)
+        ax.set_ylim(*ylim)
+        ax.set_ylabel(ylabel)
+    _sweeps_mean(fig.add_subplot(gs[1, 2]), xs, d, 'T_supp_sweep.npz', idx)
+    for ax in fig.axes[-3:]:
         _default_line(ax, int(d['default_supp'][0]) / _FS)
         ax.set_xscale('log')
         ax.set_xlim(xs.min(), xs.max())
-        ax.set_ylim(*ylim)
         ax.set_xlabel('$T_{supp}$ (sec)')
-        ax.set_ylabel(ylabel)
 
     # Rows 3-4: convergence and burn-in thresholds. npz defaults predate the current
     # ones, so the module defaults mark the dashed lines.
@@ -1832,10 +1904,7 @@ def plot_combined_opt_add_move(data_dir):
     ax.set_ylabel('accuracy')
     ax.set_ylim(0, 1)
     ax_n = fig.add_subplot(gs[4, 1])
-    ok = np.isfinite(d['med_nsweeps']) & np.isfinite(d['mad_nsweeps'])
-    _band(ax_n, snr[ok], d['med_nsweeps'][ok], d['mad_nsweeps'][ok], _COLOR)
-    ax_n.set_ylabel('sweep count')
-    ax_n.set_ylim(0, _MAX_SWEEPS_DEFAULT)
+    _sweeps_mean(ax_n, snr, d, 'snr_threshold_sweep.npz')
     for a in (ax, ax_n):
         _default_line(a, thr)
         a.set_xlim(snr.min(), snr.max())
@@ -1946,11 +2015,8 @@ def run_add_move_duration_sweep(data_dir, n_workers=None):
 
     # One long recording, cropped to each duration, so every duration scores the same cells.
     np.random.seed(_ADM_SEED)
-    snr = np.clip(_TEST_SNR_FLOOR + np.random.exponential(_TEST_SNR_SCALE, size=nC),
-                  _TEST_SNR_FLOOR, _TEST_SNR_MAX)
     # +0.5 frame so int(fs * duration) inside the generator can't round down.
-    dff_full, _, _, _, _, _ = generate_synthetic_data(
-        n_cells=nC, fs=_FS, duration=(max(_ADM_FRAMES) + 0.5) / _FS, tau=_TAU, snr=snr)
+    dff_full, _, snr = _fig1_population(nC, (max(_ADM_FRAMES) + 0.5) / _FS)
     assert dff_full.shape[1] == max(_ADM_FRAMES), dff_full.shape
 
     with Pool(n_workers) as pool:
@@ -2281,12 +2347,10 @@ def run_snr_threshold_sweep(data_dir):
         'burn_tol':  _DEFAULT_BURN_TOL,
     }
 
+    nsweeps_cells = np.full((_SNR_N_LEVELS, _SNR_N_CELLS), np.nan)
     for k, snr_val in enumerate(snr_levels):
         print('\n  [{}/{}] SNR={:.3f} ...'.format(k + 1, _SNR_N_LEVELS, snr_val))
-        dff, true_spikes, _, _, _, _ = generate_synthetic_data(
-            n_cells=_SNR_N_CELLS, fs=_FS, duration=_SNR_DURATION,
-            tau=_TAU, snr=float(snr_val),
-        )
+        dff, true_spikes, _ = _fig1_population(_SNR_N_CELLS, _SNR_DURATION, snr=snr_val)
         try:
             res  = OMSI.deconv(dff, params=params, true_spikes=true_spikes, benchmark=True)
             pred = res['optim_spikes']
@@ -2297,6 +2361,7 @@ def run_snr_threshold_sweep(data_dir):
             mad_cosmic[k]  = float(_mad(cosmic_v))
             med_nsweeps[k] = float(np.median(res['optim_nsamples']))
             mad_nsweeps[k] = float(_mad(res['optim_nsamples']))
+            nsweeps_cells[k] = np.asarray(res['optim_nsamples'], dtype=float)
 
             if res['optim_precision'] is not None:
                 fb_arr = np.array([
@@ -2323,6 +2388,7 @@ def run_snr_threshold_sweep(data_dir):
         mad_cosmic   = mad_cosmic,
         med_nsweeps = med_nsweeps,
         mad_nsweeps  = mad_nsweeps,
+        nsweeps_cells = nsweeps_cells,
         threshold    = np.array([_SNR_THRESHOLD]),
     )
     print('\nSaved to {}.'.format(out_path))
@@ -2531,12 +2597,12 @@ if __name__ == '__main__':
             plot_snr_threshold_sweep(args.data_dir)
         elif args.mode == 'add-move-test':
             run_add_move_sweep(args.data_dir)
-        elif args.mode == 'add-move-plot':
+        elif args.mode == 'add-move-plot':  # this is figS1
             plot_add_move_sweep(args.data_dir)
         elif args.mode == 'add-move-dur-test':
             run_add_move_duration_sweep(args.data_dir)
         elif args.mode == 'add-move-dur-plot':
-            plot_add_move_duration(args.data_dir)
+            plot_add_move_duration(args.data_dir) # this is figS1
         elif args.mode == 'combined-opt-add-move-test':
             run_combined_opt_add_move(args.data_dir)
         elif args.mode == 'snr-stats':

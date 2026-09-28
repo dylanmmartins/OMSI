@@ -10,11 +10,6 @@ To run inference:
 To run only CASCADE (keeps all other results):
     $ python figure3.py --mode cascade --data-dir /path/to/results
 
-To also benchmark the cells excluded by the kurtosis threshold (included in
-the figure automatically once written; delete allen_lowkurt_results_*.npz to
-leave them out again):
-    $ python figure3.py --mode add-bad-cells --data-dir /path/to/results
-
 To create figure:
     $ python figure3.py --mode plot --data-dir /path/to/results
 
@@ -46,30 +41,24 @@ compute_accuracy_window
     Compute precision, recall, and F1 using a temporal tolerance window.
 _run_cascade_inference
     Run CASCADE spike inference via subprocess and return probs and spike times.
-_kurtosis_filter
-    Keep only cells whose excess kurtosis passes the benchmark threshold.
-_low_kurtosis_cells
-    Return the cells that _kurtosis_filter excludes.
 _omsi_params
     OMSI parameter dict used for every Allen dataset group.
-_lowkurt_path
-    Path of the low-kurtosis results file for one dataset group.
-_run_and_save_lowkurt_group
-    Run all four methods on the excluded low-kurtosis cells of one group.
 _run_and_save_cascade_group
-    Run CASCADE on one filtered Allen dataset group and save its results.
+    Run CASCADE on one Allen dataset group and save its results.
 _run_and_save_allen_group
     Run all inference methods on one Allen dataset group and save results.
+_run_and_save_oasis_group
+    Run OASIS on one Allen dataset group and save its results.
 _run_and_save_omsi_group
-    Run OMSI and OASIS on one Allen dataset group and save results.
+    Run OMSI on one Allen dataset group and save results.
 test_figure
     Run full benchmark across all Allen dataset groups.
 test_omsi
     Run OMSI-only benchmark across all Allen dataset groups.
 test_cascade
     Run CASCADE-only benchmark across all Allen dataset groups.
-test_add_bad_cells
-    Run all four methods on the cells excluded by the kurtosis threshold.
+test_oasis
+    Run OASIS-only benchmark across all Allen dataset groups.
 _load_and_preprocess_raw
     Preprocess raw Allen H5 files into dF/F arrays and spike times.
 _build_cascade_lookup
@@ -100,8 +89,6 @@ _recompute_all_metrics_from_traces
     Recompute precision, recall, F-beta, and CosMIC from saved trace NPZ files.
 _metrics_from_spikes
     Per-cell accuracy metrics for one method, keyed by record field name.
-_load_lowkurt_records
-    Build result records for the low-kurtosis cells from their saved outputs.
 _load_all_results
     Load all benchmark records and recompute their metrics from saved traces.
 plot_figure
@@ -117,7 +104,7 @@ _print_omsi_snr_exclusions
 print_stats
     Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
 main
-    Parse CLI arguments and dispatch to test, omsi, cascade, add-bad-cells, plot, or print mode.
+    Parse CLI arguments and dispatch to test, omsi, cascade, plot, or print mode.
 
 
 DMM, March 2026
@@ -210,10 +197,6 @@ _GENO_LS         = {'Cux2': '-', 'Emx1': '--', 'tetO': ':'}
 _GENO_LS_DEFAULT = ':'
 
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
-
-# Cells with excess kurtosis below this are left out of the main benchmark
-# (see _kurtosis_filter); --mode add-bad-cells benchmarks them separately.
-_KURTOSIS_THRESHOLD = 0.5
 
 # OMSI skips inference (returns no spikes) for traces below this SNR; see
 # cont_ca_sampler in src/OMSI/sampler.py.
@@ -553,65 +536,13 @@ def _run_cascade_inference(dff, fs, label, data_dir):
     output_path = os.path.join(data_dir, f'fig3_cascade_{label}_output.npz')
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', script,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
          '--mode', 'inference', '--input', input_path, '--output', output_path],
         check=True)
     result = np.load(output_path, allow_pickle=True)
     return (result['cascade_probs'],
             list(result['cascade_spikes']),
             float(result['cascade_time']))
-
-
-def _kurtosis_filter(dff, true_spikes, label):
-    """Keep only cells whose excess kurtosis passes the benchmark threshold.
-
-    Every mode applies this same filter, so cell_id values line up across the
-    result files of different methods.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-    label : str
-        Dataset label, used in messages.
-
-    Returns
-    -------
-    tuple or None
-        (dff, true_spikes, good_idx) for the passing cells, or None if none pass.
-    """
-    n_cells = dff.shape[0]
-    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
-    good_idx = np.where(cell_kurtosis >= _KURTOSIS_THRESHOLD)[0]
-    print("  Kurtosis filter: {}/{} cells pass (excess kurtosis >= {}).".format(
-        len(good_idx), n_cells, _KURTOSIS_THRESHOLD))
-    if len(good_idx) == 0:
-        print("  WARNING: No cells pass kurtosis filter for {}, skipping.".format(label))
-        return None
-    return dff[good_idx], [true_spikes[i] for i in good_idx], good_idx
-
-
-def _low_kurtosis_cells(dff, true_spikes):
-    """Return the cells that _kurtosis_filter excludes.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-
-    Returns
-    -------
-    tuple
-        (dff, true_spikes, bad_idx) for cells with excess kurtosis below
-        _KURTOSIS_THRESHOLD; bad_idx may be empty.
-    """
-    cell_kurtosis = OMSI.helpers.compute_kurtosis(dff)
-    bad_idx = np.where(~(cell_kurtosis >= _KURTOSIS_THRESHOLD))[0]
-    return dff[bad_idx], [true_spikes[i] for i in bad_idx], bad_idx
 
 
 def _omsi_params(fs, tau):
@@ -639,116 +570,8 @@ def _omsi_params(fs, tau):
     }
 
 
-def _lowkurt_path(data_dir, label):
-    """Path of the low-kurtosis results file for one dataset group."""
-    return os.path.join(data_dir, f'allen_lowkurt_results_{label}.npz')
-
-
-def _run_and_save_lowkurt_group(dff, true_spikes, fs, tau, label, data_dir,
-                                run_matlab=True):
-    """Run all four methods on the excluded low-kurtosis cells of one group.
-
-    Everything goes into one file, allen_lowkurt_results_<label>.npz, holding
-    the traces, ground truth, original cell ids, and each method's output. The
-    file is rewritten after every method, and methods already in it are
-    skipped, so a crash or a re-run only repeats unfinished work. Scores are
-    computed when the figure is made (see _load_lowkurt_records).
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        Full (unfiltered) dF/F traces of the group, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-    fs : float
-        Sampling frequency in Hz.
-    tau : float
-        Calcium decay time constant in seconds.
-    label : str
-        Dataset label, matching the one used by test mode.
-    data_dir : str
-        Directory for output NPZ files.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC (default True).
-    """
-    dff, true_spikes, bad_idx = _low_kurtosis_cells(dff, true_spikes)
-    print("  {} cells below the kurtosis threshold.".format(len(bad_idx)))
-    if len(bad_idx) == 0:
-        return
-
-    path  = _lowkurt_path(data_dir, label)
-    state = {}
-    if os.path.exists(path):
-        # Read fully and close: on Windows an open .npz blocks the os.replace below.
-        with np.load(path, allow_pickle=True) as prev:
-            prev_state = {k: prev[k] for k in prev.files}
-        if np.array_equal(prev_state['cell_ids'], bad_idx):
-            state = prev_state
-            print("  Resuming {} (already has: {}).".format(
-                path, ', '.join(k[len('time_'):] for k in state if k.startswith('time_'))))
-    state.update({'dff': dff, 'true_spikes': np.array(true_spikes, dtype=object),
-                  'cell_ids': bad_idx, 'fs': fs, 'tau': tau})
-
-    def _save():
-        # Write to a temporary name first so a crash mid-write cannot leave a
-        # truncated file; the temporary name does not match the loader's glob.
-        tmp = os.path.join(data_dir, f'tmp_lowkurt_{label}.npz')
-        np.savez(tmp, **state)
-        os.replace(tmp, path)
-
-    if 'time_omsi' not in state:
-        print("  Running OMSI...")
-        t0 = time.time()
-        optim_dict = OMSI.deconv(dff, _omsi_params(fs, tau), true_spikes=true_spikes,
-                                 benchmark=True)
-        state['my_probs']  = optim_dict['optim_prob']
-        state['my_spikes'] = np.array(list(optim_dict['optim_spikes']), dtype=object)
-        state['time_omsi'] = time.time() - t0
-        _save()
-
-    if 'time_oasis' not in state:
-        print("  Running OASIS...")
-        t0 = time.time()
-        diff   = np.diff(dff, axis=1)
-        sigmas = np.maximum(np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2)), 1e-9)
-        g = np.exp(-1 / (fs * tau))
-        state['oasis_probs'] = np.array([
-            deconvolve(dff[i], g=(g,), sn=sigmas[i], penalty=1)[1]
-            for i in range(dff.shape[0])])
-        state['time_oasis'] = time.time() - t0
-        _save()
-
-    if run_matlab and 'time_matlab' not in state:
-        print("  Running MATLAB...")
-        t0 = time.time()
-        _, _, trad_probs, sweeps = run_matlab_pnevMCMC(
-            dff, fs=fs, tau=tau, n_sweeps=500, true_spikes=true_spikes)
-        if np.all(np.asarray(sweeps) == 0):
-            # run_matlab_pnevMCMC signals failure with zero sweeps rather than raising.
-            print("  WARNING: MATLAB returned no result for {}; not saved.".format(label))
-        else:
-            state['trad_probs']  = trad_probs
-            state['time_matlab'] = time.time() - t0
-            _save()
-
-    if 'time_cascade' not in state:
-        print("  Running CASCADE (subprocess)...")
-        try:
-            cascade_probs, cascade_spikes, time_cascade = _run_cascade_inference(
-                dff, fs, f'{label}_lowkurt', data_dir)
-            state['cascade_probs']  = cascade_probs
-            state['cascade_spikes'] = np.array(cascade_spikes, dtype=object)
-            state['time_cascade']   = time_cascade
-            _save()
-        except subprocess.CalledProcessError as exc:
-            print("  WARNING: CASCADE subprocess failed for {}: {}.".format(label, exc))
-
-    print("  Saved low-kurtosis results: {}.".format(path))
-
-
-def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx,
-                                label, data_dir):
-    """Run CASCADE on one filtered Allen dataset group and save its results.
+def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, label, data_dir):
+    """Run CASCADE on one Allen dataset group and save its results.
 
     Writes allen_data_results_cascade_<label>.npz (per-cell records) and
     allen_data_results_cascade_<label>_traces.npz (probabilities and spikes).
@@ -756,17 +579,15 @@ def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx
     Parameters
     ----------
     dff : np.ndarray
-        Kurtosis-filtered dF/F traces, shape (n_cells, n_frames).
+        dF/F traces, shape (n_cells, n_frames).
     true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds for the filtered cells.
+        Ground-truth spike times in seconds, one array per cell.
     true_events : list of np.ndarray
-        Event ground truth for the filtered cells.
+        Event ground truth, one array per cell.
     fs : float
         Sampling frequency in Hz.
     tau : float
         Calcium decay time constant in seconds.
-    good_idx : np.ndarray
-        Original cell indices of the filtered cells.
     label : str
         Dataset label used for output file naming.
     data_dir : str
@@ -793,7 +614,7 @@ def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx
         cas_results = []
         for i in range(n_cells):
             cas_results.append({
-                'model': 'CASCADE', 'tau': tau, 'cell_id': int(good_idx[i]),
+                'model': 'CASCADE', 'tau': tau, 'cell_id': i,
                 'time': time_cascade / n_cells,
                 'f1': f1_cas[i], 'precision': prec_cas[i], 'recall': rec_cas[i],
                 'f1_window': f1_cas_w[i], 'precision_window': prec_cas_w[i],
@@ -823,6 +644,96 @@ def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx
         print("  WARNING: CASCADE subprocess failed for {}: {}.".format(label, exc))
 
 
+def _run_and_save_oasis_group(dff, true_spikes, true_events, fs, tau, label, data_dir):
+    """Run OASIS on one Allen dataset group and save its results.
+
+    OASIS estimates its own AR(1) decay for each cell; tau is only used to
+    label the records. Writes allen_data_results_oasis_<label>.npz (per-cell
+    records) and allen_data_results_oasis_<label>_traces.npz (deconvolved
+    signal and spikes), so re-running OASIS never touches other methods' files.
+
+    Parameters
+    ----------
+    dff : np.ndarray
+        dF/F traces, shape (n_cells, n_frames).
+    true_spikes : list of np.ndarray
+        Ground-truth spike times in seconds, one array per cell.
+    true_events : list of np.ndarray
+        Event ground truth, one array per cell.
+    fs : float
+        Sampling frequency in Hz.
+    tau : float
+        Dataset calcium decay time constant in seconds (not given to OASIS).
+    label : str
+        Dataset label used for output file naming.
+    data_dir : str
+        Directory for output NPZ files.
+    """
+    n_cells = dff.shape[0]
+
+    print("  Running OASIS...")
+    t0 = time.time()
+    diff   = np.diff(dff, axis=1)
+    sigmas = np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2))
+    sigmas = np.maximum(sigmas, 1e-9)
+    oasis_probs = []
+    oasis_g     = []
+    for i in range(n_cells):
+        # g=(None,) makes OASIS estimate its own decay (tau) from the trace.
+        _, s, _, g, _ = deconvolve(dff[i], g=(None,), sn=sigmas[i], penalty=1)
+        oasis_probs.append(s)
+        oasis_g.append(float(np.ravel(g)[0]))
+    oasis_probs = np.array(oasis_probs)
+    oasis_g     = np.array(oasis_g)
+    time_oasis  = time.time() - t0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        oasis_tau = np.where((oasis_g > 0) & (oasis_g < 1),
+                             -1.0 / (fs * np.log(oasis_g)), np.nan)
+
+    oasis_spikes_shifted, _ = OMSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
+    prec_oasis, rec_oasis, f1_oasis       = OMSI.compute_accuracy_strict(
+        true_spikes, oasis_spikes_shifted, tolerance=0.1)
+    prec_oasis_w, rec_oasis_w, f1_oasis_w = compute_accuracy_window(
+        true_spikes, oasis_spikes_shifted, tolerance=0.1)
+    prec_oasis_e, rec_oasis_e, f1_oasis_e = compute_accuracy_window(
+        true_events, oasis_spikes_shifted, tolerance=0.1)
+    cosmic_oasis                           = OMSI.helpers.compute_cosmic(
+        true_spikes, oasis_spikes_shifted, fs)
+
+    print("    [OASIS] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}  "
+          "estimated tau={:.3f}s (median)".format(
+        np.nanmedian(f1_oasis), _mad(f1_oasis), np.nanmedian(f1_oasis_w),
+        _mad(f1_oasis_w), np.nanmedian(oasis_tau)))
+    oasis_results = []
+    for i in range(n_cells):
+        oasis_results.append({
+            'model': 'OASIS', 'tau': tau, 'tau_est': oasis_tau[i], 'cell_id': i,
+            'time': time_oasis / n_cells,
+            'f1': f1_oasis[i], 'precision': prec_oasis[i], 'recall': rec_oasis[i],
+            'f1_window': f1_oasis_w[i], 'precision_window': prec_oasis_w[i],
+            'recall_window': rec_oasis_w[i],
+            'f1_event': f1_oasis_e[i], 'precision_event': prec_oasis_e[i],
+            'recall_event': rec_oasis_e[i],
+            'cosmic': cosmic_oasis[i],
+        })
+
+    traces_path = os.path.join(data_dir, f'allen_data_results_oasis_{label}_traces.npz')
+    np.savez(
+        traces_path,
+        true_spikes=np.array(true_spikes, dtype=object),
+        oasis_probs=oasis_probs,
+        oasis_spikes=np.array(oasis_spikes_shifted, dtype=object),
+        oasis_g=oasis_g, oasis_tau=oasis_tau,
+        fs=fs, tau=tau,
+        cosmic_oasis=cosmic_oasis,
+    )
+    print("  Saved OASIS traces: {}.".format(traces_path))
+
+    npz_path = os.path.join(data_dir, f'allen_data_results_oasis_{label}.npz')
+    _save_records(oasis_results, npz_path)
+    print("  Saved OASIS results: {}.".format(npz_path))
+
+
 def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
                               run_matlab=False):
     """Run all inference methods on one Allen dataset group and save results.
@@ -845,10 +756,6 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         Whether to also run the MATLAB CaImAn MCMC method (default False).
     """
     all_results = []
-    filtered = _kurtosis_filter(dff, true_spikes, label)
-    if filtered is None:
-        return
-    dff, true_spikes, good_idx = filtered
     n_cells = dff.shape[0]
 
     true_events    = [OMSI.helpers.make_event_ground_truth(sp, tau)
@@ -876,7 +783,7 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         np.nanmedian(f1_my), _mad(f1_my), np.nanmedian(f1_my_w), _mad(f1_my_w)))
     for i in range(n_cells):
         all_results.append({
-            'model': 'OMSI', 'tau': tau, 'cell_id': int(good_idx[i]),
+            'model': 'OMSI', 'tau': tau, 'cell_id': i,
             'time': time_my / n_cells,
             'f1': f1_my[i], 'precision': prec_my[i], 'recall': rec_my[i],
             'f1_window': f1_my_w[i], 'precision_window': prec_my_w[i],
@@ -911,7 +818,7 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
             np.nanmedian(f1_trad), _mad(f1_trad), np.nanmedian(f1_trad_w), _mad(f1_trad_w)))
         for i in range(n_cells):
             all_results.append({
-                'model': 'MATLAB', 'tau': tau, 'cell_id': int(good_idx[i]),
+                'model': 'MATLAB', 'tau': tau, 'cell_id': i,
                 'time': time_trad / n_cells,
                 'f1': f1_trad[i], 'precision': prec_trad[i], 'recall': rec_trad[i],
                 'f1_window': f1_trad_w[i], 'precision_window': prec_trad_w[i],
@@ -921,45 +828,6 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
                 'cosmic': cosmic_trad[i],
             })
 
-    print("  Running OASIS...")
-    t0 = time.time()
-    diff   = np.diff(dff, axis=1)
-    sigmas = np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2))
-    sigmas = np.maximum(sigmas, 1e-9)
-    oasis_probs  = []
-    oasis_spikes = []
-    for i in range(dff.shape[0]):
-        g = np.exp(-1 / (fs * tau))
-        _, s, _, _, _ = deconvolve(dff[i], g=(g,), sn=sigmas[i], penalty=1)
-        oasis_probs.append(s)
-        oasis_spikes.append(_oasis_spikes_from_s(s, sigmas[i], fs))
-    oasis_probs = np.array(oasis_probs)
-    time_oasis  = time.time() - t0
-
-    oasis_spikes_shifted, _ = OMSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
-    prec_oasis, rec_oasis, f1_oasis       = OMSI.compute_accuracy_strict(
-        true_spikes, oasis_spikes_shifted, tolerance=0.1)
-    prec_oasis_w, rec_oasis_w, f1_oasis_w = compute_accuracy_window(
-        true_spikes, oasis_spikes_shifted, tolerance=0.1)
-    prec_oasis_e, rec_oasis_e, f1_oasis_e = compute_accuracy_window(
-        true_events, oasis_spikes_shifted, tolerance=0.1)
-    cosmic_oasis                           = OMSI.helpers.compute_cosmic(
-        true_spikes, oasis_spikes_shifted, fs)
-
-    print("    [OASIS] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
-        np.nanmedian(f1_oasis), _mad(f1_oasis), np.nanmedian(f1_oasis_w), _mad(f1_oasis_w)))
-    for i in range(n_cells):
-        all_results.append({
-            'model': 'OASIS', 'tau': tau, 'cell_id': int(good_idx[i]),
-            'time': time_oasis / n_cells,
-            'f1': f1_oasis[i], 'precision': prec_oasis[i], 'recall': rec_oasis[i],
-            'f1_window': f1_oasis_w[i], 'precision_window': prec_oasis_w[i],
-            'recall_window': rec_oasis_w[i],
-            'f1_event': f1_oasis_e[i], 'precision_event': prec_oasis_e[i],
-            'recall_event': rec_oasis_e[i],
-            'cosmic': cosmic_oasis[i],
-        })
-
     traces_path = os.path.join(data_dir, f'allen_data_results_{label}_traces.npz')
     print("  Saving traces to {}...".format(traces_path))
     np.savez(
@@ -968,24 +836,24 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
         my_probs=my_probs, my_spikes=np.array(my_spikes, dtype=object),
         trad_probs=trad_probs if run_matlab else np.array([]),
         trad_spikes=np.array(trad_spikes_out, dtype=object) if run_matlab else np.array([]),
-        oasis_probs=oasis_probs,
-        oasis_spikes=np.array(oasis_spikes_shifted, dtype=object),
         fs=fs, tau=tau,
         cosmic_my=cosmic_my,
         cosmic_trad=cosmic_trad if run_matlab else np.array([]),
-        cosmic_oasis=cosmic_oasis,
     )
 
     npz_path = os.path.join(data_dir, f'allen_data_results_{label}.npz')
     _save_records(all_results, npz_path)
     print("  Saved results: {}.".format(npz_path))
 
-    _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, good_idx,
+    _run_and_save_oasis_group(dff, true_spikes, true_events, fs, tau,
+                              label, data_dir)
+
+    _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau,
                                 label, data_dir)
 
 
 def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
-    """Run OMSI and OASIS on one Allen dataset group and save results.
+    """Run OMSI on one Allen dataset group and save results.
 
     Parameters
     ----------
@@ -1002,10 +870,6 @@ def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
     data_dir : str
         Directory for output NPZ files.
     """
-    filtered = _kurtosis_filter(dff, true_spikes, label)
-    if filtered is None:
-        return
-    dff, true_spikes, good_idx = filtered
     n_cells = dff.shape[0]
 
     true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
@@ -1035,7 +899,7 @@ def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
     all_results = []
     for i in range(n_cells):
         all_results.append({
-            'model': 'OMSI', 'tau': tau, 'cell_id': int(good_idx[i]),
+            'model': 'OMSI', 'tau': tau, 'cell_id': i,
             'time': time_my / n_cells,
             'f1': f1_my[i], 'precision': prec_my[i], 'recall': rec_my[i],
             'f1_window': f1_my_w[i], 'precision_window': prec_my_w[i],
@@ -1045,59 +909,19 @@ def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
             'cosmic': cosmic_my[i],
         })
 
-    print("  Running OASIS...")
-    t0 = time.time()
-    diff   = np.diff(dff, axis=1)
-    sigmas = np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2))
-    sigmas = np.maximum(sigmas, 1e-9)
-    oasis_probs  = []
-    for i in range(dff.shape[0]):
-        g = np.exp(-1 / (fs * tau))
-        _, s, _, _, _ = deconvolve(dff[i], g=(g,), sn=sigmas[i], penalty=1)
-        oasis_probs.append(s)
-    oasis_probs = np.array(oasis_probs)
-    time_oasis  = time.time() - t0
-
-    oasis_spikes_shifted, _ = OMSI.detect_spikes_from_probs(oasis_probs, fs, sigma=0.5)
-    prec_oasis, rec_oasis, f1_oasis       = OMSI.compute_accuracy_strict(
-        true_spikes, oasis_spikes_shifted, tolerance=0.1)
-    prec_oasis_w, rec_oasis_w, f1_oasis_w = compute_accuracy_window(
-        true_spikes, oasis_spikes_shifted, tolerance=0.1)
-    prec_oasis_e, rec_oasis_e, f1_oasis_e = compute_accuracy_window(
-        true_events, oasis_spikes_shifted, tolerance=0.1)
-    cosmic_oasis                           = OMSI.helpers.compute_cosmic(
-        true_spikes, oasis_spikes_shifted, fs)
-
-    print("    [OASIS] strict F1={:.3f} ± {:.3f}  window F1={:.3f} ± {:.3f}".format(
-        np.nanmedian(f1_oasis), _mad(f1_oasis), np.nanmedian(f1_oasis_w), _mad(f1_oasis_w)))
-    for i in range(n_cells):
-        all_results.append({
-            'model': 'OASIS', 'tau': tau, 'cell_id': int(good_idx[i]),
-            'time': time_oasis / n_cells,
-            'f1': f1_oasis[i], 'precision': prec_oasis[i], 'recall': rec_oasis[i],
-            'f1_window': f1_oasis_w[i], 'precision_window': prec_oasis_w[i],
-            'recall_window': rec_oasis_w[i],
-            'f1_event': f1_oasis_e[i], 'precision_event': prec_oasis_e[i],
-            'recall_event': rec_oasis_e[i],
-            'cosmic': cosmic_oasis[i],
-        })
-
     traces_path = os.path.join(data_dir, f'allen_data_results_omsi_{label}_traces.npz')
     np.savez(
         traces_path,
         dff=dff, true_spikes=np.array(true_spikes, dtype=object),
         my_probs=my_probs, my_spikes=np.array(my_spikes, dtype=object),
-        oasis_probs=oasis_probs,
-        oasis_spikes=np.array(oasis_spikes_shifted, dtype=object),
         fs=fs, tau=tau,
         cosmic_my=cosmic_my,
-        cosmic_oasis=cosmic_oasis,
     )
-    print("  Saved OMSI+OASIS traces: {}.".format(traces_path))
+    print("  Saved OMSI traces: {}.".format(traces_path))
 
     npz_path = os.path.join(data_dir, f'allen_data_results_omsi_{label}.npz')
     _save_records(all_results, npz_path)
-    print("  Saved OMSI+OASIS results: {}.".format(npz_path))
+    print("  Saved OMSI results: {}.".format(npz_path))
 
 
 def test_figure(data_dir, allen_data_dir, run_matlab=False):
@@ -1181,7 +1005,7 @@ def test_omsi(data_dir, allen_data_dir):
 def test_cascade(data_dir, allen_data_dir):
     """Run CASCADE-only benchmark across all Allen dataset groups.
 
-    Uses the same preprocessed data and kurtosis filter as test_figure, and
+    Uses the same preprocessed data as test_figure, and
     writes only the CASCADE result files, so existing OMSI, OASIS and CaImAn
     results are left untouched.
 
@@ -1216,22 +1040,18 @@ def test_cascade(data_dir, allen_data_dir):
             print("\n  Group {}  {} frames @ {}Hz ({} cells).".format(
                 experiment_name, n_frames, fs_rounded, gd['dff'].shape[0]))
             label = f"{experiment_name}_{indicator}_tau_{n_frames}frames_{fs_rounded}hz"
-            filtered = _kurtosis_filter(gd['dff'], gd['spikes_list'], label)
-            if filtered is None:
-                continue
-            dff, true_spikes, good_idx = filtered
             true_events = [OMSI.helpers.make_event_ground_truth(sp, gd['tau'])
-                           for sp in true_spikes]
-            _run_and_save_cascade_group(dff, true_spikes, true_events, gd['fs'], gd['tau'],
-                                        good_idx, label, data_dir)
+                           for sp in gd['spikes_list']]
+            _run_and_save_cascade_group(gd['dff'], gd['spikes_list'], true_events,
+                                        gd['fs'], gd['tau'], label, data_dir)
 
 
-def test_add_bad_cells(data_dir, allen_data_dir, run_matlab=True):
-    """Run all four methods on the cells excluded by the kurtosis threshold.
+def test_oasis(data_dir, allen_data_dir):
+    """Run OASIS-only benchmark across all Allen dataset groups.
 
-    Uses the same preprocessed data, dataset labels and threshold as
-    test_figure. Results go to allen_lowkurt_results_<label>.npz, which
-    plot and print modes include automatically; existing results are untouched.
+    Uses the same preprocessed data as test_figure, and writes only the OASIS
+    result files, so existing OMSI, CASCADE and CaImAn results are left
+    untouched.
 
     Parameters
     ----------
@@ -1240,8 +1060,6 @@ def test_add_bad_cells(data_dir, allen_data_dir, run_matlab=True):
     allen_data_dir : str
         Path to raw Allen H5 files (only read if allen_aggregated_data.h5 is
         not already in data_dir).
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC (default True).
     """
     os.makedirs(data_dir, exist_ok=True)
     aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
@@ -1258,7 +1076,7 @@ def test_add_bad_cells(data_dir, allen_data_dir, run_matlab=True):
                                    ('fast', fast_data_groups)]:
         if not data_groups:
             continue
-        print("\n--- Processing {} cell groups (low-kurtosis cells) ---".format(indicator.upper()))
+        print("\n--- Processing {} cell groups (OASIS only) ---".format(indicator.upper()))
         for (experiment_name, fs_rounded, n_frames), gd in data_groups.items():
             if experiment_name in _EXCLUDED_DATASETS:
                 print("\n  Skipping excluded dataset: {}.".format(experiment_name))
@@ -1266,8 +1084,10 @@ def test_add_bad_cells(data_dir, allen_data_dir, run_matlab=True):
             print("\n  Group {}  {} frames @ {}Hz ({} cells).".format(
                 experiment_name, n_frames, fs_rounded, gd['dff'].shape[0]))
             label = f"{experiment_name}_{indicator}_tau_{n_frames}frames_{fs_rounded}hz"
-            _run_and_save_lowkurt_group(gd['dff'], gd['spikes_list'], gd['fs'], gd['tau'],
-                                        label, data_dir, run_matlab=run_matlab)
+            true_events = [OMSI.helpers.make_event_ground_truth(sp, gd['tau'])
+                           for sp in gd['spikes_list']]
+            _run_and_save_oasis_group(gd['dff'], gd['spikes_list'], true_events,
+                                      gd['fs'], gd['tau'], label, data_dir)
 
 
 def _load_and_preprocess_raw(data_dir, aggregated_h5):
@@ -1465,6 +1285,35 @@ def _build_omsi_traces_lookup(data_dir):
     return lookup
 
 
+def _build_oasis_lookup(data_dir):
+    """Build a label-to-filepath lookup for OASIS result NPZ files.
+
+    OASIS files always take precedence over any OASIS data in older group or
+    OMSI result files.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing allen_data_results_oasis_*.npz files.
+
+    Returns
+    -------
+    dict
+        Mapping from label string to (records_path, traces_path) tuples;
+        either path is None if that file is missing.
+    """
+    lookup = {}
+    for fpath in _glob.glob(
+            os.path.join(data_dir, 'allen_data_results_oasis_*.npz')):
+        name = os.path.basename(fpath)
+        is_traces = name.endswith('_traces.npz')
+        orig = (name.replace('allen_data_results_oasis_', '')
+                    .replace('_traces.npz', '').replace('.npz', ''))
+        rec_path, tr_path = lookup.get(orig, (None, None))
+        lookup[orig] = (rec_path, fpath) if is_traces else (fpath, tr_path)
+    return lookup
+
+
 def _peaks_from_prob(prob, fs):
     """Find spike times from a probability trace via peak detection.
 
@@ -1554,7 +1403,7 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                              window=60.0, min_spikes=15,
                              omsi_traces_lookup=None,
                              matlab_data_dir=None,
-                             target_snrs=(3, 5, 10, 20, 30)):
+                             target_snrs=(2, 4, 6, 8, 10)):
     """Load per-cell trace data for raster and trace visualization panels.
 
     Parameters
@@ -1586,6 +1435,7 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
         Selected cell data dicts with traces, spike times, and metadata,
         in increasing SNR.
     """
+    oasis_lookup = _build_oasis_lookup(data_dir)
     all_cells = []
     for label, norm_label in label_map.items():
         file_label = file_path_map.get(label, norm_label)
@@ -1631,12 +1481,21 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                         except Exception:
                             pass
 
-            if df is not None and 'oasis_probs' in df:
-                oasis_probs = df['oasis_probs']
-            elif 'oasis_probs' in d:
-                oasis_probs = d['oasis_probs']
+            do = None
+            oa_traces = oasis_lookup.get(file_label, (None, None))[1]
+            if oa_traces:
+                try:
+                    do = np.load(oa_traces, allow_pickle=True)
+                except Exception:
+                    do = None
+
+            if do is not None and 'oasis_probs' in do:
+                oasis_src = do
+            elif df is not None and 'oasis_probs' in df:
+                oasis_src = df
             else:
-                oasis_probs = None
+                oasis_src = d
+            oasis_probs = oasis_src['oasis_probs'] if 'oasis_probs' in oasis_src else None
             fs_m = re.search(r'(\d+)[Hh]z', os.path.basename(fpath))
             fs   = float(fs_m.group(1)) if fs_m else 30.0
             raw  = None
@@ -1678,7 +1537,7 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                     continue
                 my_spk    = _load_spk('my_spikes',    my_probs,    i, src=omsi_src)
                 trad_spk  = _load_spk('trad_spikes',  trad_probs,  i)
-                oasis_spk = _load_spk('oasis_spikes', oasis_probs, i)
+                oasis_spk = _load_spk('oasis_spikes', oasis_probs, i, src=oasis_src)
                 cas_spk   = np.array([])
                 cas_row   = cas_cell_id_to_row.get(i, -1)
                 if dc is not None and cas_row >= 0 and 'cascade_spikes' in dc:
@@ -2074,12 +1933,14 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
             r['cosmic']          = float(cosmic[i])
 
     updated = {m: 0 for m in _MODEL_ORDER}
+    oasis_lookup = _build_oasis_lookup(data_dir)
 
     for fpath in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_*_traces.npz')):
         basename = os.path.basename(fpath)
         if 'allen_data_results_omsi_'   in basename: continue
         if 'allen_data_results_cascade_' in basename: continue
+        if 'allen_data_results_oasis_'   in basename: continue
         orig  = basename.replace('allen_data_results_', '').replace('_traces.npz', '')
         label = clean_label(normalize_label(orig))
         try:
@@ -2114,7 +1975,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                 updated['OMSI'] += len(recs)
 
         src_oa = df if (df is not None and 'oasis_probs' in df) else d
-        if 'oasis_probs' in src_oa:
+        if orig not in oasis_lookup and 'oasis_probs' in src_oa:
             recs = [r for r in alldata
                     if r.get('model') == 'OASIS' and r.get('label') == label]
             if recs:
@@ -2161,7 +2022,7 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                 _apply(recs, *rest)
                 updated['OMSI'] += len(recs)
 
-        if 'oasis_probs' in df:
+        if orig not in oasis_lookup and 'oasis_probs' in df:
             recs = [r for r in alldata
                     if r.get('model') == 'OASIS' and r.get('label') == label]
             if recs:
@@ -2169,6 +2030,29 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                     true_spikes, true_events, df['oasis_probs'], fs, sigma=0.5)
                 _apply(recs, *rest)
                 updated['OASIS'] += len(recs)
+
+    for orig, (_, oa_fpath) in oasis_lookup.items():
+        if oa_fpath is None:
+            continue
+        label = clean_label(normalize_label(orig))
+        try:
+            do = np.load(oa_fpath, allow_pickle=True)
+        except Exception as exc:
+            print("  Warning: could not load {}: {}.".format(oa_fpath, exc)); continue
+        if 'true_spikes' not in do or 'oasis_probs' not in do:
+            continue
+        true_spikes = list(do['true_spikes'])
+        fs  = float(do['fs'])  if 'fs'  in do else 30.0
+        tau = float(do['tau']) if 'tau' in do else 1.2
+        true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
+                       for sp in true_spikes]
+        recs = [r for r in alldata
+                if r.get('model') == 'OASIS' and r.get('label') == label]
+        if recs:
+            rest = _from_probs(
+                true_spikes, true_events, do['oasis_probs'], fs, sigma=0.5)
+            _apply(recs, *rest)
+            updated['OASIS'] += len(recs)
 
     cascade_lookup = _build_cascade_lookup(data_dir)
     for label_raw, (cas_fpath, _) in cascade_lookup.items():
@@ -2262,75 +2146,6 @@ def _metrics_from_spikes(true_spikes, true_events, spikes, fs):
     }
 
 
-def _load_lowkurt_records(data_dir, label_map, file_path_map):
-    """Build result records for the low-kurtosis cells from their saved outputs.
-
-    Spikes are detected the same way _recompute_all_metrics_from_traces does
-    for the main cells (OMSI and CaImAn from probabilities with sigma 1.5,
-    OASIS with sigma 0.5, CASCADE from its saved spikes), so both sets of
-    cells are scored identically. Records are flagged low_kurtosis=True.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_lowkurt_results_*.npz files.
-    label_map : dict
-        Clean label to normalized label; updated in place.
-    file_path_map : dict
-        Clean label to original dataset basename; updated in place.
-
-    Returns
-    -------
-    list of dict
-        One record per (cell, method) with metrics, label and genotype.
-    """
-    records = []
-    for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_lowkurt_results_*.npz'))):
-        orig = (os.path.basename(fpath)
-                .replace('allen_lowkurt_results_', '').replace('.npz', ''))
-        if any(orig.startswith(ds) for ds in _EXCLUDED_DATASETS):
-            continue
-        try:
-            with np.load(fpath, allow_pickle=True) as npz:
-                d = {k: npz[k] for k in npz.files}
-        except Exception as exc:
-            print("Warning: could not load {}: {}.".format(fpath, exc))
-            continue
-        norm_label = normalize_label(orig)
-        label      = clean_label(norm_label)
-        label_map.setdefault(label, norm_label)
-        file_path_map.setdefault(label, orig)
-        geno = get_genotype(orig)
-
-        true_spikes = list(d['true_spikes'])
-        fs, tau     = float(d['fs']), float(d['tau'])
-        cell_ids    = np.asarray(d['cell_ids'])
-        true_events = [OMSI.helpers.make_event_ground_truth(sp, tau) for sp in true_spikes]
-
-        methods = []
-        if 'my_probs' in d:
-            methods.append(('OMSI', OMSI.detect_spikes_from_probs(d['my_probs'], fs, sigma=1.5)[0],
-                            'time_omsi'))
-        if 'trad_probs' in d:
-            methods.append(('MATLAB', OMSI.detect_spikes_from_probs(d['trad_probs'], fs, sigma=1.5)[0],
-                            'time_matlab'))
-        if 'oasis_probs' in d:
-            methods.append(('OASIS', OMSI.detect_spikes_from_probs(d['oasis_probs'], fs, sigma=0.5)[0],
-                            'time_oasis'))
-        if 'cascade_spikes' in d:
-            methods.append(('CASCADE', list(d['cascade_spikes']), 'time_cascade'))
-
-        for model, spikes, time_key in methods:
-            m = _metrics_from_spikes(true_spikes, true_events, spikes, fs)
-            for i, cid in enumerate(cell_ids):
-                rec = {'model': model, 'tau': tau, 'cell_id': int(cid),
-                       'time': float(d[time_key]) / len(cell_ids),
-                       'label': label, 'genotype': geno, 'low_kurtosis': True}
-                rec.update({k: float(v[i]) for k, v in m.items()})
-                records.append(rec)
-    return records
-
-
 def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     """Load all benchmark records and recompute their metrics from saved traces.
 
@@ -2358,6 +2173,7 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
 
     omsi_records_lookup = _build_omsi_records_lookup(data_dir)
     omsi_traces_lookup  = _build_omsi_traces_lookup(data_dir)
+    oasis_lookup        = _build_oasis_lookup(data_dir)
 
     omsi_data_cache = {}
     for orig_basename, omsi_path in omsi_records_lookup.items():
@@ -2378,6 +2194,8 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         is_cascade = 'allen_data_results_cascade_' in fpath
 
         if 'allen_data_results_omsi_' in fpath:
+            continue
+        if 'allen_data_results_oasis_' in fpath:
             continue
         try:
             data = _load_records(fpath)
@@ -2401,6 +2219,8 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
             omsi_models = {r.get('model') for r in omsi_data_cache[orig_basename]}
             data = [d for d in data if d.get('model') not in omsi_models]
         data = [d for d in data if d.get('model') != 'MATLAB']
+        if orig_basename in oasis_lookup:
+            data = [d for d in data if d.get('model') != 'OASIS']
         for d in data:
             d['label']    = label
             d['genotype'] = geno
@@ -2444,10 +2264,32 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
         label_map.setdefault(label, norm_label)
         file_path_map.setdefault(label, orig_basename)
         geno = get_genotype(orig_basename)
+        if orig_basename in oasis_lookup:
+            omsi_recs = [d for d in omsi_recs if d.get('model') != 'OASIS']
         for d in omsi_recs:
             d['label']    = label
             d['genotype'] = geno
         alldata.extend(omsi_recs)
+
+    for orig_basename, (oa_path, _) in oasis_lookup.items():
+        if oa_path is None:
+            continue
+        if any(orig_basename.startswith(ds) for ds in _EXCLUDED_DATASETS):
+            continue
+        try:
+            oa_recs = _load_records(oa_path)
+        except Exception as exc:
+            print("Warning: could not load {}: {}.".format(oa_path, exc))
+            continue
+        norm_label = normalize_label(orig_basename)
+        label      = clean_label(norm_label)
+        label_map.setdefault(label, norm_label)
+        file_path_map.setdefault(label, orig_basename)
+        geno = get_genotype(orig_basename)
+        for d in oa_recs:
+            d['label']    = label
+            d['genotype'] = geno
+        alldata.extend(oa_recs)
 
     if not alldata:
         return alldata, label_map, file_path_map, omsi_traces_lookup
@@ -2455,14 +2297,6 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
     print("Recomputing all metrics from traces (CosMIC, precision, recall, F_beta)...")
     _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                                         matlab_data_dir=matlab_data_dir)
-
-    # Added after the recompute above, which matches records to trace rows by
-    # position within a label and would misassign these extra cells.
-    lowkurt = _load_lowkurt_records(data_dir, label_map, file_path_map)
-    if lowkurt:
-        print("Including {} records for {} low-kurtosis cells (--mode add-bad-cells).".format(
-            len(lowkurt), len(set((r['label'], r['cell_id']) for r in lowkurt))))
-        alldata.extend(lowkurt)
 
     for d in alldata:
         d['zoom'] = get_zoom_for_label(d['label'])
@@ -2669,7 +2503,8 @@ def _print_omsi_snr_exclusions(data_dir):
     sources = []
     for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_data_results_*_traces.npz'))):
         name = os.path.basename(fpath)
-        if 'allen_data_results_omsi_' in name or 'allen_data_results_cascade_' in name:
+        if ('allen_data_results_omsi_' in name or 'allen_data_results_cascade_' in name
+                or 'allen_data_results_oasis_' in name):
             continue
         sources.append((name.replace('allen_data_results_', '').replace('_traces.npz', ''),
                         fpath, 'main'))
@@ -2679,10 +2514,6 @@ def _print_omsi_snr_exclusions(data_dir):
                 .replace('allen_data_results_omsi_', '').replace('_traces.npz', ''))
         if orig not in main_labels:
             sources.append((orig, fpath, 'main'))
-    for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_lowkurt_results_*.npz'))):
-        sources.append((os.path.basename(fpath)
-                        .replace('allen_lowkurt_results_', '').replace('.npz', ''),
-                        fpath, 'low-kurtosis'))
 
     print('\nCells skipped by OMSI for low SNR (SNR < {:g}; no inference, scored as no spikes)'.format(
         _OMSI_SNR_FLOOR))
@@ -2840,18 +2671,17 @@ def main():
         description='Figure 3 -- Allen data benchmark'
     )
     parser.add_argument('--mode', required=True,
-                        choices=['test', 'omsi', 'cascade', 'add-bad-cells', 'plot', 'print'],
+                        choices=['test', 'omsi', 'cascade', 'oasis', 'plot', 'print'],
                         help='test: run all inference; omsi: re-run OMSI only; '
-                             'cascade: run CASCADE only; add-bad-cells: run all methods on '
-                             'the cells below the kurtosis threshold (included in plot/print '
-                             'automatically); plot: make figure; print: print stats')
+                             'cascade: run CASCADE only; oasis: run OASIS only; '
+                             'plot: make figure; print: print stats')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for output data/figures')
     parser.add_argument('--allen-data-dir', default='/home/dylan/Fast2/spike_deconv/allen_results/raw_data',
                         help='Path to raw Allen H5 files (required for test mode)')
     parser.add_argument('--no-matlab', action='store_true',
-                        help='Skip traditional MCMC (Matlab) in test and add-bad-cells modes')
-    parser.add_argument('--matlab-data-dir', default=_MATLAB_DATA_DIR,
+                        help='Skip traditional MCMC (Matlab) in test mode')
+    parser.add_argument('--matlab-data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory containing CaImAn MCMC (MATLAB) results '
                              '(used in plot/print modes)')
     args = parser.parse_args()
@@ -2876,11 +2706,10 @@ def main():
             data_dir=args.data_dir,
             allen_data_dir=args.allen_data_dir,
         )
-    elif args.mode == 'add-bad-cells':
-        test_add_bad_cells(
+    elif args.mode == 'oasis':
+        test_oasis(
             data_dir=args.data_dir,
             allen_data_dir=args.allen_data_dir,
-            run_matlab=not args.no_matlab,
         )
     elif args.mode == 'plot':
         plot_figure(data_dir=args.data_dir, matlab_data_dir=args.matlab_data_dir)

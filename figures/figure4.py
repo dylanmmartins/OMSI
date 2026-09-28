@@ -288,7 +288,7 @@ def _train_loo_model(ds_folder, fs, ground_truth_dir, loo_models_dir):
     smoothing, causal = _loo_smoothing(fs)
     print('  Training LOO model {} on {} datasets (held out: {})...'.format(
         model_name, len(training), ds_folder))
-    cmd = [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', _CASCADE_SCRIPT,
+    cmd = [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
            '--mode', 'loo-train',
            '--model-name', model_name,
            '--loo-models-dir', loo_models_dir,
@@ -765,13 +765,13 @@ def process_dataset(ds_folder, ground_truth_dir, model, loo_models_dir=None):
                 spikes_list.append(np.array([], dtype=np.float64))
 
     elif model == 'oasis':
-        g_decay = float(np.exp(-1.0 / (tau * fs)))
+        # g=(None,) makes OASIS estimate its own AR(1) decay (tau) from each trace.
         for cell in cells:
             fluo  = cell['fluo'].astype(np.float64)
             diff  = np.diff(fluo)
             sigma = max(float(np.median(np.abs(diff)) / (0.6745 * np.sqrt(2))), 1e-9)
             try:
-                _, s, _, _, _ = oasis_deconv(fluo, g=(g_decay,), sn=sigma, penalty=1)
+                _, s, _, _, _ = oasis_deconv(fluo, g=(None,), sn=sigma, penalty=1)
                 spikes_list.append(_oasis_spikes_from_s(s, sigma, cell['fs']))
                 probs_list.append(s.astype(np.float32))
             except Exception as exc:
@@ -795,7 +795,7 @@ def process_dataset(ds_folder, ground_truth_dir, model, loo_models_dir=None):
                 model_name = _train_loo_model(ds_folder, fs, ground_truth_dir, loo_models_dir)
                 print('  CASCADE LOO model: {}.'.format(model_name))
                 subprocess.run(
-                    [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', _CASCADE_SCRIPT,
+                    [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', _CASCADE_SCRIPT,
                      '--mode', 'inference',
                      '--model', model_name,
                      '--model-folder', loo_models_dir,
@@ -1581,7 +1581,7 @@ def main():
                         help='test: run inference; plot: make figure; print: print stats')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for output data/figures')
-    parser.add_argument('--ground-truth-dir', default=r'C:\Users\dmartins\Documents\GitHub\Cascade\Ground_truth',
+    parser.add_argument('--ground-truth-dir', default='/home/dylan/Documents/Github/Cascade/Ground_truth',
                         help='Path to CASCADE Ground_truth/ folder (test mode)')
     parser.add_argument('--loo-models-dir', default=None,
                         help='Where leave-one-out CASCADE models are trained and cached '

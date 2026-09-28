@@ -1129,10 +1129,11 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax_b.set_xlim(0, tol_ms.max())
     ax_b.set_ylim(0, 1)
 
-    # Reliability diagram. Band: 95% interval from resampling cells.
+    # Reliability diagram. Band: 95% interval from resampling cells. Rise-time-fixed
+    # CaImAn left out of this panel.
     ax_c.plot([0, 1], [0, 1], '--', color='k', lw=0.7, alpha=0.6)
     for key, (label, color) in _present(d):
-        if '{}_cal_n'.format(key) not in d.files:
+        if key == 'MATLAB_FIX' or '{}_cal_n'.format(key) not in d.files:
             continue
         n    = d['{}_cal_n'.format(key)]
         hits = d['{}_cal_hits'.format(key)]
