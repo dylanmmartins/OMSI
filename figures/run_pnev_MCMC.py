@@ -9,26 +9,6 @@ hardcoded, so the same call works on Linux, macOS, and Windows across MATLAB
 releases. Override any of it with the MATLAB_EXECUTABLE, CVX_HOME, and
 CAIMAN_MATLAB_HOME environment variables.
 
-Functions
----------
-find_matlab
-    Locate a MATLAB executable, newest release first.
-find_toolbox
-    Locate a MATLAB toolbox directory from env var or common install paths.
-_matlab_invocations
-    Argument lists to try, modern batch mode first.
-_write_shims
-    Write base-MATLAB stand-ins for the Statistics Toolbox functions used.
-_write_wrapper
-    Fill the MATLAB wrapper template and write it next to the input file.
-_write_rise_fix
-    Write a copy of the installed cont_ca_sampler.m with the rise-time fix.
-_init_cells
-    Per-cell init dicts as a MATLAB cell array of structs.
-run_matlab_pnevMCMC
-    Run MCMC inference on dF/F traces by calling MATLAB as a subprocess.
-
-
 DMM, March 2026
 """
 
@@ -40,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -70,12 +51,13 @@ try
         addpath(genpath(caiman_root));
     end
 
-    % Optional copy of cont_ca_sampler with the rise-time fix. Added last so it is
-    % first on the path; empty unless the caller asked for it.
+    % Optional patched copies of cont_ca_sampler (rise-time fix) and/or
+    % get_initial_sample (init threshold). Added last so they are first on the
+    % path; empty unless the caller asked for them.
     fix_root = '__FIX_ROOT__';
     if ~isempty(fix_root)
         addpath(fix_root);
-        fprintf('Using cont_ca_sampler with rise-time fix: %s\\n', which('cont_ca_sampler'));
+        fprintf('Using patched CaImAn from: %s\\n', fix_root);
     end
 
     % Statistics Toolbox stand-ins, appended so a real installation wins.
@@ -593,13 +575,45 @@ def _write_rise_fix(caiman_root, out_dir):
     code = code.replace(_RISE_BUG_LINE, _RISE_FIX_LINE + '  % rise-time fix (fMCSI)')
 
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, 'cont_ca_sampler.m'), 'w') as fh:
-        fh.write(code)
+    _write_if_changed(os.path.join(out_dir, 'cont_ca_sampler.m'), code)
     return out_dir
 
 
+_INIT_THR_LINE = 's_in = sp>0.15*max(sp);'
+
+def _write_init_thr(caiman_root, out_dir, thr):
+
+    hits = glob.glob(os.path.join(caiman_root, '**', 'get_initial_sample.m'),
+                     recursive=True)
+    if len(hits) != 1:
+        raise FileNotFoundError('Expected one get_initial_sample.m under {}, found {}.'.format(
+            caiman_root, len(hits)))
+    with open(hits[0]) as fh:
+        code = fh.read()
+    if code.count(_INIT_THR_LINE) != 1:
+        raise ValueError('Init threshold line not found exactly once in {} -- '
+                         'CaImAn version differs, threshold not applied.'.format(hits[0]))
+    code = code.replace(_INIT_THR_LINE, 's_in = sp>{!r}*max(sp);  % init threshold '
+                        '(fMCSI)'.format(float(thr)))
+
+    os.makedirs(out_dir, exist_ok=True)
+    _write_if_changed(os.path.join(out_dir, 'get_initial_sample.m'), code)
+    return out_dir
+
+
+def _write_if_changed(path, code):
+
+    if os.path.exists(path):
+        with open(path) as fh:
+            if fh.read() == code:
+                return
+    tmp = '{}.{}.{}.tmp'.format(path, os.getpid(), threading.get_ident())
+    with open(tmp, 'w') as fh:
+        fh.write(code)
+    os.replace(tmp, path)
+
+
 def _init_cells(inits, n_cells):
-    """ Per-cell init dicts as a MATLAB cell array of structs (empty when None). """
 
     arr = np.empty((n_cells, 1), dtype=object)
     for i in range(n_cells):
@@ -616,67 +630,8 @@ def _init_cells(inits, n_cells):
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
                         verbose=True, return_samples=False, inits=None, burn_in=None,
-                        init_shifts=None, fix_rise_bug=False):
-    """ Run MCMC spike inference via MATLAB subprocess.
+                        init_shifts=None, fix_rise_bug=False, init_thr=None):
 
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames) or (n_frames,).
-    fs : float, optional
-        Sampling rate in Hz.
-    tau : float, optional
-        Calcium indicator decay time constant in seconds.
-    n_sweeps : int or str, optional
-        Number of MCMC sweeps, or 'auto' to use 500.
-    true_spikes : list of np.ndarray, optional
-        Ground-truth spike times (unused, reserved for future use).
-    sparsity_scale : float, optional
-        Sparsity prior scale parameter.
-    work_dir : str, optional
-        Directory for the .mat and wrapper files. Defaults to this file's
-        directory, so results do not depend on where Python was launched.
-    matlab_exe : str, optional
-        MATLAB executable. Discovered automatically when omitted.
-    verbose : bool, optional
-        Print progress and discovery details.
-    return_samples : bool, optional
-        Also return every post-burn-in posterior sample.
-    inits : list of dict, optional
-        Per-cell starting sample passed as cont_ca_sampler's params.init. Keys:
-        lam_, spiketimes_ (1-based frame units), A_, b_, C_in, sg, g.
-    burn_in : int, optional
-        Burn-in sweeps (params.B). Default is half of n_sweeps; 0 keeps every sweep.
-    init_shifts : array-like, optional
-        Per-cell shift in frames applied to every spike of CaImAn's own starting
-        sample. Ignored when inits is given.
-    fix_rise_bug : bool, optional
-        Run a copy of cont_ca_sampler whose rise-time Metropolis step scores the
-        proposed calcium shape (Gs_) instead of the current one (Gs). The
-        installed CaImAn is not modified.
-    return_cell_times : bool, optional
-        If True, also return each cell's cont_ca_sampler time in seconds.
-
-    Returns
-    -------
-    final_spikes : list of np.ndarray
-        Inferred spike times in seconds for each cell.
-    model_traces : np.ndarray
-        Reconstructed calcium traces, shape (n_cells, n_frames).
-    all_probs : np.ndarray
-        Posterior spike probability traces, shape (n_cells, n_frames).
-    sweeps_per_cell : np.ndarray
-        Number of MCMC sweeps run for each cell.
-    samples : list of list of np.ndarray
-        Only when return_samples is True: per cell, each posterior sample's spike
-        times in 0-based frame units.
-    init_spikes : list of np.ndarray
-        Only when return_samples is True and init_shifts is given: per cell, the
-        shifted starting spike times in 0-based frame units.
-    cell_times : np.ndarray
-        Only if return_cell_times: seconds spent in cont_ca_sampler per cell,
-        timed inside MATLAB (NaN for cells that errored or on failure).
-    """
 
     if dff.ndim == 1:
         dff = dff[np.newaxis, :]
@@ -743,12 +698,18 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                                          'omsi_matlab_shims'))
 
     fix_root = ''
-    if fix_rise_bug:
+    if fix_rise_bug or init_thr is not None:
         if not caiman_root:
-            print('CaImAn-MATLAB not found -- cannot apply the rise-time fix.')
+            print('CaImAn-MATLAB not found -- cannot apply the CaImAn patches.')
             return _empty()
-        fix_root = _write_rise_fix(caiman_root, os.path.join(tempfile.gettempdir(),
-                                                             'omsi_caiman_rise_fix'))
+        name = 'omsi_caiman_rise_fix' if fix_rise_bug else 'omsi_caiman_patch'
+        if init_thr is not None:
+            name += '_thr{:g}'.format(float(init_thr))
+        fix_root = os.path.join(tempfile.gettempdir(), name)
+        if fix_rise_bug:
+            _write_rise_fix(caiman_root, fix_root)
+        if init_thr is not None:
+            _write_init_thr(caiman_root, fix_root, init_thr)
 
     _write_wrapper(wrapper_script, work_dir, input_mat, output_mat,
                    cvx_root, caiman_root, shim_dir, fix_root)

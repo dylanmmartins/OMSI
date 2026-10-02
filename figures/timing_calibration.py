@@ -1,94 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 figures/timing_calibration.py
-
-Sub-frame spike timing and probability calibration benchmarks on simulated data.
-
-Simulates its own population (same generator and settings as figure 1, own seed) and
-runs every method on it, so nothing is read from other figures' results. Asks what
-the 100 ms coincidence metrics hide: how close called spikes are to true times,
-whether per-frame spike probabilities are calibrated, and how timing precision
-scales with frame rate.
-
-Test stages
------------
-population
-    Simulate the population, run all methods, save raw results, then analyze.
-analyze
-    Reanalyze saved population results without rerunning inference.
-framerate
-    Simulate at several frame rates and run every method on each.
-
-Bug-fixed CaImAn (panels a-c) runs on its own with --mode caiman_fix, on the saved
-population, so nothing else is rerun. Plot and stats reanalyze automatically when
-either raw file is newer than the summary.
-
-Functions
----------
-_fbeta
-    Compute F-beta score from precision and recall arrays.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-_match_pairs
-    One-to-one spike matches within a tolerance, as index arrays.
-_signed_errors
-    Signed timing errors of matched spikes, pooled over cells.
-_prf_by_cell
-    Per-cell precision and recall at one tolerance.
-_timing_analysis
-    Timing offset, error distribution, and F-beta vs. tolerance for one method.
-_true_occupancy
-    Boolean per-frame occupancy of true spikes at a fractional frame shift.
-_best_shift
-    Frame shift that best aligns a probability trace with true spikes.
-_calibration_analysis
-    Reliability counts and Brier score for one method.
-_simulate
-    Simulate a seeded population with the figure 1 generator.
-_ensure_cascade_model
-    Download a pretrained CASCADE model if it is not installed.
-_run_cascade_at
-    Run CASCADE at any frame rate, resampling when no model matches.
-_run_oasis_at
-    Run OASIS the way figure1.py does, at any frame rate.
-_run_population
-    Simulate the test population, run every method, and save raw results.
-_run_caiman_fix
-    Run only the rise-time-fixed CaImAn on the saved population.
-_analyze_population
-    Timing and calibration analysis of saved population results.
-_refresh_summary
-    Reanalyze if any raw result file is newer than the summary.
-_centered_errors
-    Per-cell timing errors after removing the pooled offset.
-_run_framerate
-    Simulate at several frame rates and collect timing errors for every method.
-run_test
-    Run the requested test stages.
-_present
-    Methods with results in a summary file.
-_ece
-    Expected calibration error from binned reliability counts.
-_placeholder
-    Mark a panel whose test stage has not been run.
-_centered_spread
-    Median absolute deviation of centered errors, with a bootstrap band over cells.
-plot_figure
-    Load summary results and render the figure.
-print_stats
-    Print summary statistics to the terminal.
-
-To simulate, run all methods, and analyze (or pick stages with --stages):
-    $ python timing_calibration.py --mode test
-    $ python timing_calibration.py --mode test --stages population
-
-To run only the bug-fixed CaImAn on the saved population:
-    $ python timing_calibration.py --mode caiman_fix
-
-To create figure (reanalyzes first if raw results changed):
-    $ python timing_calibration.py --mode plot
-
-
+\
 DMM, September 2026
 """
 
@@ -107,8 +20,9 @@ _DEFAULT_DATA_DIR = os.path.join(_HERE, 'data', 'timing')
 
 _POP_NPZ     = 'timing_population.npz'
 _SUMMARY_NPZ = 'timing_calibration.npz'
-_FIX_NPZ     = 'timing_caiman_fix.npz'
+_FIX_NPZ     = 'timing_caiman_fix_thr.npz'
 _FR_NPZ      = 'timing_framerate.npz'
+_FR_FIX_NPZ  = 'timing_framerate_caiman_fix_thr.npz'
 
 mpl.rcParams['axes.spines.top']   = False
 mpl.rcParams['axes.spines.right'] = False
@@ -125,16 +39,14 @@ BETA = 0.5
 METHODS = {
     'OMSI':       ('OMSI',                  '#4C72B0'),
     'MATLAB':     ('CaImAn',                '#DD8452'),
-    'MATLAB_FIX': ('CaImAn, rise-time fix', '#DD8452'),
+    'MATLAB_FIX': ('CaImAn, fixed',         '#DD8452'),
     'OASIS':      ('OASIS',                 '#55A868'),
     'CASCADE':    ('CASCADE',               '#8172B3'),
 }
 
-# CaImAn's rise-time Metropolis step scores proposals with the current calcium shape
-# (cont_ca_sampler.m, Gs instead of Gs_), so every rise-time proposal is accepted and
-# spike times drift with it. MATLAB_FIX reruns CaImAn on a copy with that one line
-# fixed (panels a-c only, --mode caiman_fix); the installed CaImAn is untouched.
 METHOD_LS = {'MATLAB_FIX': '--'}
+CAIMAN_INIT_THR = 0.70
+CAIMAN_WORKERS = 12
 
 # Test population: figure 1 generator and settings, own seed. Smaller than figure 1
 # (500 cells x 20 min) because CaImAn runs one MATLAB cell at a time.
@@ -726,19 +638,29 @@ def _run_population(data_dir, n_cells=POP_CELLS, duration=POP_DURATION,
     print('Saved to {}.'.format(out_path))
 
 
-def _run_caiman_fix(data_dir):
-    """ Run only the rise-time-fixed CaImAn on the saved population.
+def _run_caiman_parallel(dff, fs, work_dir, n_workers=CAIMAN_WORKERS, **kwargs):
 
-    Regenerates the population from its seed, checks it matches the saved ground
-    truth, and writes results to their own file so nothing else is rerun.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding the population npz; results are written alongside.
-    """
-
+    from concurrent.futures import ThreadPoolExecutor
     from run_pnev_MCMC import run_matlab_pnevMCMC
+
+    chunks = [c for c in np.array_split(np.arange(dff.shape[0]), n_workers) if len(c)]
+
+    def _one(k):
+        """ One MATLAB session on chunk k. """
+        spk, _, probs, _ = run_matlab_pnevMCMC(
+            dff[chunks[k]], fs=fs, tau=TAU, n_sweeps=MATLAB_SWEEPS,
+            work_dir=os.path.join(work_dir, 'w{}'.format(k)), verbose=(k == 0), **kwargs)
+        return spk, probs
+
+    with ThreadPoolExecutor(len(chunks)) as pool:
+        res = list(pool.map(_one, range(len(chunks))))
+    spikes = [s for spk, _ in res for s in spk]
+    probs = np.concatenate([p for _, p in res], axis=0)
+    return spikes, probs
+
+
+def _run_caiman_fix(data_dir, n_workers=CAIMAN_WORKERS):
+
 
     pop_path = os.path.join(data_dir, _POP_NPZ)
     if not os.path.exists(pop_path):
@@ -755,29 +677,83 @@ def _run_caiman_fix(data_dir):
         raise ValueError('Regenerated population differs from {}. Rerun the population '
                          'stage with the current code first.'.format(pop_path))
 
-    print('Running CaImAn (MATLAB), rise-time fix...')
-    spk, _, probs, _ = run_matlab_pnevMCMC(noisy, fs=FS, tau=TAU, n_sweeps=MATLAB_SWEEPS,
-                                           fix_rise_bug=True)
+    print('Running CaImAn (MATLAB), rise-time fix + init threshold {:g}...'.format(
+        CAIMAN_INIT_THR))
+    spk, probs = _run_caiman_parallel(noisy, FS, os.path.join(data_dir, 'caiman_fix_work'),
+                                      n_workers, fix_rise_bug=True,
+                                      init_thr=CAIMAN_INIT_THR)
+    n_empty = sum(len(s) == 0 for s, t in zip(spk, true_spikes) if len(t) > 0)
     if sum(len(s) for s in spk) == 0:
-        raise RuntimeError('CaImAn with rise-time fix returned no spikes.')
+        raise RuntimeError('Fixed CaImAn returned no spikes.')
+    if n_empty:
+        print('  {} cells with true spikes got no calls -- check the MATLAB logs.'.format(
+            n_empty))
 
     arr = np.empty(len(spk), dtype=object)
     for i, x in enumerate(spk):
         arr[i] = np.asarray(x)
     out_path = os.path.join(data_dir, _FIX_NPZ)
     np.savez(out_path, n_true=np.array([len(t) for t in true_spikes]),
+             init_thr=np.array([CAIMAN_INIT_THR]),
              MATLAB_FIX_spikes=arr, MATLAB_FIX_probs=np.asarray(probs, dtype=np.float32))
     print('Saved to {}.'.format(out_path))
 
 
-def _refresh_summary(data_dir):
-    """ Reanalyze if any raw result file is newer than the summary.
+def _run_caiman_fix_framerate(data_dir, n_workers=CAIMAN_WORKERS):
 
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding the result files.
-    """
+    fr_path = os.path.join(data_dir, _FR_NPZ)
+    if not os.path.exists(fr_path):
+        raise FileNotFoundError(
+            'No data at {}. Run --mode test --stages framerate first.'.format(fr_path))
+    fr = np.load(fr_path)
+    rates = fr['rates']
+    n_cells, duration = int(fr['n_cells'][0]), float(fr['duration'][0])
+
+    out = {'rates': rates, 'init_thr': np.array([CAIMAN_INIT_THR])}
+    for r, fs in enumerate(rates):
+        print('\nFrame rate {:.1f} Hz: regenerating {} cells...'.format(fs, n_cells))
+        noisy, true_spikes = _simulate(n_cells, fs, duration, FR_SEED + r)
+        if not np.array_equal(fr['n_true_{}'.format(r)], [len(t) for t in true_spikes]):
+            raise ValueError('Regenerated {:g} Hz population differs from {}. Rerun the '
+                             'framerate stage with the current code first.'.format(
+                                 fs, fr_path))
+
+        print('  Running CaImAn (MATLAB), fixed...')
+        spk, _ = _run_caiman_parallel(noisy, fs, os.path.join(data_dir, 'caiman_fix_work'),
+                                      n_workers, fix_rise_bug=True,
+                                      init_thr=CAIMAN_INIT_THR)
+        if sum(len(s) for s in spk) == 0:
+            print('  Fixed CaImAn returned no spikes at {:.1f} Hz -- skipped.'.format(fs))
+            continue
+        err, cell, offset = _centered_errors(true_spikes, spk, fs)
+        out['MATLAB_FIX_{}_err'.format(r)]      = err
+        out['MATLAB_FIX_{}_cell'.format(r)]     = cell
+        out['MATLAB_FIX_{}_offset'.format(r)]   = np.array([offset])
+        out['MATLAB_FIX_{}_n_called'.format(r)] = np.array([len(s) for s in spk])
+
+    out_path = os.path.join(data_dir, _FR_FIX_NPZ)
+    np.savez(out_path, **out)
+    print('\nSaved to {}.'.format(out_path))
+
+
+def _load_framerate(data_dir):
+
+    path = os.path.join(data_dir, _FR_NPZ)
+    if not os.path.exists(path):
+        return None
+    f = np.load(path)
+    fr = {k: f[k] for k in f.files}
+    fix_path = os.path.join(data_dir, _FR_FIX_NPZ)
+    if os.path.exists(fix_path):
+        fix = np.load(fix_path)
+        if np.array_equal(fix['rates'], fr['rates']):
+            fr.update({k: fix[k] for k in fix.files if k.startswith('MATLAB_FIX_')})
+        else:
+            print('{} is from a different sweep -- rerun --mode caiman_fix.'.format(fix_path))
+    return fr
+
+
+def _refresh_summary(data_dir):
 
     summary = os.path.join(data_dir, _SUMMARY_NPZ)
     raws = [os.path.join(data_dir, f) for f in (_POP_NPZ, _FIX_NPZ)]
@@ -791,14 +767,6 @@ def _refresh_summary(data_dir):
 
 
 def _analyze_population(data_dir):
-    """ Timing and calibration analysis of saved population results.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding the raw population npz (and bug-fixed CaImAn npz, if run);
-        summary is written alongside.
-    """
 
     path = os.path.join(data_dir, _POP_NPZ)
     if not os.path.exists(path):
@@ -808,7 +776,7 @@ def _analyze_population(data_dir):
     raw = {k: pop[k] for k in pop.files}
     true_spikes = [np.asarray(t, dtype=np.float64) for t in raw['true_spikes']]
 
-    # Bug-fixed CaImAn lives in its own file; use it only if it matches this population.
+
     fix_path = os.path.join(data_dir, _FIX_NPZ)
     if os.path.exists(fix_path):
         fix = np.load(fix_path, allow_pickle=True)
@@ -1076,8 +1044,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     if not os.path.exists(path):
         raise FileNotFoundError('No data at {}. Run --mode test first.'.format(path))
     d = np.load(path)
-    fr_path = os.path.join(data_dir, _FR_NPZ)
-    fr = np.load(fr_path) if os.path.exists(fr_path) else None
+    fr = _load_framerate(data_dir)
 
     tol_ms = d['tol_grid'] * 1e3
     debias = bool(d['debias'][0])
@@ -1111,7 +1078,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax_a.axvline(0, color='k', ls='--', lw=0.7, alpha=0.6)
     ax_a.set_ylim(bottom=0)
     ax_a.set_xlabel('timing error (ms)' if not debias else 'timing error, offset removed (ms)')
-    ax_a.set_ylabel('density')
+    ax_a.set_ylabel('matched spikes (fraction / ms)')
     fig.legend(handles=handles, loc='upper center', ncol=len(handles), frameon=False,
                fontsize=6, bbox_to_anchor=(0.5, 0.99))
 
@@ -1129,11 +1096,10 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax_b.set_xlim(0, tol_ms.max())
     ax_b.set_ylim(0, 1)
 
-    # Reliability diagram. Band: 95% interval from resampling cells. Rise-time-fixed
-    # CaImAn left out of this panel.
+
     ax_c.plot([0, 1], [0, 1], '--', color='k', lw=0.7, alpha=0.6)
     for key, (label, color) in _present(d):
-        if key == 'MATLAB_FIX' or '{}_cal_n'.format(key) not in d.files:
+        if '{}_cal_n'.format(key) not in d.files:
             continue
         n    = d['{}_cal_n'.format(key)]
         hits = d['{}_cal_hits'.format(key)]
@@ -1160,10 +1126,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax_c.set_xlabel('predicted spike probability')
     ax_c.set_ylabel('P(spike in frame)')
 
-    # Timing precision vs. frame rate; band is 95% interval from resampling cells.
-    # Dashed floor: a perfect frame-quantized caller has uniform error over one frame,
-    # whose MAD is a quarter frame. Dashed CASCADE segments: traces resampled to its
-    # 40 Hz model.
     if fr is None:
         _placeholder(ax_d, 'framerate')
     else:
@@ -1173,7 +1135,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         for key, (label, color) in METHODS.items():
             spread = np.full((len(rates), 3), np.nan)
             for r in range(len(rates)):
-                if '{}_{}_err'.format(key, r) in fr.files:
+                if '{}_{}_err'.format(key, r) in fr:
                     spread[r] = _centered_spread(fr['{}_{}_err'.format(key, r)],
                                                  fr['{}_{}_cell'.format(key, r)], rng)
             if np.all(np.isnan(spread[:, 0])):
@@ -1185,12 +1147,17 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
                 else np.zeros(len(rates), dtype=bool)
             for r in range(len(rates) - 1):
                 ax_d.plot(rates[r:r + 2], spread[r:r + 2, 0], color=color, lw=1.0,
-                          ls='--' if resampled[r + 1] else '-')
+                          ls='--' if resampled[r + 1] else METHOD_LS.get(key, '-'))
         ax_d.set_xscale('log')
         ax_d.set_yscale('log')
         ax_d.set_xticks(rates)
         ax_d.set_xticklabels(['{:g}'.format(v) for v in rates])
         ax_d.minorticks_off()
+
+        lo, hi = ax_d.get_ylim()
+        yt = [v for v in (1, 2, 5, 10, 20, 50, 100) if lo <= v <= hi]
+        ax_d.set_yticks(yt)
+        ax_d.set_yticklabels(['{:g}'.format(v) for v in yt])
         ax_d.set_xlabel('frame rate (Hz)')
         ax_d.set_ylabel('timing spread, MAD (ms)')
 
@@ -1205,13 +1172,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
-    """ Print summary statistics to the terminal.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory holding the summary npz files.
-    """
 
     _refresh_summary(data_dir)
     d = np.load(os.path.join(data_dir, _SUMMARY_NPZ))
@@ -1249,9 +1209,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
             label, float(d['{}_cal_shift'.format(key)]), ece,
             float(d['{}_cal_brier'.format(key)])))
 
-    fr_path = os.path.join(data_dir, _FR_NPZ)
-    if os.path.exists(fr_path):
-        f = np.load(fr_path)
+    f = _load_framerate(data_dir)
+    if f is not None:
         rates = f['rates']
         rng = np.random.RandomState(0)
         print('\nTiming spread (MAD, ms) vs. frame rate, {} cells x {:.0f} s each:'.format(
@@ -1263,7 +1222,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
             for r in range(len(rates)):
                 k = '{}_{}_err'.format(key, r)
                 row.append(_centered_spread(f[k], f['{}_{}_cell'.format(key, r)], rng)[0]
-                           if k in f.files else np.nan)
+                           if k in f else np.nan)
             print('  {:<22}'.format(label) + ''.join('{:>8.1f}'.format(v) for v in row))
         if np.any(f['cascade_resampled']):
             print('  CASCADE resampled to {:.0f} Hz at: {} Hz.'.format(
@@ -1278,11 +1237,12 @@ if __name__ == '__main__':
     )
     parser.add_argument('--mode', required=True,
                         choices=['test', 'caiman_fix', 'plot', 'stats'],
-                        help='"caiman_fix" runs only the bug-fixed CaImAn on the saved '
-                             'population')
+                        help='"caiman_fix" runs only the fixed CaImAn on the saved '
+                             'population and frame-rate sweep')
     parser.add_argument('--stages', nargs='+', default=['population', 'framerate'],
                         choices=['population', 'analyze', 'framerate'],
-                        help='Test stages to run (test mode)')
+                        help='Test stages to run (test mode); in caiman_fix mode, '
+                             'population and/or framerate')
     parser.add_argument('--data-dir', default=_DEFAULT_DATA_DIR,
                         help='Directory for reading/writing results')
     parser.add_argument('--pop-cells', type=int, default=POP_CELLS,
@@ -1299,6 +1259,8 @@ if __name__ == '__main__':
     parser.add_argument('--no-cascade', action='store_true', help='Skip CASCADE')
     parser.add_argument('--device', default='gpu', choices=['gpu', 'cpu'],
                         help='CASCADE device')
+    parser.add_argument('--workers', type=int, default=CAIMAN_WORKERS,
+                        help='Parallel MATLAB sessions (caiman_fix)')
     args = parser.parse_args()
 
     if args.mode == 'test':
@@ -1306,7 +1268,10 @@ if __name__ == '__main__':
                  args.fr_rates, args.fr_cells, args.fr_duration,
                  not args.no_matlab, not args.no_cascade, args.device)
     elif args.mode == 'caiman_fix':
-        _run_caiman_fix(args.data_dir)
+        if 'population' in args.stages:
+            _run_caiman_fix(args.data_dir, args.workers)
+        if 'framerate' in args.stages:
+            _run_caiman_fix_framerate(args.data_dir, args.workers)
     elif args.mode == 'plot':
         plot_figure(args.data_dir)
     elif args.mode == 'stats':

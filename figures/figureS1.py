@@ -482,15 +482,15 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
         matches = np.where(np.isclose(thresholds, report_thresh))[0]
         for metric_key, metric_label in [('fbeta', 'F_beta'), ('cosmic', 'CosMIC')]:
             arr  = res[f'{prefix}_{metric_key}']           # Shape (n_thresh, n_cells).
-            med  = np.nanmedian(arr, axis=1)               # Shape (n_thresh,).
-            mad  = _mad(arr, axis=1)
-            best_idx = int(np.argmax(med))
-            print('  Max median {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(
-                metric_label, med[best_idx], mad[best_idx], thresholds[best_idx]))
+            mean = np.nanmean(arr, axis=1)                 # Shape (n_thresh,).
+            sd   = np.nanstd(arr, axis=1)
+            best_idx = int(np.argmax(mean))
+            print('  Max mean   {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(
+                metric_label, mean[best_idx], sd[best_idx], thresholds[best_idx]))
             if len(matches) > 0:
                 idx = int(matches[0])
-                print('  Median     {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(
-                    metric_label, med[idx], mad[idx], thresholds[idx]))
+                print('  Mean       {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(
+                    metric_label, mean[idx], sd[idx], thresholds[idx]))
             else:
                 print('  Threshold {:.3f} not in saved sweep; re-run --mode test.'.format(report_thresh))
 

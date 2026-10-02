@@ -93,61 +93,11 @@ def generate_synthetic_data(
         tau_cv=0.0,
         drift_sd=0.0,
         drift_timescale=60.0,
-        return_params=False
+        return_params=False,
+        bursty_frac=0.15,
+        max_rate=4.0
     ):
-    """ Generate synthetic calcium traces and ground-truth spike trains.
 
-    Parameters
-    ----------
-    n_cells : int, optional
-        Number of cells to simulate.
-    fs : float, optional
-        Sampling rate in Hz.
-    duration : float, optional
-        Recording duration in seconds.
-    tau : float, optional
-        Calcium decay time constant in seconds.
-    snr : float or array-like, optional
-        Target signal-to-noise ratio. If None, kurtosis-based noise is used.
-    use_real_data : bool, optional
-        If True, draw firing rate and SNR distributions from real data.
-    target_kurtosis_range : tuple, optional
-        (min, max) kurtosis range for synthetic noise calibration.
-    suite2p_dir : str, optional
-        Suite2p directory, required when use_real_data is True.
-    amp_cv : float, optional
-        Coefficient of variation of per-spike amplitude, drawn lognormal with
-        mean 1 (default 0: every spike has amplitude 1).
-    tau_cv : float, optional
-        Coefficient of variation of per-cell decay time constant, lognormal
-        around tau (default 0: every cell uses tau).
-    drift_sd : float, optional
-        SD of a slow baseline drift, in units of a single-spike peak
-        (default 0: baseline fixed at 0). Added after the noise level is set,
-        so SNR keeps its meaning.
-    drift_timescale : float, optional
-        Timescale of the drift in seconds (Gaussian smoothing SD of white noise).
-    return_params : bool, optional
-        If True, also return a dict of the per-cell simulation parameters.
-
-    Returns
-    -------
-    noisy_traces : np.ndarray
-        Noisy dF/F traces, shape (n_cells, n_frames).
-    true_spike_times : list of np.ndarray
-        Ground-truth spike times in seconds for each cell.
-    clean_traces : np.ndarray
-        Noise-free calcium traces, shape (n_cells, n_frames).
-    t : np.ndarray
-        Time vector in seconds.
-    firing_rates : np.ndarray
-        Simulated firing rates in Hz for each cell.
-    gen_kurtosis : np.ndarray
-        Kurtosis of each noisy trace.
-    params : dict
-        Only if return_params: 'tau' (per-cell decay constants, s) and
-        'drift_sd' (realized SD of each cell's drift).
-    """
     n_frames = int(fs * duration)
     t = np.arange(n_frames) / fs
 
@@ -182,12 +132,12 @@ def generate_synthetic_data(
     if firing_rates is None:
 
         firing_rates = np.random.lognormal(mean=np.log(0.2), sigma=1.0, size=n_cells)
-        firing_rates = np.clip(firing_rates, 0.01, 4.0)
+        firing_rates = np.clip(firing_rates, 0.01, max_rate)
 
     p_spike = firing_rates[:, None] / fs_high
     spikes_high = (np.random.rand(n_cells, n_high) < p_spike).astype(float)
 
-    n_bursty = int(n_cells * 0.15)
+    n_bursty = int(n_cells * bursty_frac)
     if n_bursty > 0:
         print('  Making {} cells bursty (adding spikes)...'.format(n_bursty))
         bursty_indices = np.random.choice(np.arange(n_cells), size=n_bursty, replace=False)
