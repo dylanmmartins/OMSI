@@ -57,7 +57,7 @@ try
     fprintf('POOL workers=%d start=%.2fs threads/worker=%s\n', ...
             pool.NumWorkers, pool_time, mat2str(worker_threads(:)'));
 
-    % cont_ca_sampler initialises with constrained_foopsi, whose default
+    % cont_ca_sampler initializes with constrained_foopsi, whose default
     % method is CVX, as in the serial run. Make sure every worker sees the
     % same CVX and solver as the client instead of failing cell by cell.
     worker_cvx = fetchOutputs(parfevalOnAll(pool, @() which('cvx_begin'), 1), 'UniformOutput', false);

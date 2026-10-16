@@ -154,8 +154,8 @@ def spikes_from_samples(ss, n_frames, fs, lag_s=0.0, spike_method='map'):
         # Return the final posterior sample directly -- mirrors CaImAn's
         # cont_ca_sampler which outputs samples{end} without any post-hoc
         # scoring. After burn-in the chain draws from the posterior;
-        # taking the last sample avoids MAP's double-penalisation of spike
-        # density (sparse prior deflates expected_n, then MAP penalises
+        # taking the last sample avoids MAP's double-penalization of spike
+        # density (sparse prior deflates expected_n, then MAP penalizes
         # anything above that already-deflated expectation).
         sp_best    = np.asarray(ss[-1], dtype=np.float64)
         spikes_sec = np.clip(sp_best - lag_frames, 0, n_frames - 1) / fs

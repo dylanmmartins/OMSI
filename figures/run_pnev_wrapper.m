@@ -38,7 +38,7 @@ try
     end
 
     % cvx_setup is slow and only needed once per session, so run it only when
-    % cvx is present but not yet initialised.
+    % cvx is present but not yet initialized.
     if exist('cvx_setup', 'file') == 2 && isempty(which('cvx_begin'))
         try
             cvx_setup;
