@@ -2,52 +2,6 @@
 """
 figures/opt_ablation.py
 
-Ablation of OMSI's optimizations (i)-(x): each is removed one at a time on a
-single shared population of simulated cells, and its contribution to speed
-and accuracy is reported in one table, alongside CaImAn MCMC as a reference.
-
-The population is 100 cells simulated exactly as figure 1's cells are (same
-generator, SNR distribution, amplitude variability, drift, and tau variability).
-Every condition runs in its own subprocess so environment settings (e.g.
-disabling Numba) and Ray state cannot leak between conditions; each finished
-condition is saved to its own file and skipped on re-runs.
-
-Optimizations are removed through OMSI parameters, including two testing-only
-switches added for this purpose ('ablate_accumulator' for (v) and
-'ablate_energy_cache' for (vi)), or from outside OMSI (Ray CPU count, Numba's
-own disable switch). The rest are listed in the table with the reason they
-were not ablated.
-
-Functions
----------
-_make_population
-    Simulate (or load) the shared population of cells.
-_warm_up
-    Run OMSI once on a short trace so Numba compilation is not timed.
-_limit_ray_cpus
-    Make OMSI's ray.init use a fixed number of CPUs.
-_run_condition
-    Run one ablation condition and save its per-cell outputs.
-_scores
-    Per-cell F-beta and CosMIC for a set of predicted spike trains.
-_load_results
-    Load saved conditions and score them against ground truth.
-_summarize
-    Build the ablation table from saved condition results.
-_print_table
-    Print the table and save it as markdown and CSV.
-_plot_figure
-    Plot per-cell cost and accuracy changes for each ablation.
-
-To run all conditions, then make the table and figure (use an otherwise idle
-machine; timings are the point):
-    $ python opt_ablation.py --mode run
-To rebuild the table and figure from saved results:
-    $ python opt_ablation.py --mode table
-To run only the two code-level ablations, (v) and (vi), and save their data
-(no table or figure; the full-OMSI baseline is run too if it is missing):
-    $ python opt_ablation.py --mode run --code-level-only
-
 DMM, September 2026
 """
 
@@ -69,10 +23,8 @@ mpl.rcParams['ps.fonttype']  = 42
 mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
-# Figure 1's OMSI blue.
 _OMSI_COLOR = '#4C72B0'
 
-# Short row labels for the figure (the table uses the full labels).
 _SHORT_LABELS = {
     'i':      '(i) no local support window',
     'ii':     '(ii) add/remove moves T/100',
@@ -85,19 +37,13 @@ _SHORT_LABELS = {
     'x_jit':  '(x) no Numba',
 }
 
-# Conditions run by --code-level-only: the two optimizations that needed
-# testing-only switches in OMSI's source to undo.
 CODE_LEVEL = ['v', 'vi']
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'opt_ablation')
 _POP_SEED = 20260926
 
-# Figure 1's OMSI parameters; each ablation changes exactly one thing.
 _BASE_PARAMS = {'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 0, 'upd_gam': 1}
 
-# key: (label, parameter overrides, extra settings)
-#   extra: 'ray_cpus' -> limit Ray to this many CPUs; 'env' -> environment
-#   variables for the subprocess; 'matlab' -> run CaImAn MCMC instead of OMSI.
 CONDITIONS = {
     'full':  ('OMSI (all optimizations)', {}, {}),
     'i':     ('(i) no local support window (full-length kernel, prec=0)',
@@ -131,21 +77,6 @@ NOT_ABLATED = [
 
 
 def _make_population(data_dir, n_cells):
-    """ Simulate (or load) the shared population of cells.
-
-    Parameters
-    ----------
-    data_dir : str
-        Output directory; the population is cached as population.npz.
-    n_cells : int
-        Number of cells.
-
-    Returns
-    -------
-    dict
-        noisy (n_cells, n_frames), true_spikes (object array), fs, tau,
-        sim_snr, sim_tau.
-    """
     path = os.path.join(data_dir, 'population.npz')
     if os.path.exists(path):
         with np.load(path, allow_pickle=True) as d:
@@ -164,7 +95,7 @@ def _make_population(data_dir, n_cells):
         n_cells=n_cells, fs=f1.FS, duration=f1.DURATION, tau=f1.TAU, measured_snr=sim_snr,
         amp_cv=f1.AMP_CV, tau_cv=f1.TAU_CV, drift_sd=f1.DRIFT_SD,
         drift_timescale=f1.DRIFT_TIMESCALE, return_params=True)
-    sim_snr = prm['measured_snr']   # achieved SNR (targets may be swapped between cells)
+    sim_snr = prm['measured_snr']
     ts = np.empty(n_cells, dtype=object)
     for i, s in enumerate(true_spikes):
         ts[i] = np.asarray(s, dtype=float)
@@ -178,7 +109,6 @@ def _make_population(data_dir, n_cells):
 
 
 def _warm_up(fs):
-    """ Run OMSI once on a short trace so Numba compilation is not timed. """
     import OMSI
     from simulation_helpers import generate_synthetic_data
     state = np.random.get_state()
@@ -188,7 +118,6 @@ def _warm_up(fs):
 
 
 def _limit_ray_cpus(n_cpus):
-    """ Make OMSI's ray.init use a fixed number of CPUs (no change to OMSI's source). """
     import ray
     orig_init = ray.init
 
@@ -200,17 +129,6 @@ def _limit_ray_cpus(n_cpus):
 
 
 def _run_condition(key, data_dir, n_cells):
-    """ Run one ablation condition and save its per-cell outputs.
-
-    Parameters
-    ----------
-    key : str
-        Key into CONDITIONS.
-    data_dir : str
-        Directory with population.npz; results go to cond_<key>.npz.
-    n_cells : int
-        Number of cells in the population.
-    """
     label, overrides, extra = CONDITIONS[key]
     pop = _make_population(data_dir, n_cells)
     noisy, true_spikes = pop['noisy'], list(pop['true_spikes'])
@@ -227,7 +145,7 @@ def _run_condition(key, data_dir, n_cells):
         wall = time.time() - t0
         if np.all(np.asarray(sweeps) == 0):
             raise RuntimeError('MATLAB returned no result; nothing saved.')
-        n_sweeps = np.full(n_cells, 500)   # posterior samples kept (after 250 burn-in sweeps)
+        n_sweeps = np.full(n_cells, 500)
     else:
         import OMSI
         if extra.get('ray_cpus'):
@@ -242,7 +160,6 @@ def _run_condition(key, data_dir, n_cells):
         wall = time.time() - t0
         spikes = list(res['optim_spikes'])
         cell_times = np.asarray(res['optim_times_per_cell'], dtype=float)
-        # Posterior samples kept after burn-in; OMSI does not report its burn-in length.
         n_sweeps = np.asarray(res['optim_nsamples'])
 
     sp = np.empty(n_cells, dtype=object)
@@ -256,7 +173,6 @@ def _run_condition(key, data_dir, n_cells):
 
 
 def _scores(true_spikes, spikes, fs):
-    """ Per-cell F-beta (window matching, as in figure 1) and CosMIC. """
     import OMSI.helpers as helpers
     import figure1 as f1
     prec, rec, _ = helpers.compute_accuracy_window(true_spikes, spikes)
@@ -264,14 +180,6 @@ def _scores(true_spikes, spikes, fs):
 
 
 def _load_results(data_dir):
-    """ Load saved conditions and score them against ground truth.
-
-    Returns
-    -------
-    dict
-        Condition key -> saved arrays plus per-cell 'fb' and 'cos'.
-        Conditions without saved results are absent.
-    """
     with np.load(os.path.join(data_dir, 'population.npz'), allow_pickle=True) as d:
         true_spikes, fs = list(d['true_spikes']), float(d['fs'])
 
@@ -290,13 +198,6 @@ def _load_results(data_dir):
 
 
 def _summarize(data_dir):
-    """ Build the ablation table from saved condition results.
-
-    Returns
-    -------
-    list of dict
-        One row per condition (ablated or not).
-    """
     from stats_helpers import signed_rank, fmt_test
 
     results = _load_results(data_dir)
@@ -328,7 +229,6 @@ def _summarize(data_dir):
 
 
 def _print_table(rows, data_dir):
-    """ Print the table and save it as markdown and CSV. """
     cols = [('condition', 'Condition', '{}'), ('wall_s', 'Wall (s)', '{:.1f}'),
             ('wall_vs_full', 'Wall / full', '{:.2f}x'),
             ('cpu_s_per_cell', 'Median s/cell', '{:.2f}'),
@@ -360,17 +260,6 @@ def _print_table(rows, data_dir):
 
 
 def _plot_figure(data_dir):
-    """ Plot per-cell cost and accuracy changes for each ablation.
-
-    Left: fold slowdown relative to full OMSI (a unitless ratio; 10 means ten
-    times slower), per cell as a violin (time inside each cell's sampler,
-    drawn on log10 of the ratio) and for the whole run as a black diamond
-    (total wall-clock time). Middle and right: per-cell change in F-beta and
-    CosMIC (ablated - full), with Wilcoxon signed-rank significance.
-    Parallelism is shown only by its diamond: it leaves each cell's own time
-    and output unchanged, so per-cell distributions are not meaningful for it.
-    CaImAn is left out; it is a reference, not an ablation, and is in the table.
-    """
     from matplotlib.markers import MarkerStyle
     from stats_helpers import signed_rank, _stars
 
@@ -388,7 +277,6 @@ def _plot_figure(data_dir):
                             sharey=True, gridspec_kw={'width_ratios': [1.3, 1, 1]})
 
     def _violins(ax, data):
-        """ Horizontal violins in the figure-1 style, skipping no_violin rows. """
         rows = [(np.asarray(d, float), yi) for d, yi, k in zip(data, y, keys)
                 if k not in no_violin]
         rows = [(d[np.isfinite(d)], yi) for d, yi in rows]
@@ -405,7 +293,6 @@ def _plot_figure(data_dir):
             parts[name].set_color('k')
             parts[name].set_linewidth(0.8)
 
-    # Fold slowdown, drawn on log10 so violin shapes are not distorted.
     ax = axs[0]
     ratios = [np.log10(np.asarray(results[k]['cell_times'], float) /
                        np.asarray(ref['cell_times'], float)) for k in keys]
@@ -416,7 +303,6 @@ def _plot_figure(data_dir):
     ax.axvline(0.0, color='0.6', lw=0.6, ls='--')
     vals = np.concatenate([r[np.isfinite(r)] for r in ratios] + [np.array(wall)])
     lo, hi = np.floor(vals.min() * 2) / 2, np.ceil(vals.max() * 2) / 2
-    # Label decades only; unlabeled minor ticks mark 2x-9x steps within each.
     ticks = [t for t in (0.1, 1, 10, 100, 1000) if lo - 0.1 <= np.log10(t) <= hi + 0.1]
     minor = [np.log10(m * t) for t in (0.1, 1, 10, 100) for m in range(2, 10)
              if lo - 0.1 <= np.log10(m * t) <= hi + 0.1]
@@ -468,7 +354,7 @@ def main():
                         help='Run only the code-level ablations (v) and (vi) (plus the full-OMSI '
                              'baseline if it is not saved yet) and save their data; no table '
                              'or figure')
-    parser.add_argument('--condition', help=argparse.SUPPRESS)   # used by worker mode
+    parser.add_argument('--condition', help=argparse.SUPPRESS)
     args = parser.parse_args()
     os.makedirs(args.data_dir, exist_ok=True)
 

@@ -4,122 +4,6 @@ figures/figure2.py
 
 Scaling and sensitivity benchmarks for OMSI.
 
-Functions
----------
-_oasis_spikes_from_s
-    Detect spikes from an OASIS deconvolved signal using threshold or peak-finding.
-_run_cascade_inference
-    Run CASCADE spike inference in a subprocess and return results.
-_metrics
-    Compute all accuracy metrics for predicted spikes against ground truth.
-_row
-    Build a result record dict from metric outputs and metadata.
-_save_records
-    Save a list of record dicts to a .npz file, merging with existing data.
-_load_records
-    Load a .npz record table and return it as a dict of arrays.
-_per_cell_metrics
-    Decode the per-cell metric arrays stored in a table's PerCell column.
-_tbl_len
-    Return the number of rows in a table dict.
-_tbl_filter
-    Filter a table dict by matching a column value.
-_tbl_sort
-    Sort a table dict by a numeric column.
-_records_to_tbl
-    Convert a list of record dicts to a columnar table dict.
-_tbl_concat
-    Concatenate a list of table dicts along the row axis.
-_oasis_spikes
-    Run OASIS deconvolution on all cells and return spikes and calcium traces.
-_trad_mcmc_from_json
-    Load CaImAn MCMC records from a JSON benchmark file.
-_load_external_matlab_data
-    Load all precomputed external MATLAB benchmark records.
-_timing_seed
-    Deterministic RNG seed for one (experiment, x, repeat) timing run.
-_backup_once
-    Copy a results file aside the first time it is about to be overwritten.
-_check_matlab_ok
-    Raise if a MATLAB run returned the empty failure result.
-_run_caiman_checkpointed
-    Run one CaImAn MCMC timing point, or load it from its checkpoint file.
-benchmark_sweeps
-    Benchmark accuracy and speed as a function of MCMC sweep count.
-benchmark_scalability
-    Benchmark inference speed across cell counts and recording durations.
-benchmark_params
-    Benchmark accuracy across calcium decay time constants and frame rates.
-benchmark_noise_sensitivity
-    Benchmark accuracy across a range of SNR levels.
-benchmark_firing_rate_sensitivity
-    Benchmark accuracy as a function of per-cell firing rate.
-benchmark_cascade_sample_rate
-    Compare CASCADE accuracy at 7.5 Hz vs 30 Hz sampling rates.
-run_test
-    Run all benchmark functions and save results to data_dir.
-_fbeta
-    Compute F-beta score from precision and recall arrays.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-_fit_scaling
-    Fit linear and polynomial models to timing data and compare R-squared.
-_set_three_ticks_x
-    Set three evenly spaced x-axis ticks based on plotted data range.
-_filter_cascade_shared_x
-    Restrict CASCADE rows to x-values shared with non-CASCADE methods.
-_rebuild_cascade_sample_rate_data
-    Recompute the CASCADE sample-rate comparison file from saved outputs.
-_plot_cascade_comparison
-    Plot violin comparison of CASCADE accuracy at 7.5 Hz vs 30 Hz.
-_running_median_mad
-    Compute running median and median absolute deviation over a sliding window.
-_median_mad_rows
-    Median and across-cell MAD of one metric for each row of a table.
-_plot_median_band
-    Plot a median trace with a MAD band and no point markers.
-_time_by_x
-    Median and MAD of compute time across repeats at each x value.
-_population_curve
-    Median across populations of a per-population metric, with MAD across populations.
-_noise_curve
-    Precision or recall vs SNR from the cell-level noise table.
-_load_benchmark_tables
-    Load and merge the scaling/sensitivity benchmark tables.
-_load_noise_cells
-    Load the cell-level noise sensitivity table.
-plot_figure
-    Load benchmark results and render figure 2 panels A and B.
-_print_experiment
-    Print one row per model and x value for a benchmark experiment.
-_print_time_experiment
-    Print median +/- MAD compute time across repeats for one timing panel.
-_curve
-    Return one plotted trace as {x: value}, filtered the way the figure filters it.
-_print_signed_rank_tests
-    Print Wilcoxon signed-rank tests for every line and violin panel.
-print_stats
-    Print the values plotted in figure 2 without rendering the figure.
-
-
-To run inference
-    $ python figure2.py --mode test --data-dir /path/to/results
-
-To create figure:
-    $ python figure2.py --mode plot --data-dir /path/to/results
-
-To print the plotted values:
-    $ python figure2.py --mode print --data-dir /path/to/results
-
-To re-run only the timing benchmarks (sweeps, cell count, duration) with repeats:
-    $ python figure2.py --mode timing --repeats 6 --matlab-repeats 3 --data-dir /path/to/results
-
-To re-run only the tau and noise sweeps (bottom row of 2A) on 5 independent populations:
-    $ python figure2.py --mode tau-noise --populations 5 --data-dir /path/to/results
-
-To re-run only the sample-rate sweep (keeps all other results):
-    $ python figure2.py --mode fs-sensitivity --no-matlab --data-dir /path/to/results
-
 DMM, March 2026
 """
 
@@ -145,6 +29,10 @@ from stats_helpers import signed_rank, rank_sum, print_test_header, print_test_r
 
 _MATLAB_PRECOMPUTED_DIR    = '/home/dylan/Fast2/spike_deconv/sweeping_benchmarks/all_other_methods'
 _CASCADE_DURATION_ALT_DIR  = '/home/dylan/Fast2/spike_deconv/sweeping_benchmarks/cascade'
+_CAIMAN_JUNE_SUBDIR = ('june_results', 'only_use_caiman_from_here')
+
+_CAIMAN_EST_DURATION = 7200.0
+_CAIMAN_EST_TIME     = 100 * 6368.0 / 3
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig2')
 
@@ -158,7 +46,7 @@ mpl.rcParams['font.size']    = 7
 np.random.seed(3)
 
 BETA = 0.5
-USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
+USE_STRICT_ACCURACY = False
 
 COLORS = {
     'OMSI':        '#4C72B0',
@@ -170,37 +58,13 @@ COLORS = {
 
 OASIS_SPIKE_DETECTION = 'peaks'
 
-# Opacity of the median +/- MAD bands.
 _MAD_ALPHA = 0.2
 
-# CaImAn MCMC repeats beyond the first only run up to these sizes; the larger
-# points (3000 cells, 120 min) take hours to days and are run once.
 _MATLAB_REPEAT_MAX_CELLS    = 1000
 _MATLAB_REPEAT_MAX_DURATION = 3600
 
 
 def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
-    """
-    Detect spikes from an OASIS deconvolved signal.
-
-    Uses peak-finding or thresholding depending on OASIS_SPIKE_DETECTION.
-
-    Parameters
-    ----------
-    s : ndarray
-        Deconvolved spike signal from OASIS.
-    sigma : float
-        Noise standard deviation estimate for the trace.
-    fs : float
-        Sampling rate in Hz.
-    height : float, optional
-        Threshold multiplier applied to sigma (default 1.0).
-
-    Returns
-    -------
-    ndarray
-        Spike times in seconds.
-    """
     thresh = height * sigma
     if OASIS_SPIKE_DETECTION == 'peaks':
         min_dist = max(1, int(0.05 * fs))
@@ -210,39 +74,6 @@ def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
 
 
 def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu', max_cells_per_call=None):
-    """
-    Run CASCADE spike inference in a subprocess.
-
-    Saves input data, calls the CASCADE subprocess, and reads back results.
-
-    Parameters
-    ----------
-    dff : ndarray, shape (n_cells, n_frames)
-        Delta F over F fluorescence traces.
-    fs : float
-        Sampling rate in Hz.
-    data_dir : str
-        Directory for temporary input/output files.
-    prefix : str
-        Filename prefix for the temporary .npz files.
-    device : str, optional
-        Compute device passed to CASCADE ('gpu' or 'cpu').
-    max_cells_per_call : int or None, optional
-        When set, forwarded to run_cascade_subprocess.py as
-        --max-cells-per-call: splits the call into multiple cascade.predict()
-        calls of at most this many cells each (summing their times), so a
-        single call's input tensor doesn't exceed GPU memory for very large
-        inputs. Default None: unchanged single-call behavior.
-
-    Returns
-    -------
-    cascade_probs : ndarray
-        Per-frame spike probability output from CASCADE.
-    cascade_spikes : list of ndarray
-        Spike times in seconds for each cell.
-    cascade_time : float
-        Wall-clock inference time in seconds.
-    """
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'run_cascade_subprocess.py')
     input_path  = os.path.join(data_dir, f'{prefix}_input.npz')
@@ -263,38 +94,10 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu', max_cells_pe
 
 
 class _MetricDict(dict):
-    """ Dict of median metrics that also carries the per-cell values.
-
-    Behaves exactly like a plain dict, so existing unpacking is unchanged. The
-    per-cell arrays, keyed by metric name, are in the per_cell attribute, which
-    _row serializes into the PerCell column.
-    """
     per_cell = None
 
 
 def _metrics(true_spk, pred_spk, true_ev, fs_):
-    """
-    Compute all accuracy metrics for predicted spikes.
-
-    Parameters
-    ----------
-    true_spk : list of ndarray
-        Ground-truth spike times in seconds for each cell.
-    pred_spk : list of ndarray
-        Predicted spike times in seconds for each cell.
-    true_ev : list of ndarray
-        Ground-truth event times (burst-collapsed) for each cell.
-    fs_ : float
-        Sampling rate in Hz, used for CosMIC computation.
-
-    Returns
-    -------
-    dict
-        Median across cells of the strict, window, and event metrics and
-        CosMIC and per-cell F-beta (keys 'F1', 'Precision', ..., 'COSMIC',
-        'Fbeta', 'Fbeta_window'), plus the matching
-        median absolute deviation under each key with a '_mad' suffix.
-    """
     prec,   rec,   f1   = OMSI.compute_accuracy_strict(true_spk, pred_spk, tolerance=0.1)
     prec_w, rec_w, f1_w = helpers.compute_accuracy_window(true_spk, pred_spk)
     prec_e, rec_e, f1_e = helpers.compute_accuracy_window(true_ev,  pred_spk)
@@ -316,59 +119,12 @@ def _metrics(true_spk, pred_spk, true_ev, fs_):
 
 
 def _mad(x, axis=None):
-    """ Compute the median absolute deviation, ignoring NaNs.
-
-    Parameters
-    ----------
-    x : array-like
-        Input values.
-    axis : int or None, optional
-        Axis along which to compute; None flattens the input.
-
-    Returns
-    -------
-    float or np.ndarray
-        Median of |x - median(x)| along axis.
-    """
     x = np.asarray(x, dtype=float)
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _row(exp, model, tau_, fs_, time_, m, sweeps=0, n_cells=None, duration=None,
          mean_kurtosis=None, **extra):
-    """
-    Build a result record dict from metrics and metadata.
-
-    Parameters
-    ----------
-    exp : str
-        Experiment name (e.g. 'Sweeps', 'Tau_Sensitivity').
-    model : str
-        Algorithm name (e.g. 'OMSI', 'OASIS').
-    tau_ : float
-        Calcium decay time constant in seconds.
-    fs_ : float
-        Sampling rate in Hz.
-    time_ : float
-        Total inference wall-clock time in seconds.
-    m : dict
-        Metric dict returned by _metrics.
-    sweeps : int, optional
-        Number of MCMC sweeps (0 for non-MCMC methods).
-    n_cells : int, optional
-        Number of cells processed.
-    duration : float, optional
-        Recording duration in seconds.
-    mean_kurtosis : float, optional
-        Mean kurtosis of the fluorescence traces.
-    **extra
-        Additional key-value pairs merged into the record.
-
-    Returns
-    -------
-    dict
-        Record mapping field names to scalar values.
-    """
     d = {
         'Experiment': exp, 'Model': model, 'Tau': tau_, 'Fs': fs_,
         'Time': time_, 'Sweeps': sweeps,
@@ -382,8 +138,6 @@ def _row(exp, model, tau_, fs_, time_, m, sweeps=0, n_cells=None, duration=None,
         d['Mean_Kurtosis'] = mean_kurtosis
     per_cell = getattr(m, 'per_cell', None)
     if per_cell:
-        # JSON string keeps the columnar record table (float or string
-        # columns only) intact. Read back with _per_cell_metrics.
         d['PerCell'] = json.dumps(
             {k: [round(float(x), 6) for x in np.asarray(v, dtype=float).ravel()]
              for k, v in per_cell.items()})
@@ -391,22 +145,6 @@ def _row(exp, model, tau_, fs_, time_, m, sweeps=0, n_cells=None, duration=None,
     return d
 
 def _save_records(records, path, experiment=None):
-    """
-    Save a list of record dicts to a .npz file.
-
-    Merges new records with existing data, replacing rows for models already
-    present in the new records.
-
-    Parameters
-    ----------
-    records : list of dict
-        Records to save.
-    path : str
-        Output .npz file path.
-    experiment : str or None, optional
-        If given, only existing rows of this experiment are replaced; rows of
-        other experiments are kept even for models present in the new records.
-    """
     if not records:
         if not os.path.exists(path):
             np.savez(path)
@@ -438,22 +176,8 @@ def _save_records(records, path, experiment=None):
 
 
 def _load_records(path):
-    """
-    Load a .npz record table and return it as a dict of arrays.
-
-    Parameters
-    ----------
-    path : str
-        Path to a .npz file saved by _save_records.
-
-    Returns
-    -------
-    dict
-        Mapping of column names to numpy arrays.
-    """
     d = np.load(path, allow_pickle=True)
     tbl = {k: d[k] for k in d.files}
-    # Results saved before the rename label OMSI as 'fMCSI'.
     for col in ('Model', 'model'):
         if col in tbl:
             tbl[col] = np.array(['OMSI' if str(m) == 'fMCSI' else m for m in tbl[col]],
@@ -462,22 +186,6 @@ def _load_records(path):
 
 
 def _per_cell_metrics(tbl):
-    """
-    Decode the per-cell metric arrays stored in a table's PerCell column.
-
-    Parameters
-    ----------
-    tbl : dict
-        Columnar table as returned by _load_records.
-
-    Returns
-    -------
-    list of dict or None
-        One dict per row mapping metric name to a per-cell array (empty for
-        rows without per-cell data), with 'Fbeta' and 'Fbeta_window' derived
-        from the per-cell precision and recall when not stored. None when the
-        table has no PerCell column.
-    """
     if 'PerCell' not in tbl:
         return None
     out = []
@@ -496,66 +204,20 @@ def _per_cell_metrics(tbl):
 
 
 def _tbl_len(tbl):
-    """Return the number of rows in a table dict."""
     return len(next(iter(tbl.values()))) if tbl else 0
 
 
 def _tbl_filter(tbl, col, val):
-    """
-    Filter a table dict by matching a column value.
-
-    Parameters
-    ----------
-    tbl : dict
-        Columnar table as returned by _load_records.
-    col : str
-        Column name to filter on.
-    val : scalar
-        Value to match.
-
-    Returns
-    -------
-    dict
-        Subset of rows where tbl[col] == val.
-    """
     mask = tbl[col] == val
     return {k: v[mask] for k, v in tbl.items()}
 
 
 def _tbl_sort(tbl, col):
-    """
-    Sort a table dict by a numeric column.
-
-    Parameters
-    ----------
-    tbl : dict
-        Columnar table as returned by _load_records.
-    col : str
-        Column name to sort by.
-
-    Returns
-    -------
-    dict
-        Table with rows sorted in ascending order of tbl[col].
-    """
     idx = np.argsort(tbl[col].astype(float))
     return {k: v[idx] for k, v in tbl.items()}
 
 
 def _records_to_tbl(records):
-    """
-    Convert a list of record dicts to a columnar table dict.
-
-    Parameters
-    ----------
-    records : list of dict
-        Records to convert.
-
-    Returns
-    -------
-    dict
-        Mapping of column names to numpy arrays.
-    """
     if not records:
         return {}
     keys = list(dict.fromkeys(k for r in records for k in r))
@@ -571,19 +233,6 @@ def _records_to_tbl(records):
 
 
 def _tbl_concat(tbls):
-    """
-    Concatenate a list of table dicts along the row axis.
-
-    Parameters
-    ----------
-    tbls : list of dict
-        Tables to concatenate; missing columns are filled with NaN or ''.
-
-    Returns
-    -------
-    dict
-        Combined table with all rows from all input tables.
-    """
     tbls = [t for t in tbls if t]
     if not tbls:
         return {}
@@ -609,34 +258,10 @@ def _tbl_concat(tbls):
 
 
 def _oasis_spikes(dff, fs, n_cells):
-    """
-    Run OASIS deconvolution on all cells with OASIS's default settings.
-
-    OASIS fits a single-exponential (AR(1)) kernel and estimates the decay and
-    the noise level from each trace itself; neither is given to it. The spike
-    threshold uses that same noise estimate.
-
-    Parameters
-    ----------
-    dff : ndarray, shape (n_cells, n_frames)
-        Delta F over F fluorescence traces.
-    fs : float
-        Sampling rate in Hz.
-    n_cells : int
-        Number of cells.
-
-    Returns
-    -------
-    spikes : list of ndarray
-        Spike times in seconds for each cell.
-    calcium : list of ndarray
-        Denoised calcium traces for each cell.
-    """
     spikes, calcium = [], []
     for i in range(n_cells):
         y = np.asarray(dff[i], dtype=np.float64)
         c, s, _, _, _ = deconvolve(y)
-        # Same noise estimate OASIS makes internally by default.
         sn = max(float(estimate_parameters(y, p=1, fudge_factor=0.98)[1]), 1e-9)
         spikes.append(_oasis_spikes_from_s(s, sn, fs))
         calcium.append(c)
@@ -644,19 +269,6 @@ def _oasis_spikes(dff, fs, n_cells):
 
 
 def _trad_mcmc_from_json(json_path):
-    """
-    Load CaImAn MCMC records from a JSON benchmark file.
-
-    Parameters
-    ----------
-    json_path : str
-        Path to a JSON file containing benchmark records.
-
-    Returns
-    -------
-    list of dict
-        Records with model name normalized to 'CaImAn MCMC'.
-    """
     if not os.path.exists(json_path):
         print('  WARNING: precomputed file not found: {}'.format(json_path))
         return []
@@ -673,16 +285,6 @@ def _trad_mcmc_from_json(json_path):
 
 
 def _load_external_matlab_data():
-    """
-    Load all precomputed external MATLAB benchmark records.
-
-    Returns
-    -------
-    dict
-        Keys are benchmark names ('sweeps', 'scalability', 'params',
-        'noise_sensitivity', 'firing_rate') mapping to lists of record dicts,
-        plus paths to precomputed trace .npz files.
-    """
     d = _MATLAB_PRECOMPUTED_DIR
     return {
         'sweeps':            _trad_mcmc_from_json(os.path.join(d, 'benchmark_sweeps_partial.json')),
@@ -696,42 +298,10 @@ def _load_external_matlab_data():
 
 
 def _timing_seed(experiment, x, rep):
-    """
-    Deterministic RNG seed for one (experiment, x, repeat) timing run.
-
-    Seeding per point means a resumed CaImAn checkpoint was run on exactly the
-    same synthetic data as the other methods in that repeat.
-
-    Parameters
-    ----------
-    experiment : str
-        Experiment name.
-    x : float
-        Value of the swept variable.
-    rep : int
-        Repeat index.
-
-    Returns
-    -------
-    int
-        Seed for np.random.seed.
-    """
     return zlib.crc32('{}|{:g}|{}'.format(experiment, float(x), rep).encode()) & 0x7fffffff
 
 
 def _backup_once(path):
-    """
-    Copy a results file aside the first time it is about to be overwritten.
-
-    _save_records replaces every existing row of a model it is given, so the
-    first save of a new run would drop that model's older results. The copy
-    ('<name>.bak.npz') is never overwritten afterwards.
-
-    Parameters
-    ----------
-    path : str
-        Results .npz file.
-    """
     bak = path[:-len('.npz')] + '.bak.npz'
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
@@ -739,49 +309,11 @@ def _backup_once(path):
 
 
 def _check_matlab_ok(sweeps):
-    """
-    Raise if a MATLAB run returned the empty failure result.
-
-    run_matlab_pnevMCMC reports failure by returning zero sweeps for every cell
-    rather than raising; its elapsed time must not be recorded as a benchmark.
-
-    Parameters
-    ----------
-    sweeps : array-like
-        Sweeps per cell returned by run_matlab_pnevMCMC.
-    """
     if sweeps is None or np.all(np.asarray(sweeps) == 0):
         raise RuntimeError('MATLAB returned no result (see its output above)')
 
 
 def _run_caiman_checkpointed(data_dir, experiment, x, rep, run_fn):
-    """
-    Run one CaImAn MCMC timing point, or load it from its checkpoint file.
-
-    Each completed run is written to data_dir/caiman_runs/ as its own .npz
-    before anything else happens, so a crash later in the benchmark loses at
-    most the run in progress. Re-running the benchmark reuses these files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    experiment : str
-        Experiment name, e.g. 'Cell_Scaling'.
-    x : float
-        Value of the swept variable.
-    rep : int
-        Repeat index.
-    run_fn : callable
-        Runs MATLAB and returns (record dict, dict of arrays to store).
-
-    Returns
-    -------
-    record : dict
-        Result record for the benchmark table.
-    arrays : dict
-        Stored arrays (e.g. 'spikes').
-    """
     ckpt_dir = os.path.join(data_dir, 'caiman_runs')
     os.makedirs(ckpt_dir, exist_ok=True)
     path = os.path.join(ckpt_dir, '{}_{:g}_rep{}.npz'.format(experiment, float(x), rep))
@@ -792,8 +324,6 @@ def _run_caiman_checkpointed(data_dir, experiment, x, rep, run_fn):
         print('    CaImAn MCMC: {:.1f}s (loaded checkpoint {})'.format(record['Time'], path))
         return record, arrays
     record, arrays = run_fn()
-    # Write to a temporary name first so a crash mid-write cannot leave a
-    # truncated file that would later be loaded as a finished run.
     tmp = path[:-len('.npz')] + '.tmp.npz'
     np.savez(tmp, record=json.dumps(record, default=float), **arrays)
     os.replace(tmp, path)
@@ -802,33 +332,6 @@ def _run_caiman_checkpointed(data_dir, experiment, x, rep, run_fn):
 
 
 def _run_caiman_accuracy(data_dir, experiment, x, pop, dff, fs, tau):
-    """
-    Run CaImAn MCMC for one accuracy point, checkpointed to its own file.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    experiment : str
-        Experiment name, e.g. 'Tau_Sensitivity'.
-    x : float
-        Value of the swept variable.
-    pop : int
-        Population index.
-    dff : ndarray
-        Traces to deconvolve.
-    fs, tau : float
-        Sampling rate (Hz) and decay time constant (s).
-
-    Returns
-    -------
-    spikes : list of ndarray
-        Inferred spike times per cell.
-    t_trad : float
-        Wall-clock time in seconds.
-    sweeps : ndarray
-        Sweeps per cell.
-    """
     def _run():
         t0 = time.time()
         spikes, _, _, sweeps = run_matlab_pnevMCMC(dff, fs=fs, tau=tau, n_sweeps='auto')
@@ -843,31 +346,6 @@ def _run_caiman_accuracy(data_dir, experiment, x, pop, dff, fs, tau):
 
 def benchmark_sweeps(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
                      run_cascade=True, matlab_records=None, repeats=1, matlab_repeats=1):
-    """
-    Benchmark accuracy and speed as a function of MCMC sweep count.
-
-    Generates synthetic data and runs each enabled method across a range of
-    sweep counts, saving results incrementally.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
-    run_mine : bool, optional
-        Whether to run OMSI.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    matlab_records : list of dict or None, optional
-        Precomputed CaImAn MCMC records to inject instead of running MATLAB.
-    repeats : int, optional
-        Number of repeats, each on freshly simulated data.
-    matlab_repeats : int, optional
-        Number of those repeats that also run CaImAn MCMC.
-    """
     n_cells     = 50
     duration    = 600
     fs          = 30.0
@@ -977,34 +455,6 @@ def benchmark_sweeps(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
 
 def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
                            run_cascade=True, matlab_records=None, repeats=1, matlab_repeats=1):
-    """
-    Benchmark inference speed across cell counts and recording durations.
-
-    Every point is timed once per repeat on freshly simulated data (seeded per
-    point, see _timing_seed). CaImAn MCMC runs in the first matlab_repeats
-    repeats, and after the first only up to _MATLAB_REPEAT_MAX_CELLS cells and
-    _MATLAB_REPEAT_MAX_DURATION seconds. Each CaImAn run is checkpointed to its
-    own file (see _run_caiman_checkpointed).
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
-    run_mine : bool, optional
-        Whether to run OMSI.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    matlab_records : list of dict or None, optional
-        Precomputed CaImAn MCMC records to inject instead of running MATLAB.
-    repeats : int, optional
-        Number of repeats.
-    matlab_repeats : int, optional
-        Number of those repeats that also run CaImAn MCMC.
-    """
     fs  = 30.0
     tau = 1.2
     cell_counts    = [50, 200, 500, 1000, 2000, 3000]
@@ -1017,7 +467,6 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
     _backup_once(partial_path)
 
     def _time_point(experiment, xcol, x, n_cells, duration, rep, matlab_cap):
-        """Time every enabled method on one simulated dataset."""
         try:
             np.random.seed(_timing_seed(experiment, x, rep))
             dff, _, _, _, _, _ = generate_synthetic_data(
@@ -1109,33 +558,6 @@ def benchmark_scalability(data_dir, run_oasis=True, run_matlab=True, run_mine=Tr
 def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
                      run_cascade=True, matlab_records=None, experiments=('tau', 'fs'),
                      populations=1):
-    """
-    Benchmark accuracy across calcium decay time constants and frame rates.
-
-    Each x value is run on `populations` independently simulated cell
-    populations, seeded per (experiment, x, population), so the spread of the
-    per-population medians gives the uncertainty of each plotted point.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB (each run is checkpointed).
-    run_mine : bool, optional
-        Whether to run OMSI.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    matlab_records : list of dict or None, optional
-        Precomputed CaImAn MCMC records to inject instead of running MATLAB.
-    experiments : tuple of str, optional
-        Which sweeps to run: 'tau' and/or 'fs'. Rows of a sweep that is not
-        run are left untouched in the partial file.
-    populations : int, optional
-        Number of independent cell populations per x value.
-    """
     n_cells  = 50
     duration = 300
     tau_values = [0.2, 0.5, 0.8, 1.2, 2.0]
@@ -1222,33 +644,6 @@ def benchmark_params(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
 def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_mine=True,
                                   run_cascade=True, matlab_records=None, cells_only=False,
                                   populations=1):
-    """
-    Benchmark accuracy across a range of SNR levels.
-
-    Each population is one simulated set of clean traces, re-noised at every
-    SNR level. Populations use independent seeds, and the noise at each
-    (population, SNR) is seeded separately, so a resumed CaImAn checkpoint saw
-    the same traces as the other methods.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB (each run is checkpointed).
-    run_mine : bool, optional
-        Whether to run OMSI.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    matlab_records : list of dict or None, optional
-        Precomputed CaImAn MCMC records to inject instead of running MATLAB.
-    cells_only : bool, optional
-        If True, only save per-cell results without updating the main table.
-    populations : int, optional
-        Number of independent cell populations.
-    """
     n_cells    = 50
     duration   = 300
     fs         = 30.0
@@ -1279,7 +674,6 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
         peak_signals = np.maximum(peak_signals, 1e-9)
 
         def _append_cell_rows(model_name, snr_val, pred_spk):
-            """Record per-cell precision and recall for a given model and SNR level."""
             p, r, _   = OMSI.compute_accuracy_strict(true_spikes, pred_spk, tolerance=0.1)
             pw, rw, _ = helpers.compute_accuracy_window(true_spikes, pred_spk)
             for i in range(n_cells):
@@ -1294,7 +688,6 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
                 })
 
         def km(pred_spk):
-            """Shorthand for computing all accuracy metrics against ground-truth spikes."""
             return _metrics(true_spikes, pred_spk, true_events, fs)
 
         for snr_val in snr_levels:
@@ -1367,24 +760,6 @@ def benchmark_noise_sensitivity(data_dir, run_oasis=True, run_matlab=True, run_m
 
 def benchmark_firing_rate_sensitivity(data_dir, run_oasis=True, run_matlab=True,
                                       run_mine=True, run_cascade=True, matlab_records=None):
-    """
-    Benchmark accuracy as a function of per-cell firing rate.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
-    run_mine : bool, optional
-        Whether to run OMSI.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    matlab_records : list of dict or None, optional
-        Precomputed CaImAn MCMC records to inject instead of running MATLAB.
-    """
     n_cells  = 250
     duration = 300
     fs       = 30.0
@@ -1402,25 +777,6 @@ def benchmark_firing_rate_sensitivity(data_dir, run_oasis=True, run_matlab=True,
     partial_path = os.path.join(data_dir, 'firing_rate_sensitivity_partial.npz')
 
     def per_cell(model, i, pred_spk_i, time_i):
-        """
-        Compute per-cell accuracy metrics and return a result record dict.
-
-        Parameters
-        ----------
-        model : str
-            Algorithm name.
-        i : int
-            Cell index.
-        pred_spk_i : ndarray
-            Predicted spike times in seconds for cell i.
-        time_i : float
-            Inference time for cell i in seconds.
-
-        Returns
-        -------
-        dict
-            Per-cell accuracy record.
-        """
         prec,   rec,   f1   = OMSI.compute_accuracy_strict([true_spikes[i]], [pred_spk_i])
         prec_w, rec_w, f1_w = helpers.compute_accuracy_window([true_spikes[i]], [pred_spk_i])
         prec_e, rec_e, f1_e = helpers.compute_accuracy_window([true_events[i]], [pred_spk_i])
@@ -1520,16 +876,6 @@ _CASCADE_SR_TAU      = 1.2
 
 
 def benchmark_cascade_sample_rate(data_dir, run_cascade=True):
-    """
-    Compare CASCADE accuracy at 7.5 Hz vs 30 Hz sampling rates.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for result files.
-    run_cascade : bool, optional
-        Whether to run CASCADE inference (skips if False, uses NaN placeholders).
-    """
     from simulation_helpers import generate_synthetic_data
 
     out_path = os.path.join(data_dir, 'cascade_7p5_vs_30hz_data.npz')
@@ -1624,7 +970,6 @@ def print_summary(data_dir=_DEFAULT_DATA_DIR):
         'Experiment', 'Model', 'Var', 'Fbeta', 'Precision', 'Recall', 'CosMIC', 'Time (s)')
 
     def _fmt_time(vals):
-        """Format a time value/array: plain if a single measurement, median +/- MAD if several."""
         v = np.asarray(vals, dtype=float)
         v = v[np.isfinite(v)]
         if len(v) == 0:
@@ -1634,7 +979,6 @@ def print_summary(data_dir=_DEFAULT_DATA_DIR):
         return _fmt_median_mad(v, width=12)
 
     def _print_rows(rows):
-        """Print one summary line per (Model, variable) using per-cell arrays."""
         print(header)
         print('-' * len(header))
         for exp, var_label, var_val, model, fb, p, r, cos, t in rows:
@@ -1644,12 +988,6 @@ def print_summary(data_dir=_DEFAULT_DATA_DIR):
                 _fmt_median_mad(r), _fmt_median_mad(cos), _fmt_time(t)))
 
     def _rows_from_row_table(path, exp_name, var_col, var_fmt='{:g}'):
-        """
-        Build (exp, var_label, var_val, model, fb, p, r, cos, time) rows from
-        a table written via _row (PerCell column present when re-run since
-        the per-cell change; older/injected rows fall back to the single
-        mean). Time is always the row's single stored wall-clock value.
-        """
         out = []
         if not os.path.exists(path):
             return out
@@ -1812,28 +1150,6 @@ def print_summary(data_dir=_DEFAULT_DATA_DIR):
 def run_test(data_dir=_DEFAULT_DATA_DIR, run_omsi=True, run_matlab=True,
              run_oasis=True, run_cascade=True, repeats=1, matlab_repeats=1,
              populations=1):
-    """
-    Run all benchmark functions and save results to data_dir.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory for result files.
-    run_omsi : bool, optional
-        Whether to run OMSI.
-    run_matlab : bool, optional
-        Whether to run CaImAn MCMC via MATLAB.
-    run_oasis : bool, optional
-        Whether to run OASIS.
-    run_cascade : bool, optional
-        Whether to run CASCADE.
-    repeats : int, optional
-        Repeats of the timing benchmarks (sweeps, cell count, duration).
-    matlab_repeats : int, optional
-        Number of those repeats that also run CaImAn MCMC.
-    populations : int, optional
-        Independent cell populations for the tau, frame-rate and noise sweeps.
-    """
     os.makedirs(data_dir, exist_ok=True)
 
     ext = None
@@ -1882,7 +1198,6 @@ def _fit_scaling(x, y):
         return np.nan, np.nan, 'N/A'
     x, y = np.array(x, float), np.array(y, float)
     def r2(y_pred):
-        """Compute R-squared of y_pred against the outer y."""
         ss_res = np.sum((y - y_pred) ** 2)
         ss_tot = np.sum((y - np.mean(y)) ** 2)
         return 0.0 if ss_tot < 1e-9 else 1 - ss_res / ss_tot
@@ -1899,14 +1214,6 @@ def _fit_scaling(x, y):
 
 
 def _set_three_ticks_x(ax):
-    """
-    Set three evenly spaced x-axis ticks based on plotted data range.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes object to modify in place.
-    """
     all_x = [v for line in ax.get_lines() for v in line.get_xdata()]
     if len(all_x) < 2:
         return
@@ -1918,23 +1225,6 @@ def _set_three_ticks_x(ax):
 
 
 def _filter_cascade_shared_x(cascade_sub, full_tbl, xcol):
-    """
-    Restrict CASCADE rows to x-values shared with non-CASCADE methods.
-
-    Parameters
-    ----------
-    cascade_sub : dict
-        Subset of the table containing only CASCADE rows.
-    full_tbl : dict
-        Full benchmark table including all methods.
-    xcol : str
-        Name of the x-axis column (e.g. 'N_Cells', 'Tau').
-
-    Returns
-    -------
-    dict
-        Filtered CASCADE rows.
-    """
     non_cascade = np.array([not str(m).startswith('CASCADE') for m in full_tbl['Model']], dtype=bool)
     vals = full_tbl[xcol][non_cascade].astype(float)
     other_x = set(vals[~np.isnan(vals)].tolist())
@@ -1947,17 +1237,6 @@ _CASCADE_CMP_COLOR_30  = 'tab:cyan'
 
 
 def _rebuild_cascade_sample_rate_data(data_dir):
-    """
-    Recompute the CASCADE sample-rate comparison file from saved outputs.
-
-    Loads previously saved true spikes and CASCADE output files from data_dir
-    and writes cascade_7p5_vs_30hz_data.npz.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing saved output files.
-    """
     out_path = os.path.join(data_dir, 'cascade_7p5_vs_30hz_data.npz')
     results  = {}
 
@@ -2006,16 +1285,6 @@ def _rebuild_cascade_sample_rate_data(data_dir):
 
 
 def _plot_cascade_comparison(ax, data_dir):
-    """
-    Plot violin comparison of CASCADE accuracy at 7.5 Hz vs 30 Hz.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to plot into.
-    data_dir : str
-        Directory containing cascade_7p5_vs_30hz_data.npz.
-    """
     from matplotlib.patches import Patch
 
     npz_path = os.path.join(data_dir, 'cascade_7p5_vs_30hz_data.npz')
@@ -2064,31 +1333,10 @@ def _plot_cascade_comparison(ax, data_dir):
     ], loc='upper right', handlelength=1.0, handleheight=0.8,
        borderpad=0.4, labelspacing=0.2, frameon=False)
     ax.set_ylabel('score')
-    ax.set_ylim(0, 1.1)
+    ax.set_ylim(-0.05, 1.1)
 
 
 def _running_median_mad(x, y, x_out, bandwidth):
-    """
-    Compute running median and median absolute deviation over a sliding window.
-
-    Parameters
-    ----------
-    x : ndarray
-        Independent variable values.
-    y : ndarray
-        Dependent variable values.
-    x_out : ndarray
-        Center points at which to evaluate the running statistic.
-    bandwidth : float
-        Half-width of the sliding window.
-
-    Returns
-    -------
-    medians : ndarray
-        Running median at each point in x_out (NaN where fewer than 5 points).
-    mads : ndarray
-        Running median absolute deviation at each point in x_out.
-    """
     medians = np.full(len(x_out), np.nan)
     mads    = np.full(len(x_out), np.nan)
     for i, xc in enumerate(x_out):
@@ -2101,24 +1349,6 @@ def _running_median_mad(x, y, x_out, bandwidth):
 
 
 def _median_mad_rows(subset, col):
-    """
-    Median and across-cell MAD of one metric for each row of a table.
-
-    Parameters
-    ----------
-    subset : dict
-        Columnar table rows (one row per x value).
-    col : str
-        Metric column, e.g. 'Precision_window' or 'Fbeta_window'.
-
-    Returns
-    -------
-    med : ndarray
-        The stored median column when present, else the median of the per-cell
-        values, else (for F-beta columns) F-beta of the stored precision/recall.
-    mad : ndarray
-        MAD across cells from the per-cell values (NaN where not recorded).
-    """
     n   = _tbl_len(subset)
     pcs = _per_cell_metrics(subset)
     med = np.full(n, np.nan)
@@ -2138,47 +1368,14 @@ def _median_mad_rows(subset, col):
 
 
 def _plot_median_band(ax, x, med, mad, color):
-    """
-    Plot a median trace with a MAD band and no point markers.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to draw on.
-    x, med, mad : array-like
-        x values, medians, and MADs (the band is skipped where MAD is NaN).
-    color : str
-        Line and band color.
-    """
     x, med, mad = (np.asarray(v, dtype=float) for v in (x, med, mad))
-    ax.plot(x, med, '-', color=color)
+    ax.plot(x, med, '-o', color=color, ms=3)
     if np.any(np.isfinite(mad)):
         ax.fill_between(x, med - mad, med + mad, color=color, alpha=_MAD_ALPHA,
                         edgecolor='none', linewidth=0)
 
 
 def _time_by_x(subset, xcol, x_scale=1.0):
-    """
-    Median and MAD of compute time across repeats at each x value.
-
-    Parameters
-    ----------
-    subset : dict
-        Timing rows for one model and experiment (one row per repeat and x).
-    xcol : str
-        Column holding the swept variable.
-    x_scale : float, optional
-        Divisor applied to x values.
-
-    Returns
-    -------
-    xs : ndarray
-        Distinct x values, divided by x_scale.
-    med : ndarray
-        Median time in minutes.
-    mad : ndarray
-        MAD of time in minutes (NaN where only one repeat exists).
-    """
     x = subset[xcol].astype(float)
     t = subset['Time'].astype(float) / 60.0
     xs = np.unique(x[np.isfinite(x)])
@@ -2189,26 +1386,6 @@ def _time_by_x(subset, xcol, x_scale=1.0):
 
 
 def _population_curve(subset, xcol, col):
-    """
-    Median across populations of a per-population metric, with MAD across populations.
-
-    Falls back to one row per x with the across-cell MAD when fewer than two
-    populations were run (results saved before populations existed).
-
-    Parameters
-    ----------
-    subset : dict
-        Rows for one model and experiment.
-    xcol : str
-        Column holding the swept variable.
-    col : str
-        Metric column (see _median_mad_rows).
-
-    Returns
-    -------
-    xs, med, mad : ndarray
-        Sorted x values, median, and MAD.
-    """
     x = subset[xcol].astype(float)
     row_med, row_mad = _median_mad_rows(subset, col)
     pops = subset['Population'].astype(float) if 'Population' in subset else np.full(len(x), np.nan)
@@ -2222,27 +1399,6 @@ def _population_curve(subset, xcol, col):
 
 
 def _noise_curve(noise_cells, model, col):
-    """
-    Precision or recall vs SNR from the cell-level noise table.
-
-    With several populations the curve is the median of the per-population
-    medians and the band their MAD; with one population it is the median and
-    MAD across cells.
-
-    Parameters
-    ----------
-    noise_cells : dict
-        Cell-level noise table from _load_noise_cells.
-    model : str
-        Model to extract.
-    col : str
-        Metric column.
-
-    Returns
-    -------
-    xs, med, mad : ndarray
-        SNR values in descending order, median, and MAD.
-    """
     snr   = noise_cells['SNR'].astype(float)
     vals  = noise_cells[col].astype(float)
     pops  = (noise_cells['Population'].astype(float) if 'Population' in noise_cells
@@ -2265,21 +1421,6 @@ def _noise_curve(noise_cells, model, col):
 
 
 def _load_benchmark_tables(data_dir):
-    """
-    Load and merge the scaling/sensitivity benchmark tables used by figure 2.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing benchmark result .npz files.
-
-    Returns
-    -------
-    combined : dict
-        Columnar table of all benchmark rows, including external CaImAn MCMC records.
-    dur_cascade_tbl : dict
-        CASCADE duration-scaling rows from the alternate directory (empty if unavailable).
-    """
     partial_files = [
         'benchmark_sweeps_partial.npz',
         'benchmark_scalability_partial.npz',
@@ -2307,7 +1448,6 @@ def _load_benchmark_tables(data_dir):
     ext = _load_external_matlab_data()
     ext_benchmark_keys = ['sweeps', 'scalability', 'params', 'noise_sensitivity']
     ext_records = []
-    # Locally re-run (Experiment, Model) pairs take precedence over the precomputed ones.
     local_pairs = set(zip(combined['Experiment'], combined['Model']))
     for key in ext_benchmark_keys:
         ext_records.extend(r for r in ext[key]
@@ -2316,6 +1456,26 @@ def _load_benchmark_tables(data_dir):
         ext_tbl = _records_to_tbl(ext_records)
         combined = _tbl_concat([combined, ext_tbl])
         print('Injected {} CaImAn MCMC records from external files.'.format(len(ext_records)))
+
+    june_path = os.path.join(data_dir, *_CAIMAN_JUNE_SUBDIR, 'benchmark_scalability_partial.json')
+    if os.path.exists(june_path):
+        fill = []
+        for r in _trad_mcmc_from_json(june_path):
+            exp = r.get('Experiment')
+            if exp not in ('Cell_Scaling', 'Duration_Scaling'):
+                continue
+            xcol = 'N_Cells' if exp == 'Cell_Scaling' else 'Duration'
+            have = ((combined['Model'] == 'CaImAn MCMC') & (combined['Experiment'] == exp) &
+                    (combined[xcol].astype(float) == float(r[xcol])))
+            if not np.any(have):
+                fill.append(r)
+        if fill:
+            combined = _tbl_concat([combined, _records_to_tbl(fill)])
+        print('Filled {} missing CaImAn compute-time point(s) from {}: {}'.format(
+            len(fill), june_path,
+            ', '.join('{} {:g}'.format(r['Experiment'], float(
+                r['N_Cells' if r['Experiment'] == 'Cell_Scaling' else 'Duration']))
+                for r in fill) or 'none'))
 
     extra_gpu_path = os.path.join(data_dir, 'benchmark_scalability_cascade_gpu_extra.npz')
     if os.path.exists(extra_gpu_path):
@@ -2326,7 +1486,7 @@ def _load_benchmark_tables(data_dir):
                 exp   = str(extra_gpu_tbl['Experiment'][i])
                 model = str(extra_gpu_tbl['Model'][i])
                 if model != 'CASCADE_GPU' or exp not in ('Cell_Scaling', 'Duration_Scaling'):
-                    continue  # this file should only ever hold these, but don't trust it blindly
+                    continue
                 xcol = 'N_Cells' if exp == 'Cell_Scaling' else 'Duration'
                 xval = float(extra_gpu_tbl[xcol][i])
                 already_real = (
@@ -2335,7 +1495,7 @@ def _load_benchmark_tables(data_dir):
                     (combined.get(xcol, np.array([])).astype(float) == xval)
                 ) if combined else np.array([], dtype=bool)
                 if np.any(already_real):
-                    continue  # the real benchmark already has this point -- prefer it
+                    continue
                 keep_rows.append({k: extra_gpu_tbl[k][i] for k in extra_gpu_tbl})
             if keep_rows:
                 combined = _tbl_concat([combined, _records_to_tbl(keep_rows)])
@@ -2382,19 +1542,6 @@ def _load_benchmark_tables(data_dir):
 
 
 def _load_noise_cells(data_dir):
-    """
-    Load the cell-level noise sensitivity table, if present.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing benchmark_noise_sensitivity_cells.npz.
-
-    Returns
-    -------
-    dict or None
-        Columnar table of per-cell noise rows, or None if unavailable.
-    """
     _cells_path = os.path.join(data_dir, 'benchmark_noise_sensitivity_cells.npz')
     _noise_cells = None
     if os.path.exists(_cells_path):
@@ -2407,17 +1554,6 @@ def _load_noise_cells(data_dir):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR):
-    """
-    Load benchmark results and render figure 2 panels A and B.
-
-    Panel A shows scaling and sensitivity benchmarks (sweeps, cells, duration,
-    tau, noise). Panel B shows frame-rate sensitivity and CASCADE comparison.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing benchmark result .npz files.
-    """
     combined, dur_cascade_tbl = _load_benchmark_tables(data_dir)
 
     fr_tbl = {}
@@ -2518,8 +1654,12 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
             continue
         subset = _tbl_sort(_tbl_filter(m_rows, 'Experiment', 'Duration_Scaling'), 'Duration')
         if _tbl_len(subset) > 0:
-            _plot_median_band(axA['duration'], *_time_by_x(subset, 'Duration', 60.0),
-                              COLORS.get(model, 'k'))
+            xs_d, med_d, mad_d = _time_by_x(subset, 'Duration', 60.0)
+            _plot_median_band(axA['duration'], xs_d, med_d, mad_d, COLORS.get(model, 'k'))
+            if model == 'CaImAn MCMC' and _CAIMAN_EST_DURATION / 60.0 not in xs_d:
+                axA['duration'].plot([xs_d[-1], _CAIMAN_EST_DURATION / 60.0],
+                                     [med_d[-1], _CAIMAN_EST_TIME / 60.0],
+                                     '-o', color=COLORS[model], ms=3)
             r2l, r2p, c = _fit_scaling(subset['Duration'], subset['Time'])
             scaling_stats.append({'Experiment': 'Duration_Scaling', 'Model': model,
                                    'Variable': 'Duration', 'Lin_R2': r2l,
@@ -2552,7 +1692,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ]:
         axA[ax_key].set_xlabel(xlabel)
         axA[ax_key].set_ylabel(ylabel)
-        axA[ax_key].set_ylim(0.45, 1.05)
+        axA[ax_key].set_ylim(-0.05, 1.05)
         _set_three_ticks_x(axA[ax_key])
 
     _noise_cells = _load_noise_cells(data_dir)
@@ -2639,9 +1779,9 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
                 _plot_median_band(axB[ax_key], *_population_curve(subset_fs, 'Fs', col),
                                   COLORS.get(model, 'k'))
 
-    axB['fs_p'].set_ylim([0.45, 1.05])
-    axB['fs_r'].set_ylim([0.45, 1.05])
-    axB['fs_fb'].set_ylim([0.45, 1.05])
+    axB['fs_p'].set_ylim([-0.05, 1.05])
+    axB['fs_r'].set_ylim([-0.05, 1.05])
+    axB['fs_fb'].set_ylim([-0.05, 1.05])
     axB['fs_cosmic'].set_ylim(-0.05, 1.05)
 
     for ax_key, xlabel, ylabel in [
@@ -2677,38 +1817,6 @@ _FBETA_COL = 'Fbeta'    if USE_STRICT_ACCURACY else 'Fbeta_window'
 def _print_experiment(tbl, experiment, xcol, cols, models, x_scale=1.0, x_label=None,
                       exclude_x=(), drop_last=False, full_tbl=None, print_median=False,
                       show_mad=False):
-    """
-    Print one row per (model, x) for a benchmark experiment.
-
-    Parameters
-    ----------
-    tbl : dict
-        Columnar benchmark table.
-    experiment : str
-        Experiment name to filter on (e.g. 'Tau_Sensitivity').
-    xcol : str
-        Column used as the independent variable.
-    cols : list of (str, str, str, float)
-        (column name or 'Fbeta', header label, format spec, divisor) for each value to print.
-    models : list of str
-        Models to print, in order.
-    x_scale : float, optional
-        Divisor applied to x values before printing.
-    x_label : str, optional
-        Header for the x column; defaults to xcol.
-    exclude_x : tuple of float, optional
-        x values to skip, matching the figure.
-    drop_last : bool, optional
-        Drop the largest x value per model, matching the figure.
-    full_tbl : dict, optional
-        Table used to restrict CASCADE rows to x values shared with other methods.
-    print_median : bool, optional
-        After each model's rows, print the median ± MAD of each value across all x.
-    show_mad : bool, optional
-        Append the across-cell MAD (the '<col>_mad' column) to each value when
-        available. 'Fbeta' then uses the median of per-cell F-beta rather than
-        F-beta of the median precision and recall.
-    """
     width  = 15 if (print_median or show_mad) else 12
     header = '  {:<14} {:>10}'.format('Model', x_label or xcol)
     for _, label, _, _ in cols:
@@ -2761,26 +1869,6 @@ def _print_experiment(tbl, experiment, xcol, cols, models, x_scale=1.0, x_label=
 
 def _print_time_experiment(tbl, experiment, xcol, models, x_scale=1.0, x_label=None,
                            full_tbl=None):
-    """
-    Print median +/- MAD compute time across repeats for one timing panel.
-
-    Parameters
-    ----------
-    tbl : dict
-        Columnar benchmark table.
-    experiment : str
-        Experiment name to filter on.
-    xcol : str
-        Column used as the independent variable.
-    models : list of str
-        Models to print, in order.
-    x_scale : float, optional
-        Divisor applied to x values before printing.
-    x_label : str, optional
-        Header for the x column; defaults to xcol.
-    full_tbl : dict, optional
-        Table used to restrict CASCADE rows to x values shared with other methods.
-    """
     header = '  {:<14} {:>10} {:>22} {:>4}'.format('Model', x_label or xcol,
                                                    'Time (min, med ± MAD)', 'n')
     print(header)
@@ -2802,35 +1890,6 @@ def _print_time_experiment(tbl, experiment, xcol, models, x_scale=1.0, x_label=N
 
 def _curve(tbl, experiment, xcol, col, model, exclude_x=(), drop_last=False,
            full_tbl=None, x_scale=1.0):
-    """
-    Return one plotted trace as {x: value}, filtered the way the figure filters it.
-
-    Parameters
-    ----------
-    tbl : dict
-        Columnar benchmark table.
-    experiment : str
-        Experiment name to filter on.
-    xcol : str
-        Column used as the independent variable.
-    col : str
-        Plotted value column (see _median_mad_rows).
-    model : str
-        Model to extract.
-    exclude_x : tuple of float, optional
-        x values left out of the figure.
-    drop_last : bool, optional
-        Drop the largest x value, matching the figure.
-    full_tbl : dict, optional
-        Table used to restrict CASCADE rows to x values shared with other methods.
-    x_scale : float, optional
-        Divisor applied to x values.
-
-    Returns
-    -------
-    dict
-        Plotted value keyed by x.
-    """
     subset = _tbl_sort(_tbl_filter(_tbl_filter(tbl, 'Model', model),
                                    'Experiment', experiment), xcol)
     if _tbl_len(subset) == 0:
@@ -2845,7 +1904,6 @@ def _curve(tbl, experiment, xcol, col, model, exclude_x=(), drop_last=False,
         xv = np.array(subset[xcol], dtype=float)
         subset = {k: v[xv < np.nanmax(xv)] for k, v in subset.items()}
     med, _ = _median_mad_rows(subset, col)
-    # Repeated timing runs give several rows per x; the plotted value is their median.
     by_x = {}
     for x, v in zip(subset[xcol], med):
         by_x.setdefault(float(x) / x_scale, []).append(float(v))
@@ -2853,25 +1911,6 @@ def _curve(tbl, experiment, xcol, col, model, exclude_x=(), drop_last=False,
 
 
 def _print_signed_rank_tests(combined, dur_tbl, noise_cells, data_dir):
-    """
-    Print Wilcoxon signed-rank tests for every line and violin panel.
-
-    Line panels are tested two ways: across x, pairing OMSI and each other
-    method at the x values both were run at (n = number of shared x values),
-    and, where per-cell results were saved, at each x across the simulated
-    cells both methods saw (n = cells).
-
-    Parameters
-    ----------
-    combined : dict
-        Merged benchmark table from _load_benchmark_tables.
-    dur_tbl : dict
-        Table used for the duration panel (CASCADE rows may come from the alt dir).
-    noise_cells : dict or None
-        Cell-level noise table from _load_noise_cells.
-    data_dir : str
-        Directory containing cascade_7p5_vs_30hz_data.npz.
-    """
     others = ['CaImAn MCMC', 'OASIS', 'CASCADE_GPU', 'CASCADE_CPU']
 
     print('\n' + '=' * 72)
@@ -3105,14 +2144,6 @@ def _print_signed_rank_tests(combined, dur_tbl, noise_cells, data_dir):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
-    """
-    Print the values plotted in figure 2 without rendering the figure.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing benchmark result .npz files.
-    """
     combined, dur_cascade_tbl = _load_benchmark_tables(data_dir)
     noise_cells = _load_noise_cells(data_dir)
 
@@ -3132,7 +2163,6 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
                            x_label='Cells', full_tbl=combined)
 
     print('\n--- Compute time vs recording duration ---')
-    # Match the figure: CASCADE duration rows come from the alternate directory when available.
     dur_tbl = combined
     if dur_cascade_tbl:
         not_cascade = np.array([not str(m).startswith('CASCADE') for m in combined['Model']], dtype=bool)

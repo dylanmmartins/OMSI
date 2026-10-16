@@ -281,7 +281,7 @@ def _process_cell(Y_cell, cell_idx, params, true_spikes_cell, fs, n_frames, lag_
 
 
 @no_power_throttling() # on Windows, keep the OS from throttling Ray workers
-def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
+def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None, num_cpus=None):
     """Initialize Ray, dispatch one _process_cell task per cell, collect results.
 
     Assembles output arrays from per-cell result dicts. Returns a simple dict
@@ -301,6 +301,9 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     lag_s : float, optional
         Indicator rise-time lag in seconds. Derived from params['defg'] if omitted,
         otherwise defaults to 45 ms.
+    num_cpus : int, optional
+        Number of CPU cores Ray may use, i.e. the most cells processed at
+        once. Defaults to every core Ray detects.
 
     Returns
     -------
@@ -328,6 +331,7 @@ def deconv(Y, params=None, true_spikes=None, benchmark=False, lag_s=None):
     os.environ.setdefault('RAY_enable_metrics_collection', '0')
 
     ray.init(
+        num_cpus=num_cpus,
         _temp_dir=ray_dir,
         ignore_reinit_error=False,
         include_dashboard=False,

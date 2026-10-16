@@ -4,14 +4,6 @@ figures/simulation_helpers.py
 
 Helper functions for simulating populations of neurons.
 
-Functions
----------
-estimate_real_properties
-    Extract SNR, kurtosis, and firing rate statistics from real Suite2p data.
-generate_synthetic_data
-    Generate synthetic calcium traces and ground-truth spike trains.
-
-
 DMM, March 2026
 """
 
@@ -29,22 +21,6 @@ np.random.seed(3)
 
 
 def estimate_real_properties(suite2p_dir):
-    """ Extract SNR, kurtosis, and firing rate statistics from Suite2p data.
-
-    Parameters
-    ----------
-    suite2p_dir : str
-        Path to the Suite2p output directory.
-
-    Returns
-    -------
-    snrs : np.ndarray
-        Signal-to-noise ratios for each cell.
-    kurtosis : np.ndarray
-        Kurtosis values for each cell.
-    rates : np.ndarray
-        Estimated firing rates in Hz for each cell.
-    """
     F = np.load(os.path.join(suite2p_dir, 'F.npy'))
     Fneu = np.load(os.path.join(suite2p_dir, 'Fneu.npy'))
     iscell = np.load(os.path.join(suite2p_dir, 'iscell.npy'))
@@ -81,10 +57,6 @@ def estimate_real_properties(suite2p_dir):
 
 
 def _measured_snr(y):
-    """ SNR as figure labels and OMSI's SNR screen measure it.
-
-    (99th - 8th percentile) / (median |first difference| / 0.6745), NaNs ignored.
-    """
     y = np.asarray(y, dtype=np.float64)
     y = y[np.isfinite(y)]
     if len(y) < 2:
@@ -109,71 +81,6 @@ def generate_synthetic_data(
         measured_snr=None,
         return_params=False
     ):
-    """ Generate synthetic calcium traces and ground-truth spike trains.
-
-    Parameters
-    ----------
-    n_cells : int, optional
-        Number of cells to simulate.
-    fs : float, optional
-        Sampling rate in Hz.
-    duration : float, optional
-        Recording duration in seconds.
-    tau : float, optional
-        Calcium decay time constant in seconds.
-    snr : float or array-like, optional
-        Target signal-to-noise ratio. If None, kurtosis-based noise is used.
-    use_real_data : bool, optional
-        If True, draw firing rate and SNR distributions from real data.
-    target_kurtosis_range : tuple, optional
-        (min, max) kurtosis range for synthetic noise calibration.
-    suite2p_dir : str, optional
-        Suite2p directory, required when use_real_data is True.
-    amp_cv : float, optional
-        Coefficient of variation of per-spike amplitude, drawn lognormal with
-        mean 1 (default 0: every spike has amplitude 1).
-    tau_cv : float, optional
-        Coefficient of variation of per-cell decay time constant, lognormal
-        around tau (default 0: every cell uses tau).
-    drift_sd : float, optional
-        SD of a slow baseline drift, in units of a single-spike peak
-        (default 0: baseline fixed at 0). Added after the noise level is set,
-        so SNR keeps its meaning.
-    drift_timescale : float, optional
-        Timescale of the drift in seconds (Gaussian smoothing SD of white noise).
-    measured_snr : array-like, optional
-        Per-cell target for the SNR as measured on the final noisy trace (drift
-        included), using the same formula as figure labels and OMSI's SNR
-        screen: (99th - 8th percentile) / (median |diff| / 0.6745). The noise
-        level of each cell is found by bisection to hit its target. Overrides
-        snr and the kurtosis-based noise. A cell whose trace cannot reach its
-        target even with almost no noise (busy cells, whose frequent rises
-        inflate the difference-based noise estimate) swaps targets with a cell
-        that can, so the set of SNRs in the population is kept. Targets below
-        what pure noise measures (~2.6) cannot be reached; those cells get
-        the closest value.
-    return_params : bool, optional
-        If True, also return a dict of the per-cell simulation parameters.
-
-    Returns
-    -------
-    noisy_traces : np.ndarray
-        Noisy dF/F traces, shape (n_cells, n_frames).
-    true_spike_times : list of np.ndarray
-        Ground-truth spike times in seconds for each cell.
-    clean_traces : np.ndarray
-        Noise-free calcium traces, shape (n_cells, n_frames).
-    t : np.ndarray
-        Time vector in seconds.
-    firing_rates : np.ndarray
-        Simulated firing rates in Hz for each cell.
-    gen_kurtosis : np.ndarray
-        Kurtosis of each noisy trace.
-    params : dict
-        Only if return_params: 'tau' (per-cell decay constants, s),
-        'drift_sd' (realized SD of each cell's drift) and 'measured_snr'
-        (SNR measured on each final noisy trace).
-    """
     n_frames = int(fs * duration)
     t = np.arange(n_frames) / fs
 
@@ -238,7 +145,6 @@ def generate_synthetic_data(
         true_spike_times.append(np.where(spikes_high[i])[0] / fs_high)
 
     if amp_cv > 0:
-        # Lognormal with mean 1 and the requested CV; spike train entries become amplitudes.
         s2 = np.log(1.0 + amp_cv ** 2)
         amps = np.random.lognormal(mean=-s2 / 2.0, sigma=np.sqrt(s2), size=spikes_high.shape)
         spikes_high = spikes_high * amps
@@ -283,7 +189,6 @@ def generate_synthetic_data(
             continue
 
         if measured_snr is not None:
-            # Noise is scaled per cell after drift is added (see below).
             unit_noise[i] = np.random.normal(0, 1, size=len(trace))
             noisy_traces[i] = trace
             actual_snrs.append(np.nan)
@@ -316,8 +221,6 @@ def generate_synthetic_data(
 
     drift_real = np.zeros(n_cells)
     if drift_sd > 0:
-        # Slow baseline drift: smoothed white noise scaled to drift_sd single-spike
-        # peaks. Added after the noise level was set from the spike-only trace.
         for i in range(n_cells):
             d = gaussian_filter1d(np.random.normal(size=n_frames), drift_timescale * fs,
                                   mode='reflect')
@@ -327,12 +230,7 @@ def generate_synthetic_data(
             drift_real[i] = d.std()
 
     if measured_snr is not None:
-        # Bisection on the noise SD (log scale) so the measured SNR of the final
-        # trace matches each cell's target; measured SNR falls as noise grows.
         targets = np.array(np.broadcast_to(np.asarray(measured_snr, dtype=float), (n_cells,)))
-        # Highest SNR each trace can reach (almost no noise). Unreachable
-        # targets are swapped with a cell that can reach them and whose own
-        # target this cell can reach, choosing the closest such target.
         ceiling = np.array([
             _measured_snr(noisy_traces[i] + max(float(np.ptp(clean_traces[i])), 1e-9) * 1e-5 * unit_noise[i])
             for i in range(n_cells)])

@@ -2,52 +2,6 @@
 """
 figures/snr_test.py
 
-Supplementary panel: the low-SNR skip gate is unreachable by noise.
-
-The sampler skips inference when (p99 - p8) / MAD_std falls below 2.0
-(sampler.py, cont_ca_sampler). That statistic has a floor at ~2.64 on pure
-white Gaussian noise, which it approaches from above as SNR drops, so no
-amount of added noise can push a trace under the threshold. Only degenerate
-traces -- flat, or dominated by frame-to-frame alternation -- get there.
-
-Panels: (a) gate statistic vs simulated SNR against the white-noise floor,
-(b) distribution over every real trace in the paper, (c) what does trip it.
-
-To run the test:
-    $ python snr_test.py --mode test --data-dir /path/to/results
-
-To create figure:
-    $ python snr_test.py --mode plot --data-dir /path/to/results
-
-To print the exclusion table:
-    $ python snr_test.py --mode print --data-dir /path/to/results
-
-Functions
----------
-gate_statistic
-    Skip-gate statistic, mirroring the check inside cont_ca_sampler.
-_white_noise_floor
-    Gate statistic on pure white Gaussian noise, by simulation.
-_synthetic_sweep
-    Gate statistic across a range of simulated SNR levels.
-_load_fig3_traces
-    Read Allen dF/F traces from the figure 3 results directory.
-_load_fig4_traces
-    Read ground-truth dF/F traces from the figure 4 results directory.
-_real_trace_stats
-    Gate statistic for every real trace found on disk.
-_degenerate_cases
-    Gate statistic on constructed trace pathologies.
-run_test
-    Run all three analyses and save results.
-plot_figure
-    Draw the three-panel supplementary figure.
-print_stats
-    Print the exclusion table and summary numbers.
-main
-    Parse CLI arguments and dispatch.
-
-
 DMM, September 2026
 """
 
@@ -72,11 +26,8 @@ mpl.rcParams['ps.fonttype']  = 42
 mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
-# Production gate: traces scoring below this skip MCMC and return zero spikes.
 GATE_THRESHOLD = 2.0
 
-# Simulated SNR levels. Extends well below the figure 2 noise sweep (which
-# stops at 1.0) to show the statistic flattening onto its floor, not crossing it.
 SNR_LEVELS = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
 
 N_CELLS  = 50
@@ -93,22 +44,6 @@ np.random.seed(3)
 
 
 def gate_statistic(y):
-    """ Skip-gate statistic, mirroring the check inside cont_ca_sampler.
-
-    Must stay in sync with sampler.py: SNR = (p99 - p8) / (MAD(diff) / 0.6745).
-    Kept as a standalone copy so this script can score traces without running
-    inference on them.
-
-    Parameters
-    ----------
-    y : np.ndarray
-        Fluorescence trace. NaNs are dropped.
-
-    Returns
-    -------
-    float
-        Gate statistic, or NaN for traces shorter than two valid samples.
-    """
 
     y = np.asarray(y, dtype=float)
     y = y[~np.isnan(y)]
@@ -123,22 +58,6 @@ def gate_statistic(y):
 
 
 def _white_noise_floor(n_frames=20000, n_reps=200, seed=0):
-    """ Gate statistic on pure white Gaussian noise, by simulation.
-
-    Parameters
-    ----------
-    n_frames : int, optional
-        Trace length in frames.
-    n_reps : int, optional
-        Number of independent noise traces.
-    seed : int, optional
-        RNG seed.
-
-    Returns
-    -------
-    np.ndarray
-        Gate statistic for each replicate.
-    """
 
     rng = np.random.default_rng(seed)
     return np.array([
@@ -147,19 +66,6 @@ def _white_noise_floor(n_frames=20000, n_reps=200, seed=0):
 
 
 def _synthetic_sweep():
-    """ Gate statistic across a range of simulated SNR levels.
-
-    Builds one clean population, then adds noise scaled to each target SNR --
-    same construction as benchmark_noise_sensitivity in figure2.py, so the
-    SNR axis means the same thing in both figures.
-
-    Returns
-    -------
-    snr_grid : np.ndarray
-        Simulated SNR for each cell, shape (n_levels * n_cells,).
-    stats : np.ndarray
-        Gate statistic for each cell, same shape.
-    """
 
     print('Generating clean population (n_cells={}, duration={}s)...'.format(
         N_CELLS, DURATION))
@@ -167,7 +73,6 @@ def _synthetic_sweep():
         n_cells=N_CELLS, fs=FS, duration=DURATION, tau=TAU, snr=1e6
     )
 
-    # Peak signal per cell, used to convert a target SNR into a noise sigma.
     peak = np.array([
         np.percentile(clean[i], 99) - np.percentile(clean[i], 1)
         for i in range(N_CELLS)
@@ -188,18 +93,6 @@ def _synthetic_sweep():
 
 
 def _load_fig3_traces(fig3_dir):
-    """ Read Allen dF/F traces from the figure 3 results directory.
-
-    Parameters
-    ----------
-    fig3_dir : str
-        Directory holding allen_data_results_*_traces.npz files.
-
-    Returns
-    -------
-    list of np.ndarray
-        One trace per cell. Empty if directory is missing.
-    """
 
     traces = []
     for path in sorted(glob.glob(os.path.join(fig3_dir, '*_traces.npz'))):
@@ -219,22 +112,6 @@ def _load_fig3_traces(fig3_dir):
 
 
 def _load_fig4_traces(fig4_trace_dir):
-    """ Read ground-truth dF/F traces from the figure 4 results directory.
-
-    Parameters
-    ----------
-    fig4_trace_dir : str
-        Directory holding per-dataset <name>_traces.npz files.
-
-    Returns
-    -------
-    traces : list of np.ndarray
-        One trace per cell.
-    labels : list of str
-        Dataset name for each trace.
-    n_true : list of int
-        Ground-truth spike count per cell, for spike-weighted exclusion.
-    """
 
     traces, labels, n_true = [], [], []
     for path in sorted(glob.glob(os.path.join(fig4_trace_dir, '*_traces.npz'))):
@@ -256,19 +133,6 @@ def _load_fig4_traces(fig4_trace_dir):
 
 
 def _real_trace_stats(figures_dir):
-    """ Gate statistic for every real trace found on disk.
-
-    Parameters
-    ----------
-    figures_dir : str
-        Root figures directory containing data/fig3 and data/fig4.
-
-    Returns
-    -------
-    dict
-        Keys 'allen' and 'groundtruth' mapping to gate statistic arrays, plus
-        'groundtruth_labels' with the dataset name per ground-truth trace.
-    """
 
     fig3_dir = os.path.join(figures_dir, 'data', 'fig3')
     fig4_dir = os.path.join(figures_dir, 'data', 'fig4', 'ground_truth_traces_omsi')
@@ -282,8 +146,6 @@ def _real_trace_stats(figures_dir):
 
     print('  Allen: {} traces.  Ground truth: {} traces.'.format(len(allen), len(gt)))
 
-    # Drop any trace the statistic could not be computed on, keeping the
-    # label and spike-count arrays aligned with it.
     gt_ok = np.isfinite(gt) if len(gt) else np.zeros(0, dtype=bool)
 
     return {
@@ -297,25 +159,6 @@ def _real_trace_stats(figures_dir):
 
 
 def _degenerate_cases(n_frames=20000, seed=7):
-    """ Gate statistic on constructed trace pathologies.
-
-    Separates what the gate actually catches (flat and alternating traces)
-    from what it does not (any amount of noise).
-
-    Parameters
-    ----------
-    n_frames : int, optional
-        Trace length in frames.
-    seed : int, optional
-        RNG seed.
-
-    Returns
-    -------
-    names : list of str
-        Case labels, ordered as constructed.
-    values : np.ndarray
-        Gate statistic per case.
-    """
 
     rng = np.random.default_rng(seed)
     t = np.arange(n_frames)
@@ -342,13 +185,6 @@ def _degenerate_cases(n_frames=20000, seed=7):
 
 
 def run_test(data_dir=_DEFAULT_DATA_DIR):
-    """ Run all three analyses and save results.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for the output NPZ.
-    """
 
     os.makedirs(data_dir, exist_ok=True)
     figures_dir = os.path.dirname(os.path.abspath(__file__))
@@ -379,13 +215,6 @@ def run_test(data_dir=_DEFAULT_DATA_DIR):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR):
-    """ Draw the three-panel supplementary figure.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding snr_test_results.npz.
-    """
 
     res_path = os.path.join(data_dir, 'snr_test_results.npz')
     if not os.path.exists(res_path):
@@ -399,7 +228,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.3), dpi=300)
     ax_a, ax_b, ax_c = axes
 
-    # Panel a: gate statistic vs simulated SNR, log-log.
     snr_grid, stats = z['snr_grid'], z['snr_stats']
     levels = np.unique(snr_grid)
     med = np.array([np.median(stats[snr_grid == s]) for s in levels])
@@ -420,7 +248,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax_a.set_title('a', loc='left', fontweight='bold')
     ax_a.legend(frameon=False, fontsize=5, loc='upper left')
 
-    # Panel b: distribution over every real trace, with the gate for reference.
     allen, gt = z['allen'], z['groundtruth']
     pooled = np.concatenate([a for a in (allen, gt) if len(a)])
     if len(pooled):
@@ -436,7 +263,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         ax_b.axvline(thr, color=COLOR_GATE, ls='-', lw=0.8)
         ax_b.set_xscale('log')
 
-        # Call out the closest any real trace gets to the gate.
         ax_b.annotate('lowest trace\n{:.2f}'.format(float(pooled.min())),
                       xy=(float(pooled.min()), ax_b.get_ylim()[1] * 0.04),
                       xytext=(float(pooled.min()) * 1.6, ax_b.get_ylim()[1] * 0.42),
@@ -448,15 +274,12 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax_b.set_title('b', loc='left', fontweight='bold')
     ax_b.legend(frameon=False, fontsize=5, loc='upper right')
 
-    # Panel c: what actually reaches the gate.
     names  = list(z['case_names'])
     values = z['case_values']
     order  = np.argsort(values)
     ypos   = np.arange(len(names))
     colors = [COLOR_GATE if values[i] < thr else COLOR_MAIN for i in order]
 
-    # Zero-valued cases are clamped so they stay visible on a log axis; the
-    # printed value next to each bar is the real one.
     plotted = np.maximum(values[order], 1e-2)
     ax_c.barh(ypos, plotted, color=colors, height=0.7)
     ax_c.axvline(thr, color=COLOR_GATE, ls='-', lw=0.8)
@@ -480,13 +303,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
-    """ Print the exclusion table and summary numbers.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding snr_test_results.npz.
-    """
 
     res_path = os.path.join(data_dir, 'snr_test_results.npz')
     if not os.path.exists(res_path):
@@ -553,7 +369,6 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
 
 
 def main():
-    """ Parse CLI arguments and dispatch. """
 
     parser = argparse.ArgumentParser(
         description='Supplementary panel: low-SNR skip gate is unreachable by noise.'

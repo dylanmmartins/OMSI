@@ -4,30 +4,6 @@ figures/timing_diagnostic.py
 
 Spike-timing-error diagnostic for the figure 1 fixed benchmark.
 
-For each method, every inferred spike is paired with its nearest
-ground-truth spike, giving a signed timing offset (inferred - nearest
-true) in milliseconds. Pooling these offsets across all cells and
-histogramming them yields a peri-event ("PSTH-style") plot of how
-predicted spikes fall relative to true spikes -- the continuous-time
-analogue of a spike-train cross-correlogram, but referenced to the
-single nearest true spike rather than every true spike in the window.
-The unsigned version of the same offsets gives, for each method, the
-timing precision reported as the 95th-percentile absolute offset: the
-window (in ms) that contains 95% of inferred spikes relative to the
-nearest ground-truth spike.
-
-Functions
----------
-_load_method_spikes
-    Load ground-truth and inferred spikes for one method's NPZ file.
-_nearest_offsets_ms
-    Compute signed nearest-neighbor timing offsets, in ms, pooled across cells.
-plot_joes_diagnostic
-    Load all four methods and render the four-panel diagnostic figure.
-
-To run:
-    $ python timing_diagnostic.py --data-dir /path/to/results
-
 DMM, July 2026
 """
 
@@ -47,7 +23,6 @@ mpl.rcParams['font.size']    = 7
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fig1')
 
-# (display name, source NPZ file, spike-array key inside that NPZ)
 _METHODS = [
     ('OMSI',    'fixed_benchmark_OMSI.npz',       'optim_spikes'),
     ('CaImAn',  'fixed_benchmark_MATLAB.npz',      'tradmat_spikes'),
@@ -62,29 +37,11 @@ COLORS = {
     'OASIS':   '#55A868',
 }
 
-WINDOW_MS = 200.0   # half-width of the displayed peri-event histogram
-BIN_MS    = 5.0     # histogram bin width
+WINDOW_MS = 200.0
+BIN_MS    = 5.0
 
 
 def _load_method_spikes(data_dir, npz_name, spike_key):
-    """ Load ground-truth and inferred spikes for one method's NPZ file.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing the figure 1 NPZ result files.
-    npz_name : str
-        Filename of the method's NPZ file.
-    spike_key : str
-        Key of the inferred-spike array inside the NPZ file.
-
-    Returns
-    -------
-    true_spikes : list of np.ndarray
-        Per-cell ground-truth spike times in seconds.
-    pred_spikes : list of np.ndarray
-        Per-cell inferred spike times in seconds.
-    """
     path = os.path.join(data_dir, npz_name)
     if not os.path.exists(path):
         raise FileNotFoundError(f'{path} not found. Run figure1.py --mode test first.')
@@ -95,25 +52,6 @@ def _load_method_spikes(data_dir, npz_name, spike_key):
 
 
 def _nearest_offsets_ms(true_spikes, pred_spikes):
-    """ Compute signed nearest-neighbor timing offsets, in ms, pooled across cells.
-
-    For every inferred spike, finds the closest ground-truth spike in the
-    same cell and records (inferred - true) in milliseconds. Cells with no
-    ground-truth spikes or no inferred spikes are skipped.
-
-    Parameters
-    ----------
-    true_spikes : list of array-like
-        Per-cell ground-truth spike times in seconds.
-    pred_spikes : list of array-like
-        Per-cell inferred spike times in seconds.
-
-    Returns
-    -------
-    np.ndarray
-        Signed nearest-neighbor offsets in milliseconds, pooled across all
-        cells and all inferred spikes.
-    """
     offsets_ms = []
     for t_spk, p_spk in zip(true_spikes, pred_spikes):
         t_spk = np.sort(np.atleast_1d(np.asarray(t_spk, dtype=float)))
@@ -137,29 +75,6 @@ def _nearest_offsets_ms(true_spikes, pred_spikes):
 
 def plot_joes_diagnostic(data_dir=_DEFAULT_DATA_DIR, out_dir=None,
                          window_ms=WINDOW_MS, bin_ms=BIN_MS):
-    """ Load all four methods and render the four-panel diagnostic figure.
-
-    One panel per method (OMSI, CaImAn, CASCADE, OASIS), each showing a
-    peri-event histogram of inferred-spike offsets relative to the nearest
-    ground-truth spike, annotated with the 95th-percentile absolute offset.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the figure 1 NPZ result files.
-    out_dir : str or None, optional
-        Directory to save the figure. Defaults to `data_dir`.
-    window_ms : float, optional
-        Half-width of the displayed histogram, in ms.
-    bin_ms : float, optional
-        Histogram bin width, in ms.
-
-    Returns
-    -------
-    dict
-        Mapping method name to its pooled offset array (ms) and 95th
-        percentile absolute offset (ms).
-    """
     out_dir = out_dir if out_dir else data_dir
     bins = np.arange(-window_ms, window_ms + bin_ms, bin_ms)
 

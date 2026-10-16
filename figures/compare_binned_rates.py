@@ -6,48 +6,6 @@ Compare continuous-time inference outputs against a ground-truth spike rate
 binned to match the native imaging sample rate, for the CASCADE 7.5 Hz vs
 30 Hz comparison (figure 2B) and the Allen Institute benchmark (figure 3).
 
-Model colors and ordering mirror figure2.py (COLORS, _CASCADE_CMP_COLOR_7P5,
-_CASCADE_CMP_COLOR_30) and figure3.py (model_colors, _MODEL_ORDER) so panels
-read consistently across the whole figures/ directory.
-
-Functions
----------
-_bin_ground_truth
-    Bin ground-truth spike times into per-frame counts at a given sample rate.
-_corr_and_residual
-    Compute Pearson correlation and RMSE residual between two rate traces.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-_load_cascade_samplerate_group
-    Load true spikes and continuous CASCADE output for one sample rate.
-compare_cascade_samplerate
-    Compute per-cell correlation and residual for CASCADE at 7.5 Hz vs 30 Hz.
-_plot_cascade_samplerate_comparison
-    Plot side-by-side correlation and residual violins for the CASCADE comparison.
-normalize_label
-    Strip leading run-label prefix from a dataset name.
-clean_label
-    Reformat raw CASCADE-style labels into a canonical short label.
-get_zoom_for_label
-    Return zoom level string for a dataset label.
-_load_records
-    Load a list of result dicts from a compressed NPZ file.
-_build_cascade_lookup
-    Build a label-to-filepath lookup for CASCADE trace NPZ files.
-_build_omsi_traces_lookup
-    Build a label-to-filepath lookup for newer OMSI traces NPZ files.
-_load_allen_group_traces
-    Load per-cell continuous rate traces and ground truth for every Allen group.
-compare_allen_binned_rates
-    Compute per-cell correlation and residual for OASIS, CASCADE, and OMSI.
-_plot_binned_violin
-    Plot a violin per model for one metric/zoom panel.
-_plot_allen_binned_grid
-    Plot a 2x2 grid of correlation/residual violins split by zoom level.
-main
-    Run both comparisons and save the resulting figures.
-
-
 DMM, July 2026
 """
 
@@ -85,50 +43,12 @@ _CASCADE_CMP_COLOR_30  = 'tab:cyan'
 
 
 def _bin_ground_truth(spike_times, fs, n_frames):
-    """
-    Bin ground-truth spike times into per-frame counts at a given sample rate.
-
-    Parameters
-    ----------
-    spike_times : array-like
-        Ground-truth spike times in seconds.
-    fs : float
-        Sampling rate in Hz to bin to (matches the native imaging frame rate).
-    n_frames : int
-        Number of frame bins to produce.
-
-    Returns
-    -------
-    ndarray
-        Spike count per frame, length n_frames.
-    """
     edges = np.arange(n_frames + 1) / fs
     counts, _ = np.histogram(np.asarray(spike_times, dtype=float), bins=edges)
     return counts.astype(np.float64)
 
 
 def _corr_and_residual(binned_gt, pred):
-    """
-    Compute Pearson correlation and RMSE residual between two rate traces.
-
-    CASCADE pads its output with NaN at the start/end of each trace (edge
-    frames it can't infer from), so NaN frames are dropped from both traces
-    before computing either statistic.
-
-    Parameters
-    ----------
-    binned_gt : ndarray
-        Binned ground-truth spike rate.
-    pred : ndarray
-        Continuous-time predicted rate (unthresholded model output).
-
-    Returns
-    -------
-    corr : float
-        Pearson correlation coefficient, NaN if either trace is constant.
-    residual : float
-        Root-mean-square error between the two traces.
-    """
     n = min(len(binned_gt), len(pred))
     a = binned_gt[:n]
     b = np.asarray(pred[:n], dtype=float)
@@ -143,42 +63,11 @@ def _corr_and_residual(binned_gt, pred):
 
 
 def _mad(x, axis=None):
-    """ Compute the median absolute deviation, ignoring NaNs.
-
-    Parameters
-    ----------
-    x : array-like
-        Input values.
-    axis : int or None, optional
-        Axis along which to compute; None flattens the input.
-
-    Returns
-    -------
-    float or np.ndarray
-        Median of |x - median(x)| along axis.
-    """
     x = np.asarray(x, dtype=float)
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _load_cascade_samplerate_group(data_dir, fs):
-    """
-    Load true spikes and continuous CASCADE output for one sample rate.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing figure 2B cascade sample-rate output files.
-    fs : float
-        Sampling rate in Hz (7.5 or 30.0).
-
-    Returns
-    -------
-    true_spikes : list of ndarray or None
-        Ground-truth spike times in seconds, one array per cell.
-    cascade_probs : ndarray or None, shape (n_cells, n_frames)
-        Continuous per-frame CASCADE spike-probability output.
-    """
     ts_path = os.path.join(data_dir, f'cascade_samplerate_{fs}hz_true_spikes.npz')
     if not os.path.exists(ts_path):
         return None, None
@@ -194,24 +83,6 @@ def _load_cascade_samplerate_group(data_dir, fs):
 
 
 def compare_cascade_samplerate(data_dir):
-    """
-    Compute per-cell correlation and residual for CASCADE at 7.5 Hz vs 30 Hz.
-
-    Ground-truth spikes are binned to the same frame rate as the CASCADE
-    output before comparison, so no thresholding of the CASCADE output is
-    involved.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing figure 2B cascade sample-rate output files.
-
-    Returns
-    -------
-    dict
-        Keys 'corr_7', 'corr_30', 'resid_7', 'resid_30' mapping to per-cell
-        ndarrays.
-    """
     results = {}
     for fs, suffix in [(7.5, '7'), (30.0, '30')]:
         true_spikes, cascade_probs = _load_cascade_samplerate_group(data_dir, fs)
@@ -235,23 +106,7 @@ def compare_cascade_samplerate(data_dir):
 
 
 def _plot_cascade_samplerate_comparison(ax_corr, ax_resid, results):
-    """
-    Plot side-by-side correlation and residual violins for the CASCADE comparison.
-
-    Styled identically to figure2.py's _plot_cascade_comparison (same violin
-    widths, alpha, and colors), split into two panels instead of one.
-
-    Parameters
-    ----------
-    ax_corr : matplotlib.axes.Axes
-        Axes for the correlation panel.
-    ax_resid : matplotlib.axes.Axes
-        Axes for the residual panel.
-    results : dict
-        Output of compare_cascade_samplerate.
-    """
     def _draw(ax, d7, d30, ylabel):
-        """Draw one 7.5 Hz vs 30 Hz violin panel onto ax."""
         all_datasets = [(d7[np.isfinite(d7)],   _CASCADE_CMP_COLOR_7P5),
                         (d30[np.isfinite(d30)], _CASCADE_CMP_COLOR_30)]
         pos      = [p for p, (d, _) in zip([1, 2], all_datasets) if len(d) > 0]
@@ -283,36 +138,10 @@ def _plot_cascade_samplerate_comparison(ax_corr, ax_resid, results):
 
 
 def normalize_label(label):
-    """
-    Strip leading run-label prefix from a dataset name.
-
-    Parameters
-    ----------
-    label : str
-        Raw dataset label string.
-
-    Returns
-    -------
-    str
-        Label with any leading 'prefix_' removed.
-    """
     return re.sub(r'^[^_]+_', '', label)
 
 
 def clean_label(label):
-    """
-    Reformat raw CASCADE-style labels into a canonical short label.
-
-    Parameters
-    ----------
-    label : str
-        Raw label string, possibly in CASCADE format.
-
-    Returns
-    -------
-    str
-        Reformatted label or the original string if no match.
-    """
     m = re.search(r'(.*)_\(\'([^\']+)\',\s*(\d+),\s*(\d+)\)frames', label)
     if m:
         return f"{m.group(2)}_{m.group(1)}_{m.group(4)}frames_{m.group(3)}hz"
@@ -320,19 +149,6 @@ def clean_label(label):
 
 
 def get_zoom_for_label(label):
-    """
-    Return zoom level string for a dataset label.
-
-    Parameters
-    ----------
-    label : str
-        Dataset label string.
-
-    Returns
-    -------
-    str
-        'High Zoom', 'Low Zoom', or 'Unknown'.
-    """
     if 'lowzoom' in label:
         return 'Low Zoom'
     elif 'highzoom' in label:
@@ -341,19 +157,6 @@ def get_zoom_for_label(label):
 
 
 def _load_records(path):
-    """
-    Load a list of result dicts from a compressed NPZ file.
-
-    Parameters
-    ----------
-    path : str
-        Path to an NPZ file saved by figure3.py's _save_records.
-
-    Returns
-    -------
-    list of dict
-        Reconstructed list of result records.
-    """
     d = np.load(path, allow_pickle=True)
     keys = list(d.files)
     if not keys:
@@ -372,19 +175,6 @@ def _load_records(path):
 
 
 def _build_cascade_lookup(data_dir):
-    """
-    Build a label-to-filepath lookup for CASCADE trace NPZ files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_data_results_cascade_*_traces.npz files.
-
-    Returns
-    -------
-    dict
-        Mapping from label string to (traces_path, cell_id_to_row) tuples.
-    """
     lookup = {}
     for npz_path in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_cascade_*_traces.npz')):
@@ -409,19 +199,6 @@ def _build_cascade_lookup(data_dir):
 
 
 def _build_omsi_traces_lookup(data_dir):
-    """
-    Build a label-to-filepath lookup for newer OMSI traces NPZ files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_data_results_omsi_*_traces.npz files.
-
-    Returns
-    -------
-    dict
-        Mapping from label string to OMSI traces NPZ file path.
-    """
     lookup = {}
     for fpath in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_omsi_*_traces.npz')):
@@ -435,21 +212,6 @@ def _build_omsi_traces_lookup(data_dir):
 
 
 def _load_allen_group_traces(data_dir):
-    """
-    Load per-cell continuous rate traces and ground truth for every Allen group.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing figure 3 Allen benchmark output files.
-
-    Returns
-    -------
-    list of dict
-        One entry per cell with keys 'label', 'zoom', 'fs', 'true_spikes',
-        'oasis_prob', 'omsi_prob', 'cascade_prob' (cascade_prob is None if
-        no CASCADE output was found for that cell).
-    """
     cascade_lookup      = _build_cascade_lookup(data_dir)
     omsi_traces_lookup = _build_omsi_traces_lookup(data_dir)
 
@@ -523,23 +285,6 @@ def _load_allen_group_traces(data_dir):
 
 
 def compare_allen_binned_rates(data_dir):
-    """
-    Compute per-cell correlation and residual for OASIS, CASCADE, and OMSI.
-
-    Ground-truth spikes are binned to match the native 2P imaging sample
-    rate of each dataset group before comparison. CaImAn MCMC is skipped.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing figure 3 Allen benchmark output files.
-
-    Returns
-    -------
-    dict
-        Nested dict results[zoom][model] -> {'corr': ndarray, 'resid': ndarray},
-        for zoom in ('High Zoom', 'Low Zoom') and model in _MODEL_ORDER.
-    """
     cells = _load_allen_group_traces(data_dir)
     print('  Loaded {} cells across all Allen dataset groups.'.format(len(cells)))
 
@@ -576,23 +321,6 @@ def compare_allen_binned_rates(data_dir):
 
 
 def _plot_binned_violin(ax, data_by_model, ylabel, ylim_bottom=None):
-    """
-    Plot a violin per model for one metric/zoom panel.
-
-    Styled identically to figure3.py's _plot_fbeta_violin (same violin
-    widths, alpha, and per-model colors).
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    data_by_model : dict
-        Mapping model name to per-cell ndarray of metric values.
-    ylabel : str
-        Y-axis label.
-    ylim_bottom : float or None, optional
-        If given, fixes the bottom of the y-axis (top autoscales).
-    """
     positions, violin_data, violin_colors, tick_labels = [], [], [], []
     for i, model in enumerate(_MODEL_ORDER):
         vals = np.asarray(data_by_model.get(model, np.array([])))
@@ -617,19 +345,6 @@ def _plot_binned_violin(ax, data_by_model, ylabel, ylim_bottom=None):
 
 
 def _plot_allen_binned_grid(results, out_dir):
-    """
-    Plot a 2x2 grid of correlation/residual violins split by zoom level.
-
-    Top row is Pearson correlation (high zoom, low zoom); bottom row is
-    RMSE residual (high zoom, low zoom).
-
-    Parameters
-    ----------
-    results : dict
-        Output of compare_allen_binned_rates.
-    out_dir : str
-        Directory to save the figure.
-    """
     fig, axes = plt.subplots(2, 2, figsize=(5, 6), dpi=300)
 
     for col, zoom in enumerate(['High Zoom', 'Low Zoom']):
@@ -665,19 +380,6 @@ def _plot_allen_binned_grid(results, out_dir):
 
 def main(fig2_data_dir=_DEFAULT_FIG2_DATA_DIR, fig3_data_dir=_DEFAULT_FIG3_DATA_DIR,
         out_dir=None):
-    """
-    Run both comparisons and save the resulting figures.
-
-    Parameters
-    ----------
-    fig2_data_dir : str, optional
-        Directory containing figure 2B cascade sample-rate output files.
-    fig3_data_dir : str, optional
-        Directory containing figure 3 Allen benchmark output files.
-    out_dir : str or None, optional
-        Directory to save figures. Defaults to fig2_data_dir / fig3_data_dir
-        for each respective figure.
-    """
     print('=== CASCADE 7.5 Hz vs 30 Hz binned-rate comparison (figure 2B) ===')
     cascade_results = compare_cascade_samplerate(fig2_data_dir)
 

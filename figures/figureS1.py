@@ -5,28 +5,6 @@ figures/figureS1.py
 
 Threshold sensitivity analysis for OASIS and CASCADE spike detectors across a synthetic dataset.
 
-Functions
----------
-_run_cascade_inference
-    Run CASCADE inference via subprocess and return probabilities and spike times.
-_oasis_spikes
-    Deconvolve calcium traces with OASIS and return spike trains and noise estimates.
-_probs_to_spikes
-    Convert CASCADE probability traces to spike times using peak detection.
-_fbeta
-    Compute F-beta score from precision and recall arrays.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-_compute_metrics
-    Compute precision, recall, F-beta, and CosMIC for a set of spike train estimates.
-run_test
-    Generate synthetic data, run OASIS/CASCADE inference, and save results to disk.
-plot_figure
-    Load saved results and generate the threshold-sweep figure.
-print_stats
-    Print maximum performance statistics for each method and metric.
-
-
 DMM, March 2026
 """
 
@@ -71,44 +49,17 @@ COLORS = {
 OASIS_THRESHOLDS   = np.array([0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0])
 CASCADE_THRESHOLDS = np.array([0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0])
 
-# Fixed thresholds reported by --mode print alongside the best-performing threshold.
 OASIS_REPORT_THRESHOLD   = 1.0
 CASCADE_REPORT_THRESHOLD = 0.5
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'figS1')
 
-#   'threshold': Return every frame where s > thresh * sigma (default, matches figure1-4).
-#   'peaks': Find local maxima above thresh * sigma with minimum inter-peak distance.
 OASIS_SPIKE_DETECTION = 'peaks'
 
 _NPZ_NAME = 'figS1_threshold_sweep.npz'
 
 
 def _run_cascade_inference(dff, fs, n_cells, data_dir, prefix='figS1_cascade'):
-    """ Run CASCADE inference via subprocess and cache output to disk.
-
-    Parameters
-    ----------
-    dff : ndarray, shape (n_cells, n_frames)
-        Fluorescence traces.
-    fs : float
-        Sampling rate in Hz.
-    n_cells : int
-        Number of cells.
-    data_dir : str
-        Directory for input/output NPZ files.
-    prefix : str, optional
-        Filename prefix for cached files.
-
-    Returns
-    -------
-    cascade_probs : ndarray
-        Per-frame spike probability traces.
-    cascade_spikes : list of ndarray
-        Spike times in seconds for each cell.
-    cascade_time : float
-        Inference wall-clock time in seconds.
-    """
     script      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'run_cascade_subprocess.py')
     input_path  = os.path.join(data_dir, f'{prefix}_input.npz')
@@ -120,7 +71,7 @@ def _run_cascade_inference(dff, fs, n_cells, data_dir, prefix='figS1_cascade'):
         np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
         print('  Calling CASCADE subprocess (n_cells={}, fs={})...'.format(n_cells, fs))
         subprocess.run(
-            [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
+            [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', script,
              '--mode', 'inference',
              '--input',  input_path,
              '--output', output_path],
@@ -132,26 +83,6 @@ def _run_cascade_inference(dff, fs, n_cells, data_dir, prefix='figS1_cascade'):
 
 
 def _oasis_spikes(dff, fs, tau, n_cells):
-    """ Deconvolve calcium traces with OASIS.
-
-    Parameters
-    ----------
-    dff : ndarray, shape (n_cells, n_frames)
-        Fluorescence traces.
-    fs : float
-        Sampling rate in Hz.
-    tau : float
-        Calcium decay time constant in seconds.
-    n_cells : int
-        Number of cells.
-
-    Returns
-    -------
-    s_list : list of ndarray
-        Deconvolved spike amplitudes for each cell.
-    sigmas : ndarray, shape (n_cells,)
-        Estimated noise standard deviation for each cell.
-    """
     from oasis.functions import deconvolve
     diff   = np.diff(dff, axis=1)
     sigmas = np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2))
@@ -165,22 +96,6 @@ def _oasis_spikes(dff, fs, tau, n_cells):
 
 
 def _probs_to_spikes(probs, fs, height=0.2):
-    """ Convert CASCADE probability trace to spike times via peak detection.
-
-    Parameters
-    ----------
-    probs : ndarray
-        Per-frame spike probability trace.
-    fs : float
-        Sampling rate in Hz.
-    height : float, optional
-        Minimum peak height threshold.
-
-    Returns
-    -------
-    ndarray
-        Detected spike times in seconds.
-    """
 
     min_dist = max(1, int(0.05 * fs))
     peaks, _ = find_peaks(probs, height=height, distance=min_dist)
@@ -188,20 +103,6 @@ def _probs_to_spikes(probs, fs, height=0.2):
 
 
 def _fbeta(precision, recall):
-    """ Compute F-beta score from precision and recall arrays.
-
-    Parameters
-    ----------
-    precision : array-like
-        Precision values.
-    recall : array-like
-        Recall values.
-
-    Returns
-    -------
-    ndarray
-        F-beta scores with BETA set by the module constant.
-    """
     p, r = np.asarray(precision, float), np.asarray(recall, float)
     b2   = BETA ** 2
     denom = b2 * p + r
@@ -210,45 +111,11 @@ def _fbeta(precision, recall):
 
 
 def _mad(x, axis=None):
-    """ Compute the median absolute deviation, ignoring NaNs.
-
-    Parameters
-    ----------
-    x : array-like
-        Input values.
-    axis : int or None, optional
-        Axis along which to compute; None flattens the input.
-
-    Returns
-    -------
-    float or np.ndarray
-        Median of |x - median(x)| along axis.
-    """
     x = np.asarray(x, dtype=float)
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _compute_metrics(true_spikes, spikes_list):
-    """ Compute precision, recall, F-beta, and CosMIC for estimated spike trains.
-
-    Parameters
-    ----------
-    true_spikes : list of ndarray
-        Ground-truth spike times in seconds for each cell.
-    spikes_list : list of ndarray
-        Estimated spike times in seconds for each cell.
-
-    Returns
-    -------
-    prec : ndarray
-        Per-cell precision values.
-    rec : ndarray
-        Per-cell recall values.
-    fb : ndarray
-        Per-cell F-beta scores.
-    cosmic : ndarray
-        Per-cell CosMIC scores.
-    """
     prec, rec, _ = OMSI.helpers.compute_accuracy_strict(true_spikes, spikes_list)
     fb           = _fbeta(prec, rec)
     cosmic       = compute_cosmic(true_spikes, spikes_list, FS)
@@ -256,17 +123,6 @@ def _compute_metrics(true_spikes, spikes_list):
 
 
 def run_test(data_dir='.', run_oasis=True, run_cascade=True):
-    """ Generate synthetic data, run OASIS/CASCADE inference, and save results.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory for reading/writing result files.
-    run_oasis : bool, optional
-        Whether to run OASIS threshold sweep.
-    run_cascade : bool, optional
-        Whether to run CASCADE threshold sweep.
-    """
 
     os.makedirs(data_dir, exist_ok=True)
 
@@ -362,13 +218,6 @@ def run_test(data_dir='.', run_oasis=True, run_cascade=True):
 
 
 def plot_figure(data_dir='.'):
-    """ Load threshold-sweep results and generate the figure.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the results NPZ file.
-    """
 
     path = os.path.join(data_dir, _NPZ_NAME)
     if not os.path.exists(path):
@@ -412,15 +261,15 @@ def plot_figure(data_dir='.'):
         for col, (metric_key, ylabel) in enumerate(metrics):
             ax   = fig.add_subplot(gs[row_idx, col])
             vals = res[f'{prefix}_{metric_key}']
-            med  = np.nanmedian(vals, axis=1)
-            mad  = _mad(vals, axis=1)
+            mean = np.nanmean(vals, axis=1)
+            std  = np.nanstd(vals,  axis=1)
 
             ax.fill_between(thresholds,
-                            np.clip(med - mad, 0, 1),
-                            np.clip(med + mad, 0, 1),
-                            color=color, alpha=0.18, zorder=1)
-            ax.plot(thresholds, med, '.-',
-                    color=color, lw=1.2, ms=4, zorder=3)
+                            np.clip(mean - std, 0, 1),
+                            np.clip(mean + std, 0, 1),
+                            color=color, alpha=0.18, linewidth=0, zorder=1)
+            ax.plot(thresholds, mean, '-o', ms=3,
+                    color=color, lw=1.2, zorder=3)
             if method == 'OASIS' and OASIS_SPIKE_DETECTION == 'peaks':
                 ax.axvline(1.0, color='k', lw=0.8, ls='--', alpha=0.55, zorder=2)
             else:
@@ -451,13 +300,6 @@ def plot_figure(data_dir='.'):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
-    """ Print maximum performance statistics for each method and metric.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the results NPZ file.
-    """
 
     path = os.path.join(data_dir, _NPZ_NAME)
     if not os.path.exists(path):
@@ -481,8 +323,8 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
         print('\n--- {} ---'.format(method))
         matches = np.where(np.isclose(thresholds, report_thresh))[0]
         for metric_key, metric_label in [('fbeta', 'F_beta'), ('cosmic', 'CosMIC')]:
-            arr  = res[f'{prefix}_{metric_key}']           # Shape (n_thresh, n_cells).
-            med  = np.nanmedian(arr, axis=1)               # Shape (n_thresh,).
+            arr  = res[f'{prefix}_{metric_key}']
+            med  = np.nanmedian(arr, axis=1)
             mad  = _mad(arr, axis=1)
             best_idx = int(np.argmax(med))
             print('  Max median {:>8}: {:.3f} ± {:.3f}  at threshold={:.3f}'.format(

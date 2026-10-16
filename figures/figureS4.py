@@ -4,30 +4,6 @@ figures/figureS4.py
 
 Generates supplemental figure S4: kurtosis vs F-beta score per inference method and sensor.
 
-Functions
----------
-_dff_kurtosis
-    Excess kurtosis on a dF/F trace.
-_sensor_colors
-    Return a dict mapping each target sensor name to an HSV color.
-_get_sensor
-    Infer sensor label from a dataset folder name.
-_load_records
-    Load scalar records from an NPZ file into a list of dicts.
-_fbeta
-    Compute vectorised F-beta score from arrays of precision and recall.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-_load_all_records
-    Load and annotate benchmark records for all methods.
-_plot_method_panel
-    Plot median +/- MAD of kurtosis vs F-beta for each target sensor.
-plot_figure
-    Assemble and save figure S4.
-main
-    Parse command-line arguments and call plot_figure.
-
-
 DMM, March 2026
 """
 
@@ -52,7 +28,6 @@ mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
 def _dff_kurtosis(fluo):
-    """Excess kurtosis computed on a dF/F-normalized trace (8th-pct baseline)."""
 
     f = np.asarray(fluo, dtype=np.float64)
     b = float(np.percentile(f, 8))
@@ -86,7 +61,6 @@ _METHOD_GRID  = [('omsi', 'matlab'), ('oasis', 'cascade_loo')]
 
 
 def _sensor_colors():
-    """Return a dict mapping each target sensor name to an HSV color."""
 
     cmap = plt.get_cmap('hsv')
     n = len(_TARGET_SENSORS)
@@ -94,7 +68,6 @@ def _sensor_colors():
 
 
 def _get_sensor(ds_folder):
-    """Infer sensor label from a dataset folder name."""
 
     s = ds_folder.lower()
     for keyword, label in [
@@ -107,7 +80,6 @@ def _get_sensor(ds_folder):
 
 
 def _load_records(path):
-    """Load scalar records from an NPZ file, returning a list of dicts."""
 
     d    = np.load(path, allow_pickle=True)
     keys = list(d.files)
@@ -129,20 +101,6 @@ def _load_records(path):
 
 
 def _fbeta(precision, recall):
-    """Compute vectorised F-beta score from arrays of precision and recall.
-
-    Parameters
-    ----------
-    precision : array-like
-        Precision values.
-    recall : array-like
-        Recall values.
-
-    Returns
-    -------
-    ndarray
-        F-beta scores.
-    """
 
     p  = np.asarray(precision, dtype=float)
     r  = np.asarray(recall,    dtype=float)
@@ -153,37 +111,11 @@ def _fbeta(precision, recall):
 
 
 def _mad(x, axis=None):
-    """ Compute the median absolute deviation, ignoring NaNs.
-
-    Parameters
-    ----------
-    x : array-like
-        Input values.
-    axis : int or None, optional
-        Axis along which to compute; None flattens the input.
-
-    Returns
-    -------
-    float or np.ndarray
-        Median of |x - median(x)| along axis.
-    """
     x = np.asarray(x, dtype=float)
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def _load_all_records(data_dir):
-    """Load and annotate benchmark records for all methods.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing ground-truth result NPZ files.
-
-    Returns
-    -------
-    dict
-        Records keyed by method name, with 'sensor', 'fbeta', and 'kurtosis' added.
-    """
 
     all_records = {}
     for method_key in _METHOD_ORDER:
@@ -223,19 +155,6 @@ def _load_all_records(data_dir):
 
 
 def _plot_method_panel(ax, records, method_key, sensor_colors):
-    """Plot median +/- MAD of kurtosis vs F-beta for each target sensor.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    records : list of dict
-        Benchmark records for one method.
-    method_key : str
-        Method identifier used to look up the panel title.
-    sensor_colors : dict
-        Colour for each sensor label.
-    """
 
     for sensor in _TARGET_SENSORS:
         recs  = [r for r in records if r.get('sensor') == sensor]
@@ -267,15 +186,6 @@ def _plot_method_panel(ax, records, method_key, sensor_colors):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR, out_dir=_DEFAULT_OUT_DIR):
-    """Load benchmark data and save figure S4.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing ground-truth result NPZ files.
-    out_dir : str, optional
-        Directory to write the output figure.
-    """
 
     os.makedirs(out_dir, exist_ok=True)
 
