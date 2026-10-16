@@ -4,6 +4,11 @@ figures/run_pnev_MCMC.py
 
 Run MCMC spike inference following Pnevmatikakis et al. via MATLAB subprocess.
 
+MATLAB location and toolbox paths are discovered at runtime rather than
+hardcoded, so the same call works on Linux, macOS, and Windows across MATLAB
+releases. Override any of it with the MATLAB_EXECUTABLE, CVX_HOME, and
+CAIMAN_MATLAB_HOME environment variables.
+
 DMM, March 2026
 """
 
@@ -15,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -42,12 +48,13 @@ try
         addpath(genpath(caiman_root));
     end
 
-    % Optional copy of cont_ca_sampler with the rise-time fix. Added last so it is
-    % first on the path; empty unless the caller asked for it.
+    % Optional patched copies of cont_ca_sampler (rise-time fix) and/or
+    % get_initial_sample (init threshold). Added last so they are first on the
+    % path; empty unless the caller asked for them.
     fix_root = '__FIX_ROOT__';
     if ~isempty(fix_root)
         addpath(fix_root);
-        fprintf('Using cont_ca_sampler with rise-time fix: %s\\n', which('cont_ca_sampler'));
+        fprintf('Using patched CaImAn from: %s\\n', fix_root);
     end
 
     % Statistics Toolbox stand-ins, appended so a real installation wins.
@@ -438,9 +445,42 @@ def _write_rise_fix(caiman_root, out_dir):
     code = code.replace(_RISE_BUG_LINE, _RISE_FIX_LINE + '  % rise-time fix (fMCSI)')
 
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, 'cont_ca_sampler.m'), 'w') as fh:
-        fh.write(code)
+    _write_if_changed(os.path.join(out_dir, 'cont_ca_sampler.m'), code)
     return out_dir
+
+
+_INIT_THR_LINE = 's_in = sp>0.15*max(sp);'
+
+def _write_init_thr(caiman_root, out_dir, thr):
+
+    hits = glob.glob(os.path.join(caiman_root, '**', 'get_initial_sample.m'),
+                     recursive=True)
+    if len(hits) != 1:
+        raise FileNotFoundError('Expected one get_initial_sample.m under {}, found {}.'.format(
+            caiman_root, len(hits)))
+    with open(hits[0]) as fh:
+        code = fh.read()
+    if code.count(_INIT_THR_LINE) != 1:
+        raise ValueError('Init threshold line not found exactly once in {} -- '
+                         'CaImAn version differs, threshold not applied.'.format(hits[0]))
+    code = code.replace(_INIT_THR_LINE, 's_in = sp>{!r}*max(sp);  % init threshold '
+                        '(fMCSI)'.format(float(thr)))
+
+    os.makedirs(out_dir, exist_ok=True)
+    _write_if_changed(os.path.join(out_dir, 'get_initial_sample.m'), code)
+    return out_dir
+
+
+def _write_if_changed(path, code):
+
+    if os.path.exists(path):
+        with open(path) as fh:
+            if fh.read() == code:
+                return
+    tmp = '{}.{}.{}.tmp'.format(path, os.getpid(), threading.get_ident())
+    with open(tmp, 'w') as fh:
+        fh.write(code)
+    os.replace(tmp, path)
 
 
 def _init_cells(inits, n_cells):
@@ -460,7 +500,8 @@ def _init_cells(inits, n_cells):
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
                         verbose=True, return_samples=False, inits=None, burn_in=None,
-                        init_shifts=None, fix_rise_bug=False, return_cell_times=False):
+                        init_shifts=None, fix_rise_bug=False, init_thr=None,
+                        return_cell_times=False):
 
     if dff.ndim == 1:
         dff = dff[np.newaxis, :]
@@ -524,12 +565,18 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                                          'omsi_matlab_shims'))
 
     fix_root = ''
-    if fix_rise_bug:
+    if fix_rise_bug or init_thr is not None:
         if not caiman_root:
-            print('CaImAn-MATLAB not found -- cannot apply the rise-time fix.')
+            print('CaImAn-MATLAB not found -- cannot apply the CaImAn patches.')
             return _empty()
-        fix_root = _write_rise_fix(caiman_root, os.path.join(tempfile.gettempdir(),
-                                                             'omsi_caiman_rise_fix'))
+        name = 'omsi_caiman_rise_fix' if fix_rise_bug else 'omsi_caiman_patch'
+        if init_thr is not None:
+            name += '_thr{:g}'.format(float(init_thr))
+        fix_root = os.path.join(tempfile.gettempdir(), name)
+        if fix_rise_bug:
+            _write_rise_fix(caiman_root, fix_root)
+        if init_thr is not None:
+            _write_init_thr(caiman_root, fix_root, init_thr)
 
     _write_wrapper(wrapper_script, work_dir, input_mat, output_mat,
                    cvx_root, caiman_root, shim_dir, fix_root)

@@ -79,7 +79,9 @@ def generate_synthetic_data(
         drift_sd=0.0,
         drift_timescale=60.0,
         measured_snr=None,
-        return_params=False
+        return_params=False,
+        bursty_frac=0.15,
+        max_rate=4.0
     ):
     n_frames = int(fs * duration)
     t = np.arange(n_frames) / fs
@@ -115,12 +117,12 @@ def generate_synthetic_data(
     if firing_rates is None:
 
         firing_rates = np.random.lognormal(mean=np.log(0.2), sigma=1.0, size=n_cells)
-        firing_rates = np.clip(firing_rates, 0.01, 4.0)
+        firing_rates = np.clip(firing_rates, 0.01, max_rate)
 
     p_spike = firing_rates[:, None] / fs_high
     spikes_high = (np.random.rand(n_cells, n_high) < p_spike).astype(float)
 
-    n_bursty = int(n_cells * 0.15)
+    n_bursty = int(n_cells * bursty_frac)
     if n_bursty > 0:
         print('  Making {} cells bursty (adding spikes)...'.format(n_bursty))
         bursty_indices = np.random.choice(np.arange(n_cells), size=n_bursty, replace=False)
