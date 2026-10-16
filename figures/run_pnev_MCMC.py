@@ -28,13 +28,10 @@ import scipy.io
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Environment variables that override discovery, checked before anything else.
 _MATLAB_ENV = 'MATLAB_EXECUTABLE'
 _CVX_ENV    = 'CVX_HOME'
 _CAIMAN_ENV = 'CAIMAN_MATLAB_HOME'
 
-# MATLAB wrapper. Placeholders are substituted by plain string replacement so
-# the MATLAB brace syntax does not have to be escaped.
 _WRAPPER_TEMPLATE = """
 try
     cd('__WORK_DIR__');
@@ -102,10 +99,18 @@ try
 
     all_spikes = cell(n_cells, 1);
     all_ss = cell(n_cells, 1);
+    all_g = cell(n_cells, 1);
+    all_sn2 = cell(n_cells, 1);
     all_init = cell(n_cells, 1);
     all_probs = zeros(n_cells, n_frames);
     model_traces = zeros(n_cells, n_frames);
     cell_times = nan(n_cells, 1);
+    all_chain = cell(n_cells, 1);
+
+    % Optional inputs; absent from older input files.
+    if ~exist('save_chain', 'var'), save_chain = false; end
+    if ~exist('seeds', 'var'), seeds = []; end
+    if ~exist('has_start', 'var'), has_start = false; end
 
     set(0, 'DefaultFigureVisible', 'off');
     fprintf('Running MCMC on %d cells...\\n', n_cells);
@@ -127,6 +132,21 @@ try
                 SAM.spiketimes_ = min(max(SAM.spiketimes_ + init_shifts(i), 1e-3), n_frames);
                 params.init = SAM;
                 all_init{i} = SAM.spiketimes_;
+            elseif has_start
+                % CaImAn's own start, with its spike train replaced where
+                % start_mode(i) is 1. Hyperparameters stay CaImAn's.
+                p0 = params;
+                p0.c = []; p0.b = []; p0.c1 = []; p0.g = []; p0.sn = []; p0.sp = [];
+                p0.bas_nonneg = 0;
+                SAM = get_initial_sample(y, p0);
+                if start_mode(i) == 1
+                    SAM.spiketimes_ = sort(start_spikes{i}(:));
+                end
+                params.init = SAM;
+                all_init{i} = SAM.spiketimes_;
+            end
+            if ~isempty(seeds) && isfinite(seeds(i))
+                rng(seeds(i), 'twister');
             end
             t_cell = tic;
             res = cont_ca_sampler(y, params);
@@ -151,6 +171,38 @@ try
             end
             if save_samples
                 all_ss{i} = samples;
+                % Time constants [rise, decay] in frames, and noise variance when
+                % the sampler draws it (absent when it is marginalized out).
+                if isfield(res, 'g'), all_g{i} = res.g; end
+                if isfield(res, 'sn2'), all_sn2{i} = res.sn2; end
+            end
+            if save_chain
+                % Per kept sweep: [ns, Am, Cb, sn2, tau_rise, tau_decay, lambda, SSE].
+                % SSE rebuilds each sample's calcium trace with make_mean_sample.
+                % It averages over samples with mean(), which collapses a single
+                % row, and reads a length-2 Cb as the marginalized sampler -- so
+                % each sample goes in three times.
+                nk = length(res.ns);
+                ch = nan(nk, 8);
+                ch(:, 1) = res.ns(:);
+                ch(:, 2) = res.Am(:);
+                if length(res.Cb) == nk, ch(:, 3) = res.Cb(:); end
+                if isfield(res, 'sn2'), ch(:, 4) = res.sn2(:); end
+                if isfield(res, 'g'), ch(:, 5:6) = res.g; end
+                ch(:, 7) = res.ld(:);
+                ok = ~isnan(y);
+                one = res;
+                for k = 1:nk
+                    kk = [k k k];
+                    one.ns = res.ns(kk); one.ss = res.ss(kk); one.Am = res.Am(kk);
+                    if length(res.Cb) == nk
+                        one.Cb = res.Cb(kk); one.Cin = res.Cin(kk, :);
+                    end
+                    if isfield(res, 'g'), one.g = res.g(kk, :); end
+                    c = make_mean_sample(one, y);
+                    ch(k, 8) = sum((y(ok) - c(ok)').^2);
+                end
+                all_chain{i} = ch;
             end
 
             temp_trace = make_mean_sample(res, y);
@@ -162,9 +214,13 @@ try
     end
 
     if save_samples
-        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'all_ss', 'all_init');
+        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'all_ss', 'all_init', ...
+             'all_g', 'all_sn2');
     else
         save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces');
+    end
+    if save_chain
+        save('__OUTPUT_MAT__', 'all_chain', 'all_init', 'cell_times', '-append');
     end
     exit(0);
 
@@ -176,19 +232,6 @@ end
 
 
 def _release_sort_key(path):
-    """ Sort key that orders MATLAB install paths newest release first.
-
-    Parameters
-    ----------
-    path : str
-        Path containing a release tag such as R2025b.
-
-    Returns
-    -------
-    tuple
-        (year, update letter) descending-friendly key, (0, '') when unparsed.
-    """
-
     match = re.search(r'R(\d{4})([ab])', path)
     if not match:
         return (0, '')
@@ -196,22 +239,6 @@ def _release_sort_key(path):
 
 
 def find_matlab(explicit=None):
-    """ Locate a MATLAB executable, newest release first.
-
-    Order: explicit argument, MATLAB_EXECUTABLE, PATH, then the standard
-    install directory for the current OS.
-
-    Parameters
-    ----------
-    explicit : str, optional
-        Path supplied by the caller. Returned as-is when it exists.
-
-    Returns
-    -------
-    str or None
-        Path to a MATLAB executable, or None when none was found.
-    """
-
     if explicit and os.path.exists(explicit):
         return explicit
 
@@ -250,31 +277,12 @@ def find_matlab(explicit=None):
 
 
 def find_toolbox(env_var, folder_name, extra_candidates=()):
-    """ Locate a MATLAB toolbox directory from env var or common install paths.
-
-    Parameters
-    ----------
-    env_var : str
-        Environment variable checked first.
-    folder_name : str
-        Directory name to look for, e.g. 'cvx'.
-    extra_candidates : iterable of str, optional
-        Additional absolute paths to check before the generic ones.
-
-    Returns
-    -------
-    str
-        Absolute path to the toolbox, or empty string when not found.
-    """
-
     from_env = os.environ.get(env_var, '').strip()
     if from_env and os.path.isdir(from_env):
         return os.path.abspath(from_env)
 
     home = os.path.expanduser('~')
 
-    # Parent folders people actually keep toolboxes in. OneDrive-redirected
-    # Documents and the Desktop are both common on Windows.
     parents = [
         os.path.join(home, 'Documents', 'MATLAB'),
         os.path.join(home, 'Documents'),
@@ -303,30 +311,8 @@ def find_toolbox(env_var, folder_name, extra_candidates=()):
 
 
 def _matlab_invocations(script_stem, exe=None):
-    """ Argument lists to try, modern batch mode first.
-
-    -batch arrived in R2019a. Older releases need -r with an explicit exit,
-    and Windows needs -wait so the call blocks. When the release is readable
-    from the executable path and is R2019a or later, only -batch is offered:
-    a non-zero exit then means the MATLAB script itself failed, and retrying
-    with -r would just open a second session that hangs.
-
-    Parameters
-    ----------
-    script_stem : str
-        Wrapper script name without the .m extension.
-    exe : str, optional
-        MATLAB executable path, used to read the release tag.
-
-    Returns
-    -------
-    list of list of str
-        Argument lists to append to the executable, in order of preference.
-    """
-
     batch = ['-batch', script_stem]
 
-    # Known release of R2019a or later: -batch is supported, so never retry.
     match = re.search(r'R(\d{4})([ab])', exe or '')
     if match and (int(match.group(1)), match.group(2)) >= (2019, 'a'):
         return [batch]
@@ -468,24 +454,6 @@ end
 
 
 def _write_shims(shim_dir):
-    """ Write base-MATLAB stand-ins for the Statistics Toolbox functions used.
-
-    cont_ca_sampler needs range, prctile, gamrnd, and normrnd, all of which
-    ship with the Statistics and Machine Learning Toolbox. The wrapper adds
-    this directory to the end of the path, so a real toolbox installation
-    still wins and these are used only when it is missing or unlicensed.
-
-    Parameters
-    ----------
-    shim_dir : str
-        Directory to write the .m files into. Created if absent.
-
-    Returns
-    -------
-    str
-        The directory written to.
-    """
-
     os.makedirs(shim_dir, exist_ok=True)
     for name, body in _SHIMS.items():
         path = os.path.join(shim_dir, name + '.m')
@@ -496,33 +464,7 @@ def _write_shims(shim_dir):
 
 def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
                    shim_dir, fix_root=''):
-    """ Fill the MATLAB wrapper template and write it next to the input file.
-
-    Forward slashes are used throughout: MATLAB accepts them on Windows too,
-    and they avoid escape trouble inside single-quoted MATLAB strings.
-
-    Parameters
-    ----------
-    path : str
-        Destination .m file.
-    work_dir : str
-        Directory MATLAB changes into before running.
-    input_mat : str
-        Input .mat filename.
-    output_mat : str
-        Output .mat filename.
-    cvx_root : str
-        cvx directory, or empty string.
-    caiman_root : str
-        CaImAn-MATLAB directory, or empty string.
-    shim_dir : str
-        Directory holding the Statistics Toolbox stand-ins.
-    fix_root : str, optional
-        Directory holding the rise-time-fixed cont_ca_sampler, or empty string.
-    """
-
     def _posix(p):
-        """Normalise a path for embedding in a MATLAB string literal."""
         return p.replace('\\', '/').replace("'", "''")
 
     code = _WRAPPER_TEMPLATE
@@ -538,31 +480,11 @@ def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
         fh.write(code)
 
 
-# Rise-time Metropolis step in cont_ca_sampler scores the proposal with the current
-# calcium shape Gs instead of the proposed Gs_, so every rise-time proposal is
-# accepted. The decay step a few lines later uses Gs_ correctly.
 _RISE_BUG_LINE = 'logC_ = -norm(E*(Y(:)-A_*Gs-b_-C_in*ge))^2;'
 _RISE_FIX_LINE = 'logC_ = -norm(E*(Y(:)-A_*Gs_-b_-C_in*ge))^2;'
 
 
 def _write_rise_fix(caiman_root, out_dir):
-    """ Write a copy of the installed cont_ca_sampler.m with the rise-time fix.
-
-    The installed CaImAn is only read, never modified; the copy goes to out_dir.
-
-    Parameters
-    ----------
-    caiman_root : str
-        CaImAn-MATLAB directory.
-    out_dir : str
-        Directory for the patched copy. Created if absent.
-
-    Returns
-    -------
-    str
-        out_dir.
-    """
-
     hits = glob.glob(os.path.join(caiman_root, '**', 'cont_ca_sampler.m'), recursive=True)
     if len(hits) != 1:
         raise FileNotFoundError('Expected one cont_ca_sampler.m under {}, found {}.'.format(
@@ -627,11 +549,39 @@ def _init_cells(inits, n_cells):
     return arr
 
 
+def _start_cells(start_spikes, n_cells):
+    arr = np.empty((n_cells, 1), dtype=object)
+    for i in range(n_cells):
+        s = None if start_spikes is None else start_spikes[i]
+        arr[i, 0] = (np.zeros((0, 1)) if s is None or len(s) == 0
+                     else np.asarray(s, dtype=np.float64).reshape(-1, 1))
+    return arr
+
+
+def _read_chains(res, n_cells):
+    out = []
+    times = np.asarray(res.get('cell_times', np.full(n_cells, np.nan)), dtype=float).ravel()
+    for i in range(n_cells):
+        ch = res['all_chain'][i][0]
+        if ch.size == 0:
+            out.append(None)
+            continue
+        ch = np.asarray(ch, dtype=np.float64)
+        out.append({
+            'ns': ch[:, 0], 'Am': ch[:, 1], 'Cb': ch[:, 2], 'sn2': ch[:, 3],
+            'tau': ch[:, 4:6], 'lam': ch[:, 6], 'sse': ch[:, 7],
+            'time': float(times[i]),
+            'init': np.asarray(res['all_init'][i][0], dtype=np.float64).ravel(),
+        })
+    return out
+
+
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
                         verbose=True, return_samples=False, inits=None, burn_in=None,
-                        init_shifts=None, fix_rise_bug=False, init_thr=None):
-
+                        init_shifts=None, fix_rise_bug=False, init_thr=None,
+                        return_params=False, seeds=None, start_spikes=None,
+                        return_chain=False):
 
     if dff.ndim == 1:
         dff = dff[np.newaxis, :]
@@ -648,7 +598,8 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     wrapper_script = os.path.join(work_dir, script_stem + '.m')
 
     def _empty():
-        """Null result in the shape callers expect, used on any failure."""
+        if return_chain:
+            return [None] * n_cells
         out = ([np.array([]) for _ in range(n_cells)],
                np.zeros_like(dff), np.zeros_like(dff), np.zeros(n_cells))
         if not return_samples:
@@ -656,7 +607,9 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         out = out + ([[] for _ in range(n_cells)],)
         if init_shifts is not None and inits is None:
             out = out + ([np.array([]) for _ in range(n_cells)],)
-        return out + (np.full(n_cells, np.nan),) if return_cell_times else out
+        if return_params:
+            out = out + ([{} for _ in range(n_cells)],)
+        return out
 
     exe = find_matlab(matlab_exe)
     if exe is None:
@@ -690,10 +643,15 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         'init_shifts': np.zeros(n_cells) if init_shifts is None
                        else np.asarray(init_shifts, dtype=np.float64).ravel(),
         'inits': _init_cells(inits, n_cells),
+        'save_chain': bool(return_chain),
+        'seeds': np.full(n_cells, np.nan) if seeds is None
+                 else np.asarray(seeds, dtype=np.float64).ravel(),
+        'has_start': start_spikes is not None and inits is None and init_shifts is None,
+        'start_mode': np.zeros(n_cells) if start_spikes is None
+                      else np.array([0.0 if s is None else 1.0 for s in start_spikes]),
+        'start_spikes': _start_cells(start_spikes, n_cells),
     })
 
-    # Shims live outside work_dir so the wrapper's genpath(pwd) cannot pull
-    # them in ahead of a real Statistics Toolbox.
     shim_dir = _write_shims(os.path.join(tempfile.gettempdir(),
                                          'omsi_matlab_shims'))
 
@@ -714,8 +672,6 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     _write_wrapper(wrapper_script, work_dir, input_mat, output_mat,
                    cvx_root, caiman_root, shim_dir, fix_root)
 
-    # Stale output from an earlier run would otherwise be read back as if it
-    # were this run's result.
     if os.path.exists(output_mat):
         os.remove(output_mat)
 
@@ -755,6 +711,8 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         return _empty()
 
     res = scipy.io.loadmat(output_mat)
+    if return_chain:
+        return _read_chains(res, n_cells)
 
     all_spikes_raw = res['all_spikes']
     all_probs = res['all_probs']
@@ -766,10 +724,6 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         spks = all_spikes_raw[i][0]
         if spks.size > 0:
 
-            # cont_ca_sampler reports times in 1-based frame units: a spike at
-            # continuous time t first shows in sample ceil(t), and sample k is
-            # frame k-1 in Python. Shift by one frame so times match the
-            # 0-based frame clock used for ground truth.
             times = np.clip(spks.flatten() - 1.0, 0.0, None) / fs
             final_spikes.append(times)
         else:
@@ -780,13 +734,27 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     if not return_samples:
         return final_spikes, model_traces, all_probs, sweeps_per_cell
 
-    # Same 1-based to 0-based frame shift as the called spikes.
     samples = []
     for i in range(n_cells):
         cell_ss = np.atleast_1d(res['all_ss'][i][0]).ravel() \
             if 'all_ss' in res and res['all_ss'][i][0].size > 0 else []
         samples.append([np.asarray(st, dtype=np.float64).ravel() - 1.0
                         for st in cell_ss])
+    if return_params:
+        params_out = []
+        for i in range(n_cells):
+            cp = {}
+            for key, name in (('all_g', 'g'), ('all_sn2', 'sn2')):
+                if key in res and res[key][i][0].size > 0:
+                    cp[name] = np.asarray(res[key][i][0], dtype=np.float64)
+            params_out.append(cp)
+        if init_shifts is None or inits is not None:
+            return final_spikes, model_traces, all_probs, sweeps_per_cell, samples, params_out
+        init_spikes = [np.asarray(res['all_init'][i][0], dtype=np.float64).ravel() - 1.0
+                       for i in range(n_cells)]
+        return (final_spikes, model_traces, all_probs, sweeps_per_cell, samples, init_spikes,
+                params_out)
+
     if init_shifts is None or inits is not None:
         return final_spikes, model_traces, all_probs, sweeps_per_cell, samples
 

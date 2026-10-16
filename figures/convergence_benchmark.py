@@ -117,7 +117,6 @@ DMM, September 2026
 
 import os
 
-# One thread per worker -- parallelism is across cells.
 for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMBA_NUM_THREADS'):
     os.environ.setdefault(_v, '1')
 
@@ -161,18 +160,10 @@ BIN_S    = 0.100
 RHAT_THR = 1.01
 ESS_THR  = 400
 RHAT_CAP = 1000.0
+SPREAD_CAP = 100.0
 
-# Example cells in the supplementary figure, as group:idx: one SNR 3 and one 7.5 Hz
-# synthetic cell and one Allen cell, each with default-start chains that agree on
-# events (F1 >= 0.93) but R-hat above 1.1. The Allen cell is the one among those
-# whose chains move most in spike count. Indices refer to the seed-0 run.
-EXAMPLE_CELLS = 'snr3:1,low_fs_snr5:2,allen_slow:0'
+EXAMPLE_CELLS = 'snr3:1,low_fs_snr5:2,fast_tau_snr2:13'
 
-# Synthetic conditions where the NNLS init is well short of ground truth. Picked
-# from a screen (32 cells/condition, 120 s, median F-beta NNLS init -> auto-stop):
-# SNR 3 0.73 -> 0.89, SNR 2 0.43 -> 0.57, fast tau SNR 2 0.52 -> 0.89, 7.5 Hz
-# SNR 5 0.73 -> 0.80. At 7.5 Hz, MCMC gains nothing at SNR 5 and loses to NNLS
-# below it; the generator's default noise there saturates init (0.98).
 SYNTH_CONDITIONS = {
     'snr3':          {'fs': 30.0, 'tau': 1.2, 'snr': 3.0},
     'snr2':          {'fs': 30.0, 'tau': 1.2, 'snr': 2.0},
@@ -189,8 +180,6 @@ GROUP_NAMES  = {
     'allen_slow':    'Allen slow',
     'allen_fast':    'Allen fast',
 }
-# Blue, orange, green, and purple are reserved for deconvolution methods in the
-# other figures -- conditions use reds, yellows, pinks, and browns only.
 GROUP_COLORS = {
     'snr3':          '#C0182B',
     'snr2':          '#E0B000',
@@ -200,66 +189,40 @@ GROUP_COLORS = {
     'allen_fast':    '#C8A77E',
 }
 
+METHOD_COLORS = {'OMSI': '#4C72B0', 'CaImAn': '#DD8452'}
+
 INIT_LABELS = ['nnls', 'empty', 'foopsi', 'dense']
 
 SCALAR_KEYS = ['ns', 'Am', 'Cb', 'sg', 'tau_decay', 'loglik', 'logpost']
 
-# Chains started the way OMSI.deconv starts them (NNLS, re-jittered).
 DEFAULT_STARTS = ('nnls', 'nnls_jit')
 
-# Spikes closer than this are merged into one event for event-level agreement.
 EVENT_GAP_S = 0.100
 
-# Checkpoints for accuracy vs sweeps; clipped to chain length.
 SWEEP_CHECKPOINTS = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
 
-# Bump when per-cell result contents change so old files get rerun.
 RESULT_VERSION = 4
 
-# Timing perturbation test: every spike of each method's own starting sample shifted
-# by these many frames, fixed-length chains with no burn-in discarded.
 PERTURB_COND   = {'fs': 30.0, 'tau': 1.2, 'snr': 6.0}
 PERTURB_SHIFTS = [-2, -1, 0, 1, 2]
 PERTURB_CELLS  = 20
-# CaImAn's usual budget in our wrapper: 500 kept + 250 burn-in.
 PERTURB_SWEEPS = 750
-# Pairing window for timing error; wider than 100 ms so a 2-frame start still pairs.
 PERTURB_TOL    = 0.150
-# Bursty cells fail for a different reason (one amplitude per cell) -- left out.
-# Bursty: at least this many ISIs of exactly the generator's 2 fine-grid steps.
 BURSTY_MIN_PAIRS = 3
 PERTURB_METHOD_NAMES = {'omsi': 'OMSI', 'caiman': 'CaImAn'}
 
 
 def _split_chains(x):
-    """Split each chain in half, doubling chain count. x: (M, N, ...)."""
-
     half = x.shape[1] // 2
     return np.concatenate([x[:, :half], x[:, x.shape[1] - half:]], axis=0)
 
 
 def _rank_normalize(x):
-    """Rank-normalize draws across all chains to standard normal scores."""
-
     r = rankdata(x, method='average').reshape(x.shape)
     return norm.ppf((r - 0.375) / (x.size + 0.25))
 
 
 def _rhat_basic(x):
-    """ Classic potential scale reduction along axis 1, vectorized over trailing axes.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Draws, shape (C, n, ...).
-
-    Returns
-    -------
-    np.ndarray or float
-        R-hat per trailing index. NaN where every draw is identical, inf where
-        chains are each constant but disagree.
-    """
-
     x = np.asarray(x, dtype=float)
     n = x.shape[1]
     means = x.mean(axis=1)
@@ -274,43 +237,16 @@ def _rhat_basic(x):
 
 
 def rhat_rank(x):
-    """ Rank-normalized split R-hat (Vehtari et al. 2021), max of bulk and folded.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Draws, shape (M, N).
-
-    Returns
-    -------
-    float
-        R-hat, NaN if draws are constant, capped at RHAT_CAP.
-    """
-
     x = np.asarray(x, dtype=float)
     if not np.all(np.isfinite(x)) or np.ptp(x) == 0:
         return np.nan
     xs = _split_chains(x)
     bulk = _rhat_basic(_rank_normalize(xs))
     fold = _rhat_basic(_rank_normalize(np.abs(xs - np.median(xs))))
-    # Frozen chains give W ~ float noise and absurd ratios -- cap them.
     return float(min(np.nanmax([bulk, fold]), RHAT_CAP))
 
 
 def _ess_core(x):
-    """ Multi-chain ESS from Geyer initial monotone sequence.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Draws, shape (C, n).
-
-    Returns
-    -------
-    float
-        Effective sample size, NaN if draws are constant.
-    """
-
     x = np.asarray(x, dtype=float)
     C, n = x.shape
     if n < 4:
@@ -331,7 +267,6 @@ def _ess_core(x):
     rho = 1.0 - (mean_var - acov.mean(axis=0)) / var_plus
     rho[0] = 1.0
 
-    # Geyer: sum adjacent pairs while positive, then force monotone.
     pairs = []
     t = 0
     while t + 1 < n:
@@ -348,8 +283,6 @@ def _ess_core(x):
 
 
 def ess_bulk(x):
-    """Bulk ESS on rank-normalized split chains. x: (M, N)."""
-
     x = np.asarray(x, dtype=float)
     if not np.all(np.isfinite(x)) or np.ptp(x) == 0:
         return np.nan
@@ -357,8 +290,6 @@ def ess_bulk(x):
 
 
 def ess_tail(x):
-    """Tail ESS: min ESS of 5% and 95% quantile indicators. x: (M, N)."""
-
     x = np.asarray(x, dtype=float)
     if not np.all(np.isfinite(x)) or np.ptp(x) == 0:
         return np.nan
@@ -373,8 +304,6 @@ def ess_tail(x):
 
 
 def iat(x):
-    """Integrated autocorrelation time of a single chain, in sweeps. x: (N,)."""
-
     x = np.asarray(x, dtype=float)
     if not np.all(np.isfinite(x)) or np.ptp(x) == 0:
         return np.nan
@@ -383,21 +312,6 @@ def iat(x):
 
 
 def mean_acf(x, max_lag):
-    """ Autocorrelation function averaged over chains.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Draws, shape (M, N).
-    max_lag : int
-        Largest lag returned.
-
-    Returns
-    -------
-    np.ndarray
-        ACF for lags 0..max_lag, NaN if draws are constant.
-    """
-
     x = np.asarray(x, dtype=float)
     n = x.shape[1]
     max_lag = min(max_lag, n - 1)
@@ -410,23 +324,6 @@ def mean_acf(x, max_lag):
 
 
 def _binned_counts(ss, n_frames, bin_frames):
-    """ Per-sweep spike counts in fixed-width time bins.
-
-    Parameters
-    ----------
-    ss : list of np.ndarray
-        Spike times per sweep, in frame units.
-    n_frames : int
-        Trace length in frames.
-    bin_frames : int
-        Bin width in frames.
-
-    Returns
-    -------
-    np.ndarray
-        Counts, shape (n_sweeps, n_bins), uint8 (clipped at 255).
-    """
-
     n_bins = int(np.ceil(n_frames / bin_frames))
     n_sw = len(ss)
     lens = np.array([len(s) for s in ss], dtype=np.int64)
@@ -440,8 +337,6 @@ def _binned_counts(ss, n_frames, bin_frames):
 
 
 def _loglik(sse, n_valid, sg):
-    """Gaussian log-likelihood per sweep from residual SSE and noise std."""
-
     sg = np.asarray(sg, dtype=float)
     with np.errstate(divide='ignore', invalid='ignore'):
         ll = -sse / (2.0 * sg ** 2) - 0.5 * n_valid * np.log(2.0 * np.pi * sg ** 2)
@@ -449,27 +344,6 @@ def _loglik(sse, n_valid, sg):
 
 
 def _scalar_traces(chain, fs, lam_scale):
-    """ Scalar per-sweep summaries used for diagnostics, keyed by SCALAR_KEYS.
-
-    logpost adds the Poisson spike-count prior the birth-death moves use,
-    n * log(lam * lam_scale), to the log-likelihood. Amplitude/baseline priors
-    left out -- weak next to the likelihood.
-
-    Parameters
-    ----------
-    chain : dict
-        SAMPLES['chain'] from cont_ca_sampler.
-    fs : float
-        Frame rate in Hz.
-    lam_scale : float
-        Rate scale the sampler ran with.
-
-    Returns
-    -------
-    dict of str to np.ndarray
-        One trace per key in SCALAR_KEYS.
-    """
-
     ns = np.asarray(chain['ns'], dtype=float)
     ll = _loglik(chain['sse'], chain['n_valid'], chain['sg'])
     lam_val = np.maximum(np.asarray(chain['lam'], dtype=float) * lam_scale, 1e-300)
@@ -485,30 +359,6 @@ def _scalar_traces(chain, fs, lam_scale):
 
 
 def _convergence_sweep(traces, step, thr):
-    """ First chain length after which max split R-hat stays below threshold.
-
-    At each grid length n, first half is treated as warmup and R-hat is taken
-    on draws n/2..n -- same rule used for the full reference diagnostics.
-
-    Parameters
-    ----------
-    traces : dict of str to np.ndarray
-        Scalar traces, each shape (M, N).
-    step : int
-        Grid spacing in sweeps.
-    thr : float
-        R-hat threshold.
-
-    Returns
-    -------
-    n_conv : float
-        Chain length in sweeps, NaN if never reached.
-    grid : np.ndarray
-        Grid lengths evaluated.
-    rmax : np.ndarray
-        Max R-hat over scalars at each grid length.
-    """
-
     N = next(iter(traces.values())).shape[1]
     grid = np.arange(max(step, 40), N + 1, step)
     rmax = np.full(len(grid), np.nan)
@@ -518,7 +368,6 @@ def _convergence_sweep(traces, step, thr):
         rmax[gi] = max(vals) if vals else np.nan
 
     ok = ~(rmax > thr)
-    # Last grid point that fails; converged from the next one on.
     bad = np.where(~ok)[0]
     if len(bad) == 0:
         return float(grid[0]), grid, rmax
@@ -528,8 +377,6 @@ def _convergence_sweep(traces, step, thr):
 
 
 def _prob_corr(p1, p2, bin_frames):
-    """Pearson correlation of spike probability traces summed into bins."""
-
     n = (min(len(p1), len(p2)) // bin_frames) * bin_frames
     if n == 0:
         return np.nan
@@ -541,23 +388,6 @@ def _prob_corr(p1, p2, bin_frames):
 
 
 def _score(ref_sp, pred_sp, fs):
-    """ Window precision/recall, F-beta, and CosMIC against a reference spike train.
-
-    Parameters
-    ----------
-    ref_sp : np.ndarray
-        Reference spike times in seconds (ground truth or another run).
-    pred_sp : np.ndarray
-        Predicted spike times in seconds.
-    fs : float
-        Frame rate in Hz.
-
-    Returns
-    -------
-    dict
-        precision, recall, fbeta (window), fbeta_strict (one-to-one), cosmic.
-    """
-
     def _fb(p, r):
         b2 = BETA ** 2
         denom = b2 * p + r
@@ -573,8 +403,6 @@ def _score(ref_sp, pred_sp, fs):
 
 
 def _pairwise(items, fn):
-    """Mean of fn(a, b) over all unordered pairs, NaN if fewer than two items."""
-
     vals = [fn(items[i], items[j])
             for i in range(len(items)) for j in range(i + 1, len(items))]
     vals = [v for v in vals if np.isfinite(v)]
@@ -582,8 +410,6 @@ def _pairwise(items, fn):
 
 
 def _events(sp):
-    """Merge spikes closer than EVENT_GAP_S into single events at their mean time."""
-
     sp = np.sort(np.asarray(sp, dtype=float))
     if len(sp) < 2:
         return sp
@@ -592,22 +418,6 @@ def _events(sp):
 
 
 def _event_agree(a, b):
-    """ One-to-one F1 between two chains' event lists, +/-100 ms.
-
-    Stacked spikes merged first, so this asks only whether both chains found
-    the same events, not how many spikes they put at each.
-
-    Parameters
-    ----------
-    a, b : np.ndarray
-        Spike times in seconds.
-
-    Returns
-    -------
-    float
-        F1 in [0, 1]; 1 if both are empty.
-    """
-
     ea, eb = _events(a), _events(b)
     if len(ea) == 0 and len(eb) == 0:
         return 1.0
@@ -617,36 +427,11 @@ def _event_agree(a, b):
 
 
 def _log_idx(n, n_pts=400):
-    """Log-spaced unique sweep indices in [0, n), always including 0."""
-
     idx = np.unique(np.geomspace(1, n, n_pts).astype(int) - 1)
     return idx[idx < n]
 
 
 def _make_inits(y, params, seeds):
-    """ Build overdispersed starting samples that share one set of hyperparameters.
-
-    cont_ca_sampler takes its amplitude prior mean, firing rate, and amplitude
-    floor from the init sample, so every chain reuses the NNLS values for those
-    and only the starting spike train changes.
-
-    Parameters
-    ----------
-    y : np.ndarray
-        dF/F trace.
-    params : dict
-        Sampler params as the user would pass them.
-    seeds : list of int
-        One seed per chain.
-
-    Returns
-    -------
-    inits : list of dict
-        Init samples, one per chain.
-    labels : list of str
-        Init type per chain.
-    """
-
     T = len(y)
     np.random.seed(seeds[0])
     base = get_init_sample(y, dict(params))
@@ -663,8 +448,6 @@ def _make_inits(y, params, seeds):
         elif label == 'foopsi':
             sp = get_init_sample(y, dict(params, init_method='foopsi'))['spiketimes_']
         elif label == 'dense':
-            # Extra uniform spikes, at least 2% of frames, so this chain starts
-            # well above the spike count the others start near.
             n_extra = max(len(base['spiketimes_']), int(0.02 * T))
             sp = np.concatenate([base['spiketimes_'], np.random.rand(n_extra) * T])
         else:
@@ -676,27 +459,6 @@ def _make_inits(y, params, seeds):
 
 
 def _run_chain(y, params, seed, init=None, n_sweeps=None):
-    """ Run one sampler chain with a fixed seed and return full chain plus outputs.
-
-    Parameters
-    ----------
-    y : np.ndarray
-        dF/F trace.
-    params : dict
-        Sampler params as the user would pass them.
-    seed : int
-        Seed for both numpy (init jitter) and numba (sampler) RNGs.
-    init : dict, optional
-        Init sample. None lets the sampler build its own, as OMSI.deconv does.
-    n_sweeps : int, optional
-        Fixed chain length with no burn-in discard. None runs auto-stop.
-
-    Returns
-    -------
-    dict or None
-        chain, time, p_switched, lam_scale. None if the sampler skipped the cell.
-    """
-
     p = dict(params)
     p['seed'] = int(seed)
     p['return_full'] = True
@@ -719,27 +481,12 @@ def _run_chain(y, params, seed, init=None, n_sweeps=None):
     return {
         'chain': S['chain'],
         'time': elapsed,
-        # Fast-indicator path rebuilds the init, overriding the spike start.
         'p_switched': bool(p.get('p', p_in) != p_in),
         'lam_scale': float(p['lam_scale']),
     }
 
 
 def _run_cell(task):
-    """ Run reference chains and auto-stop runs for one cell and save diagnostics.
-
-    Parameters
-    ----------
-    task : dict
-        Keys: group, cell_idx, dff, true_spikes, fs, params, seeds, n_chains,
-        n_sweeps, n_auto, warmup_frac, out_path.
-
-    Returns
-    -------
-    str
-        Status message.
-    """
-
     y = np.asarray(task['dff'], dtype=np.float64)
     fs = float(task['fs'])
     params = task['params']
@@ -771,7 +518,6 @@ def _run_cell(task):
     result['p_switched'] = any(r['p_switched'] for r in refs)
     result['ref_time'] = float(np.mean([r['time'] for r in refs]))
 
-    # Scalar diagnostics on post-warmup draws.
     w0 = int(task['warmup_frac'] * N)
     tr_each = [_scalar_traces(r['chain'], fs, r['lam_scale']) for r in refs]
     tr_full = {k: np.stack([t[k] for t in tr_each]) for k in SCALAR_KEYS}
@@ -785,8 +531,6 @@ def _run_cell(task):
     finite = [v for v in result['rhat'].values() if not np.isnan(v)]
     result['rhat_max'] = max(finite) if finite else np.nan
 
-    # Same, restricted to chains started the way OMSI.deconv starts them.
-    # NaN here means every draw identical (frozen, identical chains).
     dflt = [i for i, l in enumerate(labels) if l in DEFAULT_STARTS]
     result['default_idx'] = dflt
     if len(dflt) >= 2:
@@ -798,8 +542,6 @@ def _run_cell(task):
         result['rhat_default_max'] = np.nan
     result['acf_ns']     = mean_acf(tr_post['ns'], 300)
     result['acf_loglik'] = mean_acf(tr_post['loglik'], 300)
-    # ESS and ACF on default-start chains too. Constant chains have no ACF, so
-    # also count how many default chains never change spike count after warmup.
     if dflt:
         result['ess_bulk_default'] = {k: ess_bulk(v[dflt]) for k, v in tr_post.items()}
         result['acf_ns_default']     = mean_acf(tr_post['ns'][dflt], 300)
@@ -817,10 +559,6 @@ def _run_cell(task):
     result['conv_grid'] = grid
     result['conv_rmax'] = rmax
 
-    # Spike-time posterior: split R-hat per active bin, on spike counts and on
-    # occupancy. Chains can agree on where events are (occupancy) while
-    # disagreeing on how many spikes sit at each one (counts). Constant bins
-    # (NaN) count as converged.
     counts = np.stack([_binned_counts(r['chain']['ss'][w0:], T, bin_frames)
                        for r in refs])
     active = counts.max(axis=(0, 1)) > 0
@@ -832,15 +570,11 @@ def _run_cell(task):
         result[tag + '_frac_101'] = float(np.mean(rb < RHAT_THR)) if rb.size else np.nan
         result[tag + '_frac_105'] = float(np.mean(rb < 1.05)) if rb.size else np.nan
         result[tag + '_rhat_max'] = float(np.max(rb)) if rb.size else np.nan
-    # Bins where chains' spike probability differs by more than 0.5.
     p_bin = (counts > 0).mean(axis=1)
     spread = p_bin.max(axis=0) - p_bin.min(axis=0)
     result['bin_disagree'] = int(np.sum(spread[active] > 0.5))
     del counts
 
-    # Reference outputs per chain, same spike calling as OMSI.deconv. Chains
-    # don't necessarily mix, so no pooling -- compare against each chain and
-    # against the one with highest mean post-warmup log-posterior.
     per_chain = [spikes_from_samples(r['chain']['ss'][w0:], T, fs, lag_s=lag_s) for r in refs]
     ref_probs = [pr for pr, _ in per_chain]
     ref_spikes = [sp for _, sp in per_chain]
@@ -850,7 +584,6 @@ def _run_cell(task):
     result['ref_chain_score'] = [_score(true_sp, sp, fs) for sp in ref_spikes]
     result['ref_best_score'] = result['ref_chain_score'][best]
     result['ref_chain_ns'] = [float(v) for v in tr_post['ns'].mean(axis=1)]
-    # Called spikes per chain and the trace itself, for example-cell panels.
     result['ref_spikes'] = [np.asarray(sp, dtype=np.float32) for sp in ref_spikes]
     result['true_spikes'] = true_sp.astype(np.float32)
     result['dff'] = y.astype(np.float32)
@@ -865,14 +598,11 @@ def _run_cell(task):
         m: float(np.median([result['ref_chain_score'][i][m] for i in dflt]))
         for m in ('fbeta', 'fbeta_strict', 'cosmic')} if dflt else None
 
-    # Accuracy vs sweeps: output as if the chain stopped at each checkpoint,
-    # first half dropped as warmup. Column 0 is the starting spike train.
     grid = [c for c in SWEEP_CHECKPOINTS if c < N] + [N]
     result['sweep_grid'] = np.array([0] + grid)
     sweep_score = {m: np.full((M, len(grid) + 1), np.nan)
                    for m in ('fbeta', 'fbeta_strict', 'cosmic')}
     for k, r in enumerate(refs):
-        # Sampler times are 1-based; see spikes_from_samples.
         init_sp = np.clip(inits[k]['spiketimes_'] - 1.0 - lag_s * fs, 0, T - 1) / fs
         sc = _score(true_sp, init_sp, fs)
         for m in sweep_score:
@@ -884,20 +614,15 @@ def _run_cell(task):
                 sweep_score[m][k, gi] = sc[m]
     result['sweep_score'] = sweep_score
 
-    # Log-spaced traces for plotting, warmup included.
     tidx = _log_idx(N)
     result['trace_idx'] = tidx
     result['ref_traces'] = {k: tr_full[k][:, tidx].astype(np.float32)
                             for k in ('ns', 'loglik', 'Am')}
     del refs, per_chain
 
-    # Ground-truth spike counts per frame, on the same 0-based frame clock as the
-    # probability traces, so agreement with truth uses the same measures as
-    # agreement between runs.
     true_counts = np.bincount(np.clip(np.floor(true_sp * fs).astype(int), 0, T - 1),
                               minlength=T).astype(float)
 
-    # Auto-stop runs, as a user would get them from OMSI.deconv.
     autos = []
     for j in range(K):
         r = _run_chain(y, params, seeds[M + j])
@@ -935,8 +660,6 @@ def _run_cell(task):
         [a['prob'] for a in autos], lambda a, b: _prob_corr(a, b, bin_frames))
     result['event_agree_auto'] = _pairwise([a['spikes'] for a in autos], _event_agree)
 
-    # Do independent auto-stop runs agree with each other at the point they stop?
-    # Kept windows truncated to common length; same quantities as reference R-hat.
     if len(autos) >= 2:
         L = min(len(a['kept']['ns']) for a in autos)
         result['auto_rhat'] = {
@@ -955,23 +678,6 @@ def _run_cell(task):
 
 
 def _synthetic_tasks(n_cells, duration, seed):
-    """ Generate synthetic cells for each condition and build task dicts.
-
-    Parameters
-    ----------
-    n_cells : int
-        Cells per condition.
-    duration : float
-        Trace duration in seconds.
-    seed : int
-        Base seed.
-
-    Returns
-    -------
-    list of dict
-        Partial task dicts (no run settings yet).
-    """
-
     from simulation_helpers import generate_synthetic_data
 
     tasks = []
@@ -981,7 +687,6 @@ def _synthetic_tasks(n_cells, duration, seed):
         dff, true_spikes, _, _, _, _ = generate_synthetic_data(
             n_cells=n_cells, fs=cond['fs'], duration=duration,
             tau=cond['tau'], snr=cond['snr'])
-        # Same params as the figure 2 OMSI runs.
         params = {'f': cond['fs'], 'p': 2}
         for i in range(n_cells):
             tasks.append({'group': group, 'gi': gi, 'cell_idx': i, 'dff': dff[i],
@@ -991,26 +696,6 @@ def _synthetic_tasks(n_cells, duration, seed):
 
 
 def _allen_tasks(h5_path, n_cells, seed):
-    """ Sample Allen ground-truth cells and build task dicts.
-
-    Uses figure 3's dataset exclusions, kurtosis filter, and sampler params.
-    Splits n_cells evenly between slow and fast indicators.
-
-    Parameters
-    ----------
-    h5_path : str
-        Aggregated Allen HDF5 file written by figure3.py.
-    n_cells : int
-        Total Allen cells to sample.
-    seed : int
-        Base seed.
-
-    Returns
-    -------
-    list of dict
-        Partial task dicts (no run settings yet).
-    """
-
     from figure3 import load_aggregated_data, _EXCLUDED_DATASETS
 
     slow, fast = load_aggregated_data(h5_path)
@@ -1046,36 +731,6 @@ def _allen_tasks(h5_path, n_cells, seed):
 def run_test(data_dir=_DEFAULT_DATA_DIR, n_cells=16, duration=300.0, n_chains=10,
              n_sweeps=10000, n_auto=10, warmup_frac=0.5, n_allen=16,
              allen_h5=_DEFAULT_ALLEN_H5, workers=None, seed=0, overwrite=False):
-    """ Build all tasks, run them in parallel, and save per-cell results.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Output directory. Per-cell results go in data_dir/cells.
-    n_cells : int, optional
-        Synthetic cells per condition.
-    duration : float, optional
-        Synthetic trace duration in seconds.
-    n_chains : int, optional
-        Reference chains per cell.
-    n_sweeps : int, optional
-        Reference chain length in sweeps.
-    n_auto : int, optional
-        Auto-stop runs per cell.
-    warmup_frac : float, optional
-        Fraction of each reference chain discarded as warmup.
-    n_allen : int, optional
-        Allen cells in total, split across slow and fast. 0 skips Allen.
-    allen_h5 : str, optional
-        Aggregated Allen HDF5 file.
-    workers : int, optional
-        Worker processes. Defaults to CPU count.
-    seed : int, optional
-        Base seed.
-    overwrite : bool, optional
-        Rerun cells that already have results.
-    """
-
     cell_dir = os.path.join(data_dir, 'cells')
     os.makedirs(cell_dir, exist_ok=True)
 
@@ -1090,7 +745,6 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, n_cells=16, duration=300.0, n_chains=10
     for t in tasks:
         t['out_path'] = os.path.join(cell_dir, '{}_{:03d}.npy'.format(t['group'], t['cell_idx']))
         if os.path.exists(t['out_path']) and not overwrite:
-            # Reuse only if saved with same chain settings.
             prev = np.load(t['out_path'], allow_pickle=True).item()
             same = (prev.get('n_sweeps') == n_sweeps and prev.get('n_chains') == n_chains
                     and len(prev.get('auto', [])) == n_auto)
@@ -1107,7 +761,6 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, n_cells=16, duration=300.0, n_chains=10
     if not todo:
         return
 
-    # Longest traces first so the slow ones start early.
     todo.sort(key=lambda t: -len(t['dff']))
     workers = workers or os.cpu_count()
     t0 = time.time()
@@ -1125,19 +778,6 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, n_cells=16, duration=300.0, n_chains=10
 
 
 def _median_signed_error(true_sp, pred_sp):
-    """ Median signed timing error (ms) of one-to-one matched spikes, NaN if none.
-
-    Parameters
-    ----------
-    true_sp, pred_sp : np.ndarray
-        True and predicted spike times in seconds.
-
-    Returns
-    -------
-    float
-        Median of predicted minus true over matched pairs, in ms.
-    """
-
     it, ip = _match(true_sp, pred_sp)
     if len(it) == 0:
         return np.nan
@@ -1145,30 +785,11 @@ def _median_signed_error(true_sp, pred_sp):
 
 
 def _match(t, p):
-    """ One-to-one matches within PERTURB_TOL via the timing figure's matcher. """
-
     from timing_calibration import _match_pairs
     return _match_pairs(np.asarray(t, dtype=float), np.asarray(p, dtype=float), PERTURB_TOL)
 
 
 def _perturb_tasks(n_cells, duration, seed):
-    """ Simulate non-bursty cells and build shifted starting samples for each.
-
-    Parameters
-    ----------
-    n_cells : int
-        Non-bursty cells to keep.
-    duration : float
-        Trace duration in seconds.
-    seed : int
-        Base seed.
-
-    Returns
-    -------
-    list of dict
-        One task per cell: dff, true spikes, fs, params, and one init per shift.
-    """
-
     from simulation_helpers import generate_synthetic_data
 
     cond = PERTURB_COND
@@ -1191,7 +812,6 @@ def _perturb_tasks(n_cells, duration, seed):
         inits = []
         for sh in PERTURB_SHIFTS:
             sam = dict(base)
-            # Sampler times live on (0, T]; keep shifted spikes inside.
             sam['spiketimes_'] = np.clip(np.asarray(base['spiketimes_'], dtype=float) + sh,
                                          1e-3, len(y))
             inits.append(sam)
@@ -1203,24 +823,9 @@ def _perturb_tasks(n_cells, duration, seed):
 
 
 def _perturb_cell_omsi(task):
-    """ OMSI chains from every shifted start for one cell.
-
-    Parameters
-    ----------
-    task : dict
-        From _perturb_tasks, plus n_sweeps and sweep_idx.
-
-    Returns
-    -------
-    np.ndarray
-        Median signed error (ms), shape (n_shifts, len(sweep_idx) + 1); column 0 is
-        the start itself.
-    """
-
     fs, t, idx = task['fs'], task['true_spikes'], task['sweep_idx']
     out = np.full((len(PERTURB_SHIFTS), len(idx) + 1), np.nan)
     for k, init in enumerate(task['inits']):
-        # Sampler times are 1-based; see spikes_from_samples.
         out[k, 0] = _median_signed_error(t, (np.sort(init['spiketimes_']) - 1.0) / fs)
         r = _run_chain(task['dff'], task['params'], task['seed'] + k, init=dict(init),
                        n_sweeps=task['n_sweeps'])
@@ -1236,26 +841,6 @@ def _perturb_cell_omsi(task):
 
 def run_perturb(data_dir=_DEFAULT_DATA_DIR, n_cells=PERTURB_CELLS, duration=120.0,
                 n_sweeps=PERTURB_SWEEPS, workers=None, seed=0, run_matlab=True):
-    """ Start OMSI and CaImAn from their own starts, shifted, and track timing error.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Output directory; results go to data_dir/perturb.npz.
-    n_cells : int, optional
-        Non-bursty cells.
-    duration : float, optional
-        Trace duration in seconds.
-    n_sweeps : int, optional
-        Sweeps per chain, none discarded.
-    workers : int, optional
-        Worker processes for OMSI. Defaults to CPU count.
-    seed : int, optional
-        Base seed.
-    run_matlab : bool, optional
-        Whether to run CaImAn.
-    """
-
     os.makedirs(data_dir, exist_ok=True)
     tasks = _perturb_tasks(n_cells, duration, seed)
     idx = _log_idx(n_sweeps, 60)
@@ -1291,7 +876,6 @@ def run_perturb(data_dir=_DEFAULT_DATA_DIR, n_cells=PERTURB_CELLS, duration=120.
             for k in range(len(PERTURB_SHIFTS)):
                 row = c * len(PERTURB_SHIFTS) + k
                 ss = samples[row]
-                # Wrapper already shifted CaImAn start and samples to 0-based frames.
                 cai[k, c, 0] = _median_signed_error(t['true_spikes'], np.sort(init_sp[row]) / fs)
                 for j, i in enumerate(idx):
                     if i < len(ss):
@@ -1305,8 +889,6 @@ def run_perturb(data_dir=_DEFAULT_DATA_DIR, n_cells=PERTURB_CELLS, duration=120.
 
 
 def _load_results(data_dir):
-    """Load per-cell result files for current groups, ordered by group then cell."""
-
     paths = sorted(glob.glob(os.path.join(data_dir, 'cells', '*.npy')))
     res = [np.load(p, allow_pickle=True).item() for p in paths]
     stale = [r for r in res if r['group'] not in GROUP_ORDER]
@@ -1320,8 +902,6 @@ def _load_results(data_dir):
 
 
 def _by_group(results, fn):
-    """Map group to array of fn(r) over non-skipped cells, in GROUP_ORDER."""
-
     out = {}
     for g in GROUP_ORDER:
         vals = [fn(r) for r in results if r['group'] == g and not r['skipped']]
@@ -1331,22 +911,6 @@ def _by_group(results, fn):
 
 
 def _strip(ax, series, ylabel, hline=None, log=False):
-    """ Strip plot with median bar per group, optionally several series side by side.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    series : list of (str, dict, dict)
-        (label, group-to-values dict, scatter style kwargs) per series.
-    ylabel : str
-        Y-axis label.
-    hline : float or list of float, optional
-        Reference lines.
-    log : bool, optional
-        Log y-axis.
-    """
-
     rng = np.random.default_rng(0)
     groups = [g for g in GROUP_ORDER if any(g in d for _, d, _ in series)]
     n_s = len(series)
@@ -1360,10 +924,11 @@ def _strip(ax, series, ylabel, hline=None, log=False):
             xc = xi - 0.4 + width * (si + 0.5)
             kw = dict(s=6, linewidths=0.6)
             kw.update(style)
+            c = kw.pop('color', GROUP_COLORS[g])
             if kw.pop('filled', True):
-                kw.update(color=GROUP_COLORS[g])
+                kw.update(color=c)
             else:
-                kw.update(facecolors='none', edgecolors=GROUP_COLORS[g])
+                kw.update(facecolors='none', edgecolors=c)
             ax.scatter(xc + rng.uniform(-width / 3, width / 3, len(v)), v, **kw)
             ax.plot([xc - width / 2.2, xc + width / 2.2], [np.median(v)] * 2, color='k', lw=0.8)
     if hline is not None:
@@ -1375,41 +940,18 @@ def _strip(ax, series, ylabel, hline=None, log=False):
     ax.set_xticklabels([GROUP_NAMES[g] for g in groups], rotation=30, ha='right', fontsize=6)
     ax.set_ylabel(ylabel)
     if n_s > 1:
-        # Gray proxies -- series differ by marker/fill, groups by color.
         for label, _, style in series:
             filled = style.get('filled', True)
+            c = style.get('color', '0.3')
             ax.scatter([], [], s=8, marker=style.get('marker', 'o'), linewidths=0.6,
-                       facecolors='0.3' if filled else 'none', edgecolors='0.3', label=label)
+                       facecolors=c if filled else 'none', edgecolors=c, label=label)
         ax.legend(frameon=False, fontsize=5.5, handletextpad=0.2, borderaxespad=0.1)
 
 
 def _plot_example(fig, spec, r, window_s=20.0):
-    """ Spike count by sweep, trace, and called events per chain for one cell.
-
-    Default-start chains only. Event raster is shown over the window_s stretch of
-    the trace holding the most true spikes.
-
-    Parameters
-    ----------
-    fig : matplotlib.figure.Figure
-        Target figure.
-    spec : matplotlib.gridspec.SubplotSpec
-        Region for this example.
-    r : dict
-        Per-cell result.
-    window_s : float, optional
-        Raster window length in seconds.
-
-    Returns
-    -------
-    list of matplotlib.axes.Axes
-        Count, trace, and raster axes.
-    """
-
     fs = r['fs']
     dflt = r['default_idx']
     color = GROUP_COLORS[r['group']]
-    # Row 1 is a spacer so the sweep axis labels clear the trace.
     sub = gridspec.GridSpecFromSubplotSpec(4, 1, subplot_spec=spec, hspace=0.15,
                                            height_ratios=[1.3, 0.45, 0.8, 1.0])
 
@@ -1458,29 +1000,24 @@ def _plot_example(fig, spec, r, window_s=20.0):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR, examples=None):
-    """ Load per-cell results and generate the supplementary convergence figure.
-
-    Top: three example cells whose default-start chains call the same events but
-    have high R-hat. Below, per condition: split R-hat; bulk ESS, spike-count spread
-    between chains, and spike-count autocorrelation; event agreement and spike
-    probability correlation between independent auto-stop runs.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the cells/ results folder.
-    examples : str, optional
-        Example cells as comma-separated 'group:idx'. Defaults to EXAMPLE_CELLS.
-    """
+    from caiman_convergence import _load as _load_caiman, _keys, _shared_max
 
     results = _load_results(data_dir)
-    done = [r for r in results if not r['skipped']]
+    done = [r for r in results if not r['skipped'] and r['group'] in SYNTH_CONDITIONS]
     if not done:
         raise FileNotFoundError('No results in {}. Run --mode test first.'.format(data_dir))
     old = [r for r in done if r.get('version') != RESULT_VERSION]
     if old:
         raise RuntimeError('{} result files are from an older version -- rerun --mode test.'.format(
             len(old)))
+
+    cai = {k: v for k, v in _load_caiman(data_dir, fixed=False).items()
+           if k[0] in SYNTH_CONDITIONS}
+    if not cai:
+        print('No CaImAn results in {} -- plotting OMSI only.'.format(data_dir))
+    keys = _keys(cai) if cai else SCALAR_KEYS
+    cai_cells = [cai[(r['group'], r['cell_idx'])] for r in done
+                 if (r['group'], r['cell_idx']) in cai]
 
     exs = []
     for e in (examples or EXAMPLE_CELLS).split(','):
@@ -1490,48 +1027,66 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, examples=None):
         '{}:{}'.format(r['group'], r['cell_idx']) for r in exs)))
     groups = [g for g in GROUP_ORDER if any(r['group'] == g for r in done)]
 
+    def _spread(r):
+        ns = np.asarray(r.get('ref_chain_ns', r.get('chain_ns')))[r['default_idx']]
+        return min(100.0 * np.std(ns, ddof=1) / max(np.mean(ns), 1.0), SPREAD_CAP)
+
+    omsi_kw = {'color': METHOD_COLORS['OMSI']}
+    cai_kw = {'color': METHOD_COLORS['CaImAn']}
+
     fig = plt.figure(figsize=(6.5, 9.4), dpi=300)
     gs = gridspec.GridSpec(4, 1, figure=fig, hspace=0.6, height_ratios=[1.9, 0.9, 0.9, 0.9])
     gs_ex = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=gs[0], wspace=0.35)
     for j, r in enumerate(exs):
         _plot_example(fig, gs_ex[0, j], r)
 
-    # R-hat. NaN means every draw identical across chains -- R-hat undefined, so
-    # those cells are counted under each group instead of plotted.
-    ax_c = fig.add_subplot(gs[1])
-    _strip(ax_c, [
-        ('NNLS starts, long runs', _by_group(done, lambda r: r['rhat_default_max']),
-         {'filled': False}),
-        ('NNLS starts, auto-stop', _by_group(done, lambda r: r['auto_rhat_max']),
-         {'marker': '^'}),
-        ('all starts, long runs', _by_group(done, lambda r: r['rhat_max']), {}),
-    ], 'max split $\\hat{R}$', hline=RHAT_THR, log=True)
-    ax_c.set_ylim(0.7, 2e3)
-    ax_c.set_yticks([1, 10, 100, 1000])
-    ax_c.set_yticklabels(['1', '10', '100', '$\\geq$1000'])
-    ax_c.minorticks_off()
-    ax_c.set_xticklabels([GROUP_NAMES[g] for g in groups], rotation=0, ha='center', fontsize=6)
-    for xi, g in enumerate(groups):
-        n_nan = sum(np.isnan(r['rhat_default_max']) for r in done if r['group'] == g)
-        if n_nan:
-            ax_c.text(xi, 0.75, '{} identical'.format(n_nan), ha='center', va='bottom',
-                      fontsize=5, color='0.4')
-    ax_c.legend(frameon=False, fontsize=6, handletextpad=0.2, loc='upper left',
+    ax_e = fig.add_subplot(gs[1])
+    ess = [
+        ('OMSI, spike count', _by_group(done, lambda r: r['ess_bulk_default']['ns']),
+         dict(omsi_kw, filled=False)),
+        ('OMSI, log-lik.', _by_group(done, lambda r: r['ess_bulk_default']['loglik']), omsi_kw),
+    ]
+    if cai:
+        ess += [
+            ('CaImAn, spike count', _by_group(cai_cells, lambda r: r['ess_bulk_default']['ns']),
+             dict(cai_kw, filled=False)),
+            ('CaImAn, log-lik.', _by_group(cai_cells, lambda r: r['ess_bulk_default']['loglik']),
+             cai_kw),
+        ]
+    _strip(ax_e, ess, 'bulk ESS', hline=ESS_THR, log=True)
+    ax_e.minorticks_off()
+    ax_e.set_xticklabels([GROUP_NAMES[g] for g in groups], rotation=0, ha='center', fontsize=6)
+    ax_e.legend(frameon=False, fontsize=6, handletextpad=0.2, loc='upper left',
                 bbox_to_anchor=(1.0, 1.0))
 
-    # ESS spans two of three columns so its two series per condition have room.
     gs_mix = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=gs[2], wspace=0.5)
     gs_agr = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=gs[3], wspace=0.5)
 
-    # Bulk ESS of spike count and log-likelihood, default-start chains.
-    ax_e = fig.add_subplot(gs_mix[0, 0:2])
-    _strip(ax_e, [
-        ('spike count', _by_group(done, lambda r: r['ess_bulk_default']['ns']), {'filled': False}),
-        ('log-lik.', _by_group(done, lambda r: r['ess_bulk_default']['loglik']), {}),
-    ], 'bulk ESS', hline=ESS_THR, log=True)
-    ax_e.minorticks_off()
+    ax_c = fig.add_subplot(gs_mix[0, 0:2])
+    rhat = [('OMSI, auto-stop', _by_group(done, lambda r: _shared_max(r['auto_rhat'], keys)),
+             omsi_kw)]
+    if cai:
+        rhat.append(('CaImAn', _by_group(cai_cells, lambda r: _shared_max(
+            r['rhat_default'], keys)), cai_kw))
+    _strip(ax_c, rhat, 'max split $\\hat{R}$', hline=RHAT_THR, log=False)
+    ax_c.set_ylim(0., 6)
+    ax_c.set_xticklabels([GROUP_NAMES[g] for g in groups], rotation=0, ha='center', fontsize=6)
+    for xi, g in enumerate(groups):
+        n_nan = sum(int(np.sum(np.isnan(d[g]))) for _, d, _ in rhat if g in d)
+        if n_nan:
+            ax_c.text(xi, 0.75, '{} identical'.format(n_nan), ha='center', va='bottom',
+                      fontsize=5, color='0.4')
+    ax_c.legend(frameon=False, fontsize=6, handletextpad=0.2, loc='upper left')
 
-    # Spike-count ACF, default-start chains; median over cells with a defined ACF.
+    ax_s = fig.add_subplot(gs_mix[0, 2])
+    spread = [('OMSI', _by_group(done, _spread), omsi_kw)]
+    if cai:
+        spread.append(('CaImAn', _by_group(cai_cells, _spread), cai_kw))
+    _strip(ax_s, spread, 'spike-count spread\nbetween chains (% of count)')
+    ax_s.set_ylim(0, SPREAD_CAP * 1.05)
+    ax_s.set_yticks([0, 25, 50, 75, 100])
+    ax_s.set_yticklabels(['0', '25', '50', '75', '$\\geq$100'])
+
     ax_f = fig.add_subplot(gs_agr[0, 2])
     for g in groups:
         acfs = np.stack([r['acf_ns_default'] for r in done if r['group'] == g])
@@ -1546,8 +1101,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, examples=None):
     ax_f.legend(frameon=False, fontsize=5.5, loc='upper left', bbox_to_anchor=(1.02, 1.0),
                 handlelength=1.2)
 
-    # Agreement between independent auto-stop runs (NNLS start, different seeds),
-    # as a user would get them from OMSI.deconv.
     ax_g = fig.add_subplot(gs_agr[0, 0])
     _strip(ax_g, [('', _by_group(done, lambda r: r['event_agree_auto']), {})],
            'event agreement\nbetween runs (F1)')
@@ -1557,26 +1110,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, examples=None):
     for ax in (ax_g, ax_h):
         ax.set_ylim(0, 1.03)
 
-    # How far apart default-start chains settle in spike count, relative to the
-    # count -- the size of the disagreement that low R-hat and ESS reflect.
-    ax_s = fig.add_subplot(gs_mix[0, 2])
-    _strip(ax_s, [('', _by_group(done, lambda r: 100.0 * np.std(
-        np.asarray(r['ref_chain_ns'])[r['default_idx']], ddof=1) / max(np.mean(
-            np.asarray(r['ref_chain_ns'])[r['default_idx']]), 1.0)), {})],
-        'spike-count spread\nbetween chains (% of count)')
-    ax_s.set_ylim(bottom=0)
-
-
-    # F-beta vs truth at the NNLS start and after sampling. Off for now; to restore,
-    # uncomment and give it a free grid slot (the agreement row is full).
-    # ax_i = fig.add_subplot(gs_agr[0, 2])
-    # _strip(ax_i, [
-    #     ('NNLS start', _by_group(done, lambda r: np.median(
-    #         r['sweep_score']['fbeta'][r['default_idx'], 0])), {'filled': False}),
-    #     ('OMSI', _by_group(done, lambda r: np.median(
-    #         [a['score']['fbeta'] for a in r['auto']])), {}),
-    # ], '$F_\\beta$ vs truth')
-    # ax_i.set_ylim(0, 1.03)
 
     for ext in ('png', 'svg'):
         out = os.path.join(data_dir, 'convergence_benchmark.{}'.format(ext))
@@ -1586,8 +1119,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, examples=None):
 
 
 def _mm(v, fmt='.3f'):
-    """Median +/- MAD string over finite values."""
-
     v = np.asarray(v, dtype=float)
     v = v[np.isfinite(v)]
     if len(v) == 0:
@@ -1597,14 +1128,6 @@ def _mm(v, fmt='.3f'):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
-    """ Print per-group convergence and agreement statistics.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the cells/ results folder.
-    """
-
     results = _load_results(data_dir)
     if not results:
         raise FileNotFoundError('No results in {}. Run --mode test first.'.format(data_dir))
@@ -1774,10 +1297,7 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR):
                           np.subtract(*np.nanpercentile(np.abs(pert[m][k][:, -1]), [75, 25]))))
 
 
-
 def main():
-    """Parse command-line arguments and dispatch."""
-
     parser = argparse.ArgumentParser(
         description='OMSI auto-stop rule vs conventional MCMC convergence diagnostics')
     parser.add_argument('--mode', required=True, choices=['test', 'perturb', 'plot', 'print'],

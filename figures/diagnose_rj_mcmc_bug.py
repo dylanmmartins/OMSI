@@ -48,8 +48,8 @@ TAU_D = 0.6
 SNR   = 6.0
 RATE  = 1.0
 
-COL_BUG   = '#E7B415'
-COL_FIX   = '#A8323E'
+COL_BUG   = '#DD8452'
+COL_FIX   = '#B69E14'
 COL_NOISE = '#8C8C8C'
 
 REC_RISES_MS = (10.0, 50.0, 150.0)
@@ -74,18 +74,18 @@ SPLIT_ISO     = 1.0
 SPLIT_WIN     = (-0.5, 1.0)
 
 CONS_METHODS = {
-    'OMSI':     ('OMSI',                       '#808080', '-'),
-    'CAIMAN':   ('CaImAn',                     '#E7B415', '-'),
-    'FIX_LAST': ('CaImAn fix, last sample',    '#A8323E', '--'),
-    'FIX_CONS': ('CaImAn fix, OMSI consensus', '#A8323E', '-'),
-    'THR_LAST': ('CaImAn fix + init thr, last sample',    '#2BB5B0', '--'),
-    'THR_CONS': ('CaImAn fix + init thr, OMSI consensus', '#2BB5B0', '-'),
+    'OMSI':     ('OMSI',                       '#4C72B0', '-o'),
+    'CAIMAN':   ('RJ-MCMC',                     "#DD8452", '-o'),
+    'FIX_LAST': ('RJ-MCMC $\tau$ adj.',    "#A23E37", 'o--'),
+    'FIX_CONS': ('RJ-MCMC $\tau$ adj.', '#A23E37', '-o'),
+    'THR_LAST': ('RJ-MCMC $\tau$ + init. adj.',    "#B69E14", 'o--'),
+    'THR_CONS': ('RJ-MCMC $\tau$ + init. adj.', '#B69E14', '-o'),
 }
 CONS_PLOT = {
-    'OMSI':     ('OMSI',                  '#808080', '-'),
-    'CAIMAN':   ('CaImAn',                '#E7B415', '-'),
-    'FIX_LAST': ('CaImAn fix',            '#A8323E', '-'),
-    'THR_LAST': ('CaImAn fix + init thr', '#2BB5B0', '-'),
+    'OMSI':     ('OMSI',                  '#4C72B0', '-o'),
+    'CAIMAN':   ('RJ-MCMC',                '#DD8452', '-o'),
+    'FIX_LAST': ('RJ-MCMC fix',            '#A23E37', '-o'),
+    'THR_LAST': ('RJ-MCMC $\tau$ + init. adj.', '#B69E14', '-o'),
 }
 CNT_VARIANTS = {
     'CAIMAN':   {'fix': False},
@@ -321,7 +321,6 @@ def _write_wrapper(path, input_mat, output_mat, caiman_root, cvx_root, diag_dir,
                    shim_dir):
 
     def _posix(p):
-        """Normalise a path for a MATLAB string literal."""
         return p.replace('\\', '/').replace("'", "''")
 
     code = _WRAPPER_TEMPLATE
@@ -860,7 +859,7 @@ def plot_consensus_figure(data_dir=_DEFAULT_DATA_DIR):
                 n0 = cnt['{}_n_init'.format(key)][k] if '{}_n_init'.format(key) in cnt.files \
                     else np.nan
                 n = np.r_[n0, n]
-                ax.plot(np.arange(len(n)), n, ls, color=color, lw=0.8)
+                ax.plot(np.arange(len(n)), n, '-', color=color, lw=0.8)
                 top_n = max(top_n, np.nanmax(n[:CNT_XMAX]))
             ax.axhline(n_true[k], color='k', ls='--', lw=0.6, alpha=0.6)
             ax.axvline(float(cnt['burn']), color='0.5', ls=':', lw=0.7,
@@ -884,7 +883,7 @@ def plot_consensus_figure(data_dir=_DEFAULT_DATA_DIR):
     handles = []
     for key, (label, color, ls) in present:
         dens, _ = np.histogram(d['{}_err_s'.format(key)] * 1e3, bins=bins, density=True)
-        h, = ax_a.plot(centers, dens, ls, color=color, lw=1.0, label=label)
+        h, = ax_a.plot(centers, dens, '-', color=color, lw=1.0, label=label)
         handles.append(h)
     ax_a.axvspan(-500.0 / fs, 500.0 / fs, color='0.5', alpha=0.10, linewidth=0)
     ax_a.axvline(0, color='k', ls='--', lw=0.7, alpha=0.6)
@@ -899,8 +898,8 @@ def plot_consensus_figure(data_dir=_DEFAULT_DATA_DIR):
         mad = tc._mad(fb, axis=1)
         ax_b.fill_between(tol_ms, np.clip(med - mad, 0, 1), np.clip(med + mad, 0, 1),
                           color=color, alpha=0.15, linewidth=0)
-        ax_b.plot(tol_ms, med, ls, color=color, lw=1.0)
-    ax_b.axvline(1000.0 / fs, color='k', ls='--', lw=0.7, alpha=0.6,
+        ax_b.plot(tol_ms, med, ls, color=color, lw=1.0, ms=3)
+    ax_b.axvline(1000.0 / fs, color='k', ls='--', lw=0.7, ms=3, alpha=0.6,
                  label='1 frame ({:.0f} ms)'.format(1000.0 / fs))
     ax_b.legend(frameon=False, loc='lower right', fontsize=6)
     ax_b.set_xlim(0, tol_ms.max())
@@ -979,12 +978,10 @@ def _run_ablation(data_dir, n_workers, timing_dir=_TIMING_DIR):
         sam = get_init_sample(np.asarray(noisy[c], dtype=np.float64), {'f': tc.FS, 'p': 2})
         inits[c] = {k: sam[k] for k in ('spiketimes_', 'A_', 'b_', 'C_in', 'sg', 'lam_', 'g')}
 
-    # Reuse saved chains for the same cells; run only conditions not saved yet.
     path = os.path.join(data_dir, _ABL_NPZ)
     prev = _load(path)
     done = {}
     if prev is not None and np.array_equal(prev[0]['cells'], cells):
-        # Failed chains (None) are rerun.
         done = {(int(c), str(k)): r for r, c, k in
                 zip(prev[1], prev[0]['cell'], prev[0]['cond']) if r is not None}
         print('Reusing {} saved chains.'.format(len(done)))
