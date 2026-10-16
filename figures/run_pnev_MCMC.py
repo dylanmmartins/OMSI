@@ -28,13 +28,10 @@ import scipy.io
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Environment variables that override discovery, checked before anything else.
 _MATLAB_ENV = 'MATLAB_EXECUTABLE'
 _CVX_ENV    = 'CVX_HOME'
 _CAIMAN_ENV = 'CAIMAN_MATLAB_HOME'
 
-# MATLAB wrapper. Placeholders are substituted by plain string replacement so
-# the MATLAB brace syntax does not have to be escaped.
 _WRAPPER_TEMPLATE = """
 try
     cd('__WORK_DIR__');
@@ -76,7 +73,7 @@ try
     end
 
     % cvx_setup is slow and only needed once per session, so run it only when
-    % cvx is present but not yet initialised.
+    % cvx is present but not yet initialized.
     if exist('cvx_setup', 'file') == 2 && isempty(which('cvx_begin'))
         try
             cvx_setup;
@@ -162,9 +159,9 @@ try
     end
 
     if save_samples
-        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'all_ss', 'all_init');
+        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'all_ss', 'all_init', 'cell_times');
     else
-        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces');
+        save('__OUTPUT_MAT__', 'all_spikes', 'all_probs', 'model_traces', 'cell_times');
     end
     exit(0);
 
@@ -176,18 +173,6 @@ end
 
 
 def _release_sort_key(path):
-    """ Sort key that orders MATLAB install paths newest release first.
-
-    Parameters
-    ----------
-    path : str
-        Path containing a release tag such as R2025b.
-
-    Returns
-    -------
-    tuple
-        (year, update letter) descending-friendly key, (0, '') when unparsed.
-    """
 
     match = re.search(r'R(\d{4})([ab])', path)
     if not match:
@@ -196,21 +181,6 @@ def _release_sort_key(path):
 
 
 def find_matlab(explicit=None):
-    """ Locate a MATLAB executable, newest release first.
-
-    Order: explicit argument, MATLAB_EXECUTABLE, PATH, then the standard
-    install directory for the current OS.
-
-    Parameters
-    ----------
-    explicit : str, optional
-        Path supplied by the caller. Returned as-is when it exists.
-
-    Returns
-    -------
-    str or None
-        Path to a MATLAB executable, or None when none was found.
-    """
 
     if explicit and os.path.exists(explicit):
         return explicit
@@ -250,22 +220,6 @@ def find_matlab(explicit=None):
 
 
 def find_toolbox(env_var, folder_name, extra_candidates=()):
-    """ Locate a MATLAB toolbox directory from env var or common install paths.
-
-    Parameters
-    ----------
-    env_var : str
-        Environment variable checked first.
-    folder_name : str
-        Directory name to look for, e.g. 'cvx'.
-    extra_candidates : iterable of str, optional
-        Additional absolute paths to check before the generic ones.
-
-    Returns
-    -------
-    str
-        Absolute path to the toolbox, or empty string when not found.
-    """
 
     from_env = os.environ.get(env_var, '').strip()
     if from_env and os.path.isdir(from_env):
@@ -273,8 +227,6 @@ def find_toolbox(env_var, folder_name, extra_candidates=()):
 
     home = os.path.expanduser('~')
 
-    # Parent folders people actually keep toolboxes in. OneDrive-redirected
-    # Documents and the Desktop are both common on Windows.
     parents = [
         os.path.join(home, 'Documents', 'MATLAB'),
         os.path.join(home, 'Documents'),
@@ -303,30 +255,9 @@ def find_toolbox(env_var, folder_name, extra_candidates=()):
 
 
 def _matlab_invocations(script_stem, exe=None):
-    """ Argument lists to try, modern batch mode first.
-
-    -batch arrived in R2019a. Older releases need -r with an explicit exit,
-    and Windows needs -wait so the call blocks. When the release is readable
-    from the executable path and is R2019a or later, only -batch is offered:
-    a non-zero exit then means the MATLAB script itself failed, and retrying
-    with -r would just open a second session that hangs.
-
-    Parameters
-    ----------
-    script_stem : str
-        Wrapper script name without the .m extension.
-    exe : str, optional
-        MATLAB executable path, used to read the release tag.
-
-    Returns
-    -------
-    list of list of str
-        Argument lists to append to the executable, in order of preference.
-    """
 
     batch = ['-batch', script_stem]
 
-    # Known release of R2019a or later: -batch is supported, so never retry.
     match = re.search(r'R(\d{4})([ab])', exe or '')
     if match and (int(match.group(1)), match.group(2)) >= (2019, 'a'):
         return [batch]
@@ -468,23 +399,6 @@ end
 
 
 def _write_shims(shim_dir):
-    """ Write base-MATLAB stand-ins for the Statistics Toolbox functions used.
-
-    cont_ca_sampler needs range, prctile, gamrnd, and normrnd, all of which
-    ship with the Statistics and Machine Learning Toolbox. The wrapper adds
-    this directory to the end of the path, so a real toolbox installation
-    still wins and these are used only when it is missing or unlicensed.
-
-    Parameters
-    ----------
-    shim_dir : str
-        Directory to write the .m files into. Created if absent.
-
-    Returns
-    -------
-    str
-        The directory written to.
-    """
 
     os.makedirs(shim_dir, exist_ok=True)
     for name, body in _SHIMS.items():
@@ -496,33 +410,8 @@ def _write_shims(shim_dir):
 
 def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
                    shim_dir, fix_root=''):
-    """ Fill the MATLAB wrapper template and write it next to the input file.
-
-    Forward slashes are used throughout: MATLAB accepts them on Windows too,
-    and they avoid escape trouble inside single-quoted MATLAB strings.
-
-    Parameters
-    ----------
-    path : str
-        Destination .m file.
-    work_dir : str
-        Directory MATLAB changes into before running.
-    input_mat : str
-        Input .mat filename.
-    output_mat : str
-        Output .mat filename.
-    cvx_root : str
-        cvx directory, or empty string.
-    caiman_root : str
-        CaImAn-MATLAB directory, or empty string.
-    shim_dir : str
-        Directory holding the Statistics Toolbox stand-ins.
-    fix_root : str, optional
-        Directory holding the rise-time-fixed cont_ca_sampler, or empty string.
-    """
 
     def _posix(p):
-        """Normalise a path for embedding in a MATLAB string literal."""
         return p.replace('\\', '/').replace("'", "''")
 
     code = _WRAPPER_TEMPLATE
@@ -538,30 +427,11 @@ def _write_wrapper(path, work_dir, input_mat, output_mat, cvx_root, caiman_root,
         fh.write(code)
 
 
-# Rise-time Metropolis step in cont_ca_sampler scores the proposal with the current
-# calcium shape Gs instead of the proposed Gs_, so every rise-time proposal is
-# accepted. The decay step a few lines later uses Gs_ correctly.
 _RISE_BUG_LINE = 'logC_ = -norm(E*(Y(:)-A_*Gs-b_-C_in*ge))^2;'
 _RISE_FIX_LINE = 'logC_ = -norm(E*(Y(:)-A_*Gs_-b_-C_in*ge))^2;'
 
 
 def _write_rise_fix(caiman_root, out_dir):
-    """ Write a copy of the installed cont_ca_sampler.m with the rise-time fix.
-
-    The installed CaImAn is only read, never modified; the copy goes to out_dir.
-
-    Parameters
-    ----------
-    caiman_root : str
-        CaImAn-MATLAB directory.
-    out_dir : str
-        Directory for the patched copy. Created if absent.
-
-    Returns
-    -------
-    str
-        out_dir.
-    """
 
     hits = glob.glob(os.path.join(caiman_root, '**', 'cont_ca_sampler.m'), recursive=True)
     if len(hits) != 1:
@@ -630,8 +500,8 @@ def _init_cells(inits, n_cells):
 def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
                         sparsity_scale=0.001, work_dir=None, matlab_exe=None,
                         verbose=True, return_samples=False, inits=None, burn_in=None,
-                        init_shifts=None, fix_rise_bug=False, init_thr=None):
-
+                        init_shifts=None, fix_rise_bug=False, init_thr=None,
+                        return_cell_times=False):
 
     if dff.ndim == 1:
         dff = dff[np.newaxis, :]
@@ -648,15 +518,14 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     wrapper_script = os.path.join(work_dir, script_stem + '.m')
 
     def _empty():
-        """Null result in the shape callers expect, used on any failure."""
         out = ([np.array([]) for _ in range(n_cells)],
                np.zeros_like(dff), np.zeros_like(dff), np.zeros(n_cells))
         if not return_samples:
-            return out
+            return out + (np.full(n_cells, np.nan),) if return_cell_times else out
         out = out + ([[] for _ in range(n_cells)],)
         if init_shifts is not None and inits is None:
             out = out + ([np.array([]) for _ in range(n_cells)],)
-        return out + (np.full(n_cells, np.nan),) if return_cell_times else out
+        return out
 
     exe = find_matlab(matlab_exe)
     if exe is None:
@@ -692,8 +561,6 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         'inits': _init_cells(inits, n_cells),
     })
 
-    # Shims live outside work_dir so the wrapper's genpath(pwd) cannot pull
-    # them in ahead of a real Statistics Toolbox.
     shim_dir = _write_shims(os.path.join(tempfile.gettempdir(),
                                          'omsi_matlab_shims'))
 
@@ -714,8 +581,6 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     _write_wrapper(wrapper_script, work_dir, input_mat, output_mat,
                    cvx_root, caiman_root, shim_dir, fix_root)
 
-    # Stale output from an earlier run would otherwise be read back as if it
-    # were this run's result.
     if os.path.exists(output_mat):
         os.remove(output_mat)
 
@@ -766,10 +631,6 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
         spks = all_spikes_raw[i][0]
         if spks.size > 0:
 
-            # cont_ca_sampler reports times in 1-based frame units: a spike at
-            # continuous time t first shows in sample ceil(t), and sample k is
-            # frame k-1 in Python. Shift by one frame so times match the
-            # 0-based frame clock used for ground truth.
             times = np.clip(spks.flatten() - 1.0, 0.0, None) / fs
             final_spikes.append(times)
         else:
@@ -778,9 +639,12 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     sweeps_per_cell = np.full(n_cells, n_sweeps_val, dtype=np.int32)
 
     if not return_samples:
+        if return_cell_times:
+            cell_times = (np.asarray(res['cell_times'], dtype=float).ravel()
+                          if 'cell_times' in res else np.full(n_cells, np.nan))
+            return final_spikes, model_traces, all_probs, sweeps_per_cell, cell_times
         return final_spikes, model_traces, all_probs, sweeps_per_cell
 
-    # Same 1-based to 0-based frame shift as the called spikes.
     samples = []
     for i in range(n_cells):
         cell_ss = np.atleast_1d(res['all_ss'][i][0]).ravel() \
@@ -793,8 +657,3 @@ def run_matlab_pnevMCMC(dff, fs=30.0, tau=0.5, n_sweeps=1000, true_spikes=None,
     init_spikes = [np.asarray(res['all_init'][i][0], dtype=np.float64).ravel() - 1.0
                    for i in range(n_cells)]
     return final_spikes, model_traces, all_probs, sweeps_per_cell, samples, init_spikes
-    if return_cell_times:
-        cell_times = (np.asarray(res['cell_times'], dtype=float).ravel()
-                      if 'cell_times' in res else np.full(n_cells, np.nan))
-        return final_spikes, model_traces, all_probs, sweeps_per_cell, cell_times
-    return final_spikes, model_traces, all_probs, sweeps_per_cell

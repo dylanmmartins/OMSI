@@ -4,38 +4,6 @@ figures/figureS2.py
 
 Generates supplemental figure S2: per-sensor CosMIC distributions and example spike-raster cells.
 
-Functions
----------
-_dff_kurtosis
-    Excess kurtosis on a dF/F trace.
-_snr_from_fluo
-    Signal-to-noise ratio from a fluorescence trace.
-_patch_records_kurtosis
-    Replace stored kurtosis scalars with dF/F kurtosis from trace files.
-_get_sensor
-    Infer sensor label from a dataset folder name.
-_load_records
-    Load scalar records from an NPZ file into a list of dicts.
-_traces_dir
-    Return path to the traces directory for a given method.
-_load_all_records
-    Load benchmark records for all methods from data_dir.
-_best_window
-    Find the window that best balances spike count and detection recall.
-_select_sensor_cells
-    Select three representative cells for a given sensor.
-_plot_single_raster
-    Draw a spike raster and dF/F trace for one cell.
-_plot_cosmic_violins
-    Draw per-method CosMIC violin plots for one sensor.
-_plot_kurtosis_hist
-    Draw a kurtosis histogram for one sensor.
-plot_figure
-    Assemble and save figure S2.
-main
-    Parse command-line arguments and call plot_figure.
-
-
 DMM, March 2026
 """
 
@@ -57,7 +25,6 @@ mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
 def _dff_kurtosis(fluo):
-    """Excess kurtosis computed on a dF/F-normalized trace (8th-pct baseline)."""
 
     f = np.asarray(fluo, dtype=np.float64)
     b = float(np.percentile(f, 8))
@@ -72,7 +39,6 @@ def _dff_kurtosis(fluo):
 
 
 def _snr_from_fluo(fluo):
-    """Signal-to-noise ratio from a fluorescence trace (99th-8th pct / scaled MAD)."""
 
     f  = np.asarray(fluo, dtype=np.float64)
     fv = f[np.isfinite(f)]
@@ -83,7 +49,6 @@ def _snr_from_fluo(fluo):
 
 
 def _patch_records_kurtosis(all_records, data_dir):
-    """Replace stored kurtosis scalars with dF/F kurtosis from trace files."""
 
     for method_key, recs in all_records.items():
         traces_dir = os.path.join(data_dir, f'ground_truth_traces_{method_key}')
@@ -118,10 +83,11 @@ _METHODS = {
     'omsi':       {'label': 'OMSI',   'color': '#4C72B0'},
     'matlab':      {'label': 'CaImAn',  'color': '#DD8452'},
     'oasis':       {'label': 'OASIS',   'color': '#55A868'},
-    'cascade_loo': {'label': 'CASCADE', 'color': '#8172B3'},
+    'cascade':     {'label': 'CASCADE', 'color': '#8172B3'},
 }
-_METHOD_ORDER  = ['omsi', 'matlab', 'oasis', 'cascade_loo']
-_TRACE_METHODS = ['omsi', 'matlab', 'oasis', 'cascade_loo']
+_METHOD_ORDER  = ['omsi', 'matlab', 'oasis', 'cascade']
+EXAMPLE_SNR_PCT = 50
+_TRACE_METHODS = ['omsi', 'matlab', 'oasis', 'cascade']
 
 SENSORS = ['GCaMP8m']
 
@@ -131,7 +97,6 @@ N_SENSORS       = len(SENSORS)
 
 
 def _get_sensor(ds_folder):
-    """Infer sensor label from a dataset folder name."""
 
     s = ds_folder.lower()
     for keyword, label in [
@@ -147,7 +112,6 @@ def _get_sensor(ds_folder):
 
 
 def _load_records(path):
-    """Load scalar records from an NPZ file, returning a list of dicts."""
 
     d    = np.load(path, allow_pickle=True)
     keys = list(d.files)
@@ -169,13 +133,11 @@ def _load_records(path):
 
 
 def _traces_dir(data_dir, method_key):
-    """Return path to the ground-truth traces directory for a given method."""
 
     return os.path.join(data_dir, f'ground_truth_traces_{method_key}')
 
 
 def _load_all_records(data_dir):
-    """Load benchmark records for every method found under data_dir."""
 
     all_records = {}
     for method_key in _METHOD_ORDER:
@@ -192,28 +154,6 @@ def _load_all_records(data_dir):
 
 def _best_window(raw, fs, true_spk, pred_spks_list,
                  window=30.0, target_spikes=10):
-    """Find the window that best balances spike count and detection recall.
-
-    Parameters
-    ----------
-    raw : array-like
-        Raw fluorescence trace.
-    fs : float
-        Frame rate in Hz.
-    true_spk : ndarray
-        Ground-truth spike times in seconds.
-    pred_spks_list : list of ndarray
-        Predicted spike times from each method.
-    window : float, optional
-        Window length in seconds (default 30).
-    target_spikes : int, optional
-        Ideal spike count in the window (default 10).
-
-    Returns
-    -------
-    float
-        Start time in seconds of the best window.
-    """
 
     block        = max(1, int(window * fs))
     n            = len(raw)
@@ -240,31 +180,30 @@ def _best_window(raw, fs, true_spk, pred_spks_list,
 
 
 def _select_sensor_cells(data_dir, all_records, sensor):
-    """Select three cells spanning the CosMIC percentile range for a sensor.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing trace NPZ files.
-    all_records : dict
-        Benchmark records keyed by method name.
-    sensor : str
-        Sensor label to filter on.
-
-    Returns
-    -------
-    list of dict
-        Cell data dicts containing dF/F, spike times, and metadata.
-    """
 
     omsi_recs = [r for r in all_records.get('omsi', [])
                   if _get_sensor(r['dataset']) == sensor]
     if not omsi_recs:
         return []
 
+    snrs = []
+    for r in omsi_recs:
+        ds_recs = [x for x in all_records['omsi'] if x['dataset'] == r['dataset']]
+        tp = os.path.join(_traces_dir(data_dir, 'omsi'), f"{r['dataset']}_traces.npz")
+        try:
+            with np.load(tp, allow_pickle=False) as npz:
+                snrs.append(_snr_from_fluo(npz[f'dff_{ds_recs.index(r)}']))
+        except Exception:
+            snrs.append(np.nan)
+    snrs = np.asarray(snrs)
+    snr_cut = np.nanpercentile(snrs, EXAMPLE_SNR_PCT)
+    omsi_recs = [r for r, s in zip(omsi_recs, snrs) if np.isfinite(s) and s <= snr_cut]
+    print('  {}: examples drawn from {} cells with SNR <= {:.1f} ({}th percentile).'.format(
+        sensor, len(omsi_recs), snr_cut, EXAMPLE_SNR_PCT))
+
     omsi_sorted = sorted(omsi_recs, key=lambda r: float(r.get('cosmic', 0.0)))
     n            = len(omsi_sorted)
-    target_pcts  = [0.60, 0.40, 0.20]
+    target_pcts  = [0.60, 0.40, 1.00]
     selected     = []
 
     for pct in target_pcts:
@@ -338,23 +277,6 @@ def _select_sensor_cells(data_dir, all_records, sensor):
 def _plot_single_raster(ax, cell, window=30.0,
                         show_xlabels=True, show_method_labels=True,
                         cell_number=None):
-    """Draw a spike raster and dF/F trace for one cell.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    cell : dict
-        Cell data dict returned by _select_sensor_cells.
-    window : float, optional
-        Display window length in seconds (default 30).
-    show_xlabels : bool, optional
-        Whether to draw x-axis tick labels.
-    show_method_labels : bool, optional
-        Whether to draw row method labels.
-    cell_number : int or None, optional
-        Cell index label drawn in the center.
-    """
 
     rr  = 0.85
     th  = 2.0
@@ -363,7 +285,7 @@ def _plot_single_raster(ax, cell, window=30.0,
 
 
     row_specs = []
-    for mk in ['cascade_loo', 'oasis', 'matlab', 'omsi']:
+    for mk in ['cascade', 'oasis', 'matlab', 'omsi']:
         if mk in cell['pred_spikes']:
             row_specs.append((_METHODS[mk]['label'], mk, _METHODS[mk]['color']))
     row_specs.append(('Ground Truth', None, '#111111'))
@@ -426,19 +348,6 @@ def _plot_single_raster(ax, cell, window=30.0,
 
 
 def _plot_cosmic_violins(ax, all_records, sensor, selected_cells):
-    """Draw per-method CosMIC violin plots for one sensor.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    all_records : dict
-        Benchmark records keyed by method name.
-    sensor : str
-        Sensor label to filter on.
-    selected_cells : list of dict
-        Selected cells to mark with a star on the violins.
-    """
 
     method_positions  = {}
     x_pos             = 0
@@ -489,19 +398,6 @@ def _plot_cosmic_violins(ax, all_records, sensor, selected_cells):
 
 
 def _plot_kurtosis_hist(ax, all_records, sensor, selected_cells):
-    """Draw a kurtosis histogram for one sensor.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    all_records : dict
-        Benchmark records keyed by method name.
-    sensor : str
-        Sensor label to filter on.
-    selected_cells : list of dict
-        Selected cells to mark with vertical lines.
-    """
 
     recs  = [r for r in all_records.get('omsi', [])
              if _get_sensor(r['dataset']) == sensor]
@@ -525,15 +421,6 @@ def _plot_kurtosis_hist(ax, all_records, sensor, selected_cells):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR, out_dir=_DEFAULT_OUT_DIR):
-    """Load benchmark data and save figure S2.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing ground-truth result NPZ files.
-    out_dir : str, optional
-        Directory to write the output figure.
-    """
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -604,7 +491,7 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR, out_dir=_DEFAULT_OUT_DIR):
     legend_handles = [
         plt.Line2D([0], [0], color=_METHODS[m]['color'], marker='.', linestyle='-',
                    label=_METHODS[m]['label'])
-        for m in ['omsi', 'matlab', 'oasis', 'cascade_loo']
+        for m in ['omsi', 'matlab', 'oasis', 'cascade']
     ]
     fig.legend(handles=legend_handles, loc='upper center', ncol=4,
                bbox_to_anchor=(0.5, 1.02), frameon=False, fontsize=7)

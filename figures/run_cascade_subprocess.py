@@ -4,26 +4,6 @@ figures/run_cascade_subprocess.py
 
 CASCADE subprocess helper -- runs spike inference inside the cascade conda environment.
 
-Functions
----------
-_patched_il_init
-    Keras InputLayer patch for batch_shape compatibility.
-_check_ruamel
-    Fail with an actionable message when ruamel.yaml is missing.
-_probs_to_spikes
-    Convert CASCADE probability trace to spike times.
-_predict_block
-    Run cascade.predict on equal-length traces, optionally in chunks.
-mode_inference
-    Run CASCADE forward inference and save outputs to NPZ.
-mode_loo_predict
-    Run leave-one-out CASCADE prediction across all held-out cells.
-mode_loo_train
-    Train one leave-one-out CASCADE model from a list of ground-truth datasets.
-main
-    Parse CLI arguments and dispatch to inference, loo-train, or loo-predict mode.
-
-
 DMM, March 2026
 """
 
@@ -64,7 +44,6 @@ try:
     _orig_il_init = _kil.InputLayer.__init__
 
     def _patched_il_init(self, *args, **kwargs):
-        """ Remap batch_shape to batch_input_shape for older Keras compatibility. """
         if 'batch_shape' in kwargs and 'batch_input_shape' not in kwargs:
             kwargs['batch_input_shape'] = kwargs.pop('batch_shape')
         _orig_il_init(self, *args, **kwargs)
@@ -83,29 +62,10 @@ except Exception as _e:
     pass
 
 
-# CASCADE_SPIKE_DETECTION controls how probability traces are converted to spike times.
-# 'peaks'     : find local maxima above height with min inter-peak distance of 50 ms.
-# 'threshold' : return every frame whose probability exceeds height.
 CASCADE_SPIKE_DETECTION = 'peaks'
 
 
 def _probs_to_spikes(probs, fs, height=0.5):
-    """ Convert CASCADE probability trace to spike times in seconds.
-
-    Parameters
-    ----------
-    probs : np.ndarray
-        Per-frame spike probability, shape (n_frames,).
-    fs : float
-        Sampling rate in Hz.
-    height : float, optional
-        Detection threshold (probability units).
-
-    Returns
-    -------
-    spike_times : np.ndarray
-        Spike times in seconds.
-    """
     if CASCADE_SPIKE_DETECTION == 'threshold':
         return np.where(probs > height)[0] / fs
 
@@ -114,10 +74,32 @@ def _probs_to_spikes(probs, fs, height=0.5):
     return peaks / fs
 
 
+PRETRAINED_MODEL = 'Global_EXC_30Hz_smoothing50ms_causalkernel'
+PRETRAINED_FS    = 30.0
+
+
+def _resample_trace(y, fs_from, fs_to, n_out=None):
+    y = np.asarray(y, dtype=np.float64)
+    if n_out is None:
+        n_out = max(1, int(np.floor(len(y) * fs_to / fs_from)))
+    if fs_from > fs_to:
+        idx = np.minimum(np.rint(np.arange(len(y)) * fs_to / fs_from).astype(int), n_out - 1)
+        sums = np.bincount(idx, weights=y, minlength=n_out)
+        counts = np.bincount(idx, minlength=n_out)
+        out = sums / np.maximum(counts, 1)
+        empty = counts == 0
+        if empty.any():
+            out[empty] = np.interp(np.where(empty)[0], np.where(~empty)[0], out[~empty])
+        return out
+    if np.isclose(fs_from, fs_to) and len(y) == n_out:
+        return y
+    return np.interp(np.arange(n_out) / fs_to, np.arange(len(y)) / fs_from, y)
+
+
 def _check_ruamel():
 
     try:
-        import ruamel.yaml  # noqa: F401
+        import ruamel.yaml
         return
     except ImportError:
         pass
@@ -132,28 +114,6 @@ def _check_ruamel():
 
 
 def _predict_block(cascade, model_name, dff, model_folder, max_per_call=None):
-    """ Run cascade.predict on equal-length traces, optionally in chunks.
-
-    Parameters
-    ----------
-    cascade : module
-        The cascade2p.cascade module.
-    model_name : str
-        CASCADE model name.
-    dff : np.ndarray
-        Traces of equal length, shape (n_cells, n_frames).
-    model_folder : str
-        Folder holding the model.
-    max_per_call : int or None, optional
-        Split into calls of at most this many cells.
-
-    Returns
-    -------
-    probs : np.ndarray
-        Spike probabilities, shape (n_cells, n_frames).
-    elapsed : float
-        Time spent in cascade.predict, in seconds.
-    """
     n_cells = dff.shape[0]
     if max_per_call and n_cells > max_per_call:
         n_chunks = int(np.ceil(n_cells / max_per_call))
@@ -177,40 +137,52 @@ def _predict_block(cascade, model_name, dff, model_folder, max_per_call=None):
 
 
 def mode_inference(args):
-    """ Run CASCADE forward inference on dF/F traces and save results.
-
-    The input NPZ holds either 'dff', a 2-D array of equal-length traces, or
-    'dff_list', an object array of 1-D traces of any lengths. With 'dff_list'
-    the traces are predicted in groups of equal length, so every trace is used
-    in full, and 'cascade_probs' is saved as an object array in input order.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        Parsed CLI arguments with fields: input, output, model, and
-        optionally max_cells_per_call and model_folder.
-    """
     _check_ruamel()
     import cascade2p.cascade as cascade
 
     with np.load(args.input, allow_pickle=True) as data:
+        data_files = list(data.files)
         fs = float(data['fs'])
-        ragged = 'dff_list' in data.files
-        if ragged:
+        per_key = 'n_traces' in data.files
+        ragged = per_key or 'dff_list' in data.files
+        if per_key:
+            traces = [np.asarray(data['dff_{}'.format(i)], dtype=np.float32)
+                      for i in range(int(data['n_traces']))]
+        elif ragged:
             traces = [np.asarray(t, dtype=np.float32) for t in data['dff_list']]
         else:
             dff = data['dff'].astype(np.float32)
             traces = list(dff)
     n_cells = len(traces)
 
-    model_name = getattr(args, 'model', None) or 'Global_EXC_30Hz_smoothing50ms_causalkernel'
-    print('[cascade-subprocess] inference  n_cells={}  fs={:.1f}  model={}'.format(
-        n_cells, fs, model_name))
+    loo = getattr(args, 'model_folder', None) is not None
+    if loo:
+        model_name, fs_model = args.model, fs
+    else:
+        if getattr(args, 'model', None) not in (None, PRETRAINED_MODEL):
+            print('[cascade-subprocess] Ignoring --model {}; always using {}.'.format(
+                args.model, PRETRAINED_MODEL))
+        model_name, fs_model = PRETRAINED_MODEL, PRETRAINED_FS
+    native_len = [len(t) for t in traces]
+    resample = not np.isclose(fs, fs_model) and not getattr(args, 'native_rate', False)
+    if not resample:
+        fs_model = fs
+    if resample:
+        traces = [_resample_trace(t, fs, fs_model).astype(np.float32) for t in traces]
+        dff = None
+        ragged = True
+    print('[cascade-subprocess] inference  n_cells={}  fs={:.2f}{}  model={}'.format(
+        n_cells, fs, ' -> {:g} Hz'.format(fs_model) if resample else '', model_name))
 
     model_folder = (getattr(args, 'model_folder', None) or
                     os.path.join(os.path.dirname(os.path.dirname(cascade.__file__)),
                                  "Pretrained_models"))
     max_per_call = getattr(args, 'max_cells_per_call', None)
+
+    if (getattr(args, 'model_folder', None) is None
+            and not os.path.isdir(os.path.join(model_folder, model_name))):
+        print('[cascade-subprocess] Model {} not found locally; downloading...'.format(model_name))
+        cascade.download_model(model_name, model_folder=model_folder, verbose=1)
 
     if ragged:
         groups = {}
@@ -234,7 +206,14 @@ def mode_inference(args):
 
     spikes = []
     for i in range(n_cells):
-        spikes.append(_probs_to_spikes(np.nan_to_num(probs[i], nan=0.0), fs))
+        spikes.append(_probs_to_spikes(np.nan_to_num(probs[i], nan=0.0), fs_model))
+    if resample:
+        probs = [_resample_trace(np.nan_to_num(p, nan=0.0), fs_model, fs,
+                                 n_out=native_len[i]).astype(np.float32)
+                 for i, p in enumerate(probs)]
+        if not per_key and 'dff_list' not in data_files:
+            probs = np.stack(probs)
+            ragged = False
 
     if ragged:
         probs_out = np.empty(n_cells, dtype=object)
@@ -245,24 +224,25 @@ def mode_inference(args):
     spikes_out = np.empty(n_cells, dtype=object)
     for i, sp in enumerate(spikes):
         spikes_out[i] = sp
-    np.savez(
-        args.output,
-        cascade_probs=probs_out,
-        cascade_spikes=spikes_out,
-        cascade_time=np.float64(elapsed),
-        fs=np.float32(fs),
-    )
+    if per_key:
+        out = {'n_traces': np.int64(n_cells), 'cascade_time': np.float64(elapsed),
+               'fs': np.float32(fs)}
+        for i in range(n_cells):
+            out['probs_{}'.format(i)] = np.asarray(probs[i], dtype=np.float32)
+            out['spikes_{}'.format(i)] = np.asarray(spikes[i], dtype=np.float64)
+        np.savez(args.output, **out)
+    else:
+        np.savez(
+            args.output,
+            cascade_probs=probs_out,
+            cascade_spikes=spikes_out,
+            cascade_time=np.float64(elapsed),
+            fs=np.float32(fs),
+        )
     print('[cascade-subprocess] Saved to {}.'.format(args.output))
 
 
 def mode_loo_predict(args):
-    """ Run leave-one-out CASCADE prediction for all held-out cells.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        Parsed CLI arguments with fields: raster_cells, loo_models_dir, output.
-    """
     _check_ruamel()
     import cascade2p.cascade as cascade
 
@@ -306,26 +286,10 @@ def mode_loo_predict(args):
     print('[cascade-subprocess] Saved to {}.'.format(args.output))
 
 
-# Marker written after cascade.train_model returns. CASCADE itself never marks a
-# model finished (it leaves training_finished at 'Running'), and predict() uses
-# whatever .h5 files exist, so a crashed run would otherwise be used silently.
 LOO_DONE_MARKER = 'LOO_TRAINING_COMPLETE'
 
 
 def mode_loo_train(args):
-    """ Train one leave-one-out CASCADE model from a list of ground-truth datasets.
-
-    Skips training if the model folder already holds LOO_DONE_MARKER. A model
-    folder without it (an interrupted run) is deleted and trained again.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        Parsed CLI arguments with fields: model_name, loo_models_dir,
-        ground_truth_dir, training_datasets (comma separated), sampling_rate,
-        smoothing, causal_kernel, noise_levels (comma separated), nr_of_epochs,
-        ensemble_size, batch_size, dense_expansion.
-    """
     import shutil
     _check_ruamel()
     import cascade2p.cascade as cascade
@@ -382,6 +346,9 @@ def main():
                              'Pretrained_models)')
     parser.add_argument('--device', default='gpu', choices=['cpu', 'gpu'],
                         help='Hardware device for inference: cpu or gpu (default: gpu)')
+    parser.add_argument('--native-rate', dest='native_rate', action='store_true',
+                        help='Inference mode: feed traces to the 30 Hz model at their own '
+                             'frame rate instead of resampling them to 30 Hz')
     parser.add_argument('--max-cells-per-call', dest='max_cells_per_call',
                         type=int, default=None,
                         help='Inference mode, optional: split into multiple cascade.predict() '

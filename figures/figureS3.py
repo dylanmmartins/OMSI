@@ -2,25 +2,7 @@
 """
 figures/figureS3.py
 
-Generates supplemental figure S3: CASCADE spike-inference performance at 7.5 Hz vs 30 Hz on synthetic data.
-
-Functions
----------
-_run_cascade_inference
-    Run CASCADE spike inference via a subprocess and return spike times.
-_fbeta
-    Compute vectorised F-beta score from arrays of precision and recall.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-run_test
-    Generate synthetic data, run CASCADE inference, and save benchmark results.
-plot_figure
-    Load benchmark results and generate figure S3.
-print_stats
-    Print the values plotted in figure S3 without rendering the figure.
-main
-    Parse command-line arguments and dispatch to run_test, plot_figure, or print_stats.
-
+Generates supplemental figure S3: CASCADE spike-inference performance at 7.5 Hz vs 30 Hz on synthetic data.\
 
 DMM, March 2026
 """
@@ -59,41 +41,13 @@ COLOR_30  = 'tab:cyan'
 _CASCADE_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'run_cascade_subprocess.py')
 
-_CASCADE_MODELS = {
-    7.5:  'Global_EXC_7.5Hz_smoothing200ms',
-    30.0: 'Global_EXC_30Hz_smoothing50ms_causalkernel',
-}
-
 _NPZ_NAME = 'cascade_7p5_vs_30hz_data.npz'
 
 
 def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
-    """Run CASCADE spike inference via a subprocess and return spike times.
-
-    Parameters
-    ----------
-    dff : ndarray
-        dF/F trace array, shape (n_cells, n_frames) or (n_frames,).
-    fs : float
-        Frame rate in Hz.
-    data_dir : str
-        Directory for intermediate input/output NPZ files.
-    prefix : str
-        Filename prefix for intermediate files.
-    device : str, optional
-        Compute device ('gpu' or 'cpu', default 'gpu').
-
-    Returns
-    -------
-    list of ndarray
-        Predicted spike times per cell.
-    float
-        Elapsed inference time in seconds.
-    """
 
     input_path  = os.path.join(data_dir, f'{prefix}_input.npz')
     output_path = os.path.join(data_dir, f'{prefix}_output.npz')
-    model_name  = _CASCADE_MODELS.get(fs, 'Global_EXC_30Hz_smoothing50ms_causalkernel')
 
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
@@ -101,7 +55,6 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
          '--mode', 'inference',
          '--input',  input_path,
          '--output', output_path,
-         '--model',  model_name,
          '--device', device],
         check=True,
     )
@@ -110,20 +63,6 @@ def _run_cascade_inference(dff, fs, data_dir, prefix, device='gpu'):
 
 
 def _fbeta(prec, rec):
-    """Compute vectorised F-beta score from arrays of precision and recall.
-
-    Parameters
-    ----------
-    prec : array-like
-        Precision values.
-    rec : array-like
-        Recall values.
-
-    Returns
-    -------
-    ndarray
-        F-beta scores.
-    """
 
     p  = np.asarray(prec, dtype=float)
     r  = np.asarray(rec,  dtype=float)
@@ -134,34 +73,11 @@ def _fbeta(prec, rec):
 
 
 def _mad(x, axis=None):
-    """ Compute the median absolute deviation, ignoring NaNs.
-
-    Parameters
-    ----------
-    x : array-like
-        Input values.
-    axis : int or None, optional
-        Axis along which to compute; None flattens the input.
-
-    Returns
-    -------
-    float or np.ndarray
-        Median of |x - median(x)| along axis.
-    """
     x = np.asarray(x, dtype=float)
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def run_test(data_dir=_DEFAULT_DATA_DIR, run_cascade=True):
-    """Generate synthetic data, run CASCADE inference, and save benchmark results.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory for output NPZ files.
-    run_cascade : bool, optional
-        Whether to run CASCADE inference (default True).
-    """
 
     from simulation_helpers import generate_synthetic_data
 
@@ -213,13 +129,6 @@ def run_test(data_dir=_DEFAULT_DATA_DIR, run_cascade=True):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR):
-    """Load benchmark results and generate figure S3.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the benchmark NPZ file.
-    """
 
     os.makedirs(data_dir, exist_ok=True)
 
@@ -272,13 +181,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR):
-    """Print the values plotted in figure S3 without rendering the figure.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing the benchmark NPZ file.
-    """
 
     npz_path = os.path.join(data_dir, _NPZ_NAME)
     if not os.path.exists(npz_path):

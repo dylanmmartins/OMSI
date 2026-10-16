@@ -4,109 +4,6 @@ figures/figure3.py
 
 Allen Institute data benchmark comparing OMSI, OASIS, CASCADE, and CaImAn MCMC.
 
-To run inference:
-    $ python figure3.py --mode test --data-dir /path/to/results --allen-data-dir /path/to/allen/data
-
-To run only CASCADE (keeps all other results):
-    $ python figure3.py --mode cascade --data-dir /path/to/results
-
-To create figure:
-    $ python figure3.py --mode plot --data-dir /path/to/results
-
-Functions
----------
-_oasis_spikes_from_s
-    Convert OASIS deconvolved signal to spike times using threshold or peak detection.
-_save_records
-    Serialize a list of result dicts to a compressed NPZ file.
-_load_records
-    Load a list of result dicts from a compressed NPZ file.
-_fbeta
-    Compute F-beta score from scalar precision and recall.
-_mad
-    Compute the median absolute deviation, ignoring NaNs.
-normalize_label
-    Strip leading run-label prefix from a dataset name.
-clean_label
-    Reformat raw CASCADE-style labels into a canonical short label.
-get_genotype
-    Extract genotype string from a dataset name.
-get_zoom_for_label
-    Return zoom level string for a dataset label.
-save_aggregated_data
-    Write slow and fast data groups to an HDF5 archive.
-load_aggregated_data
-    Read slow and fast data groups from an HDF5 archive.
-compute_accuracy_window
-    Compute precision, recall, and F1 using a temporal tolerance window.
-_run_cascade_inference
-    Run CASCADE spike inference via subprocess and return probs and spike times.
-_omsi_params
-    OMSI parameter dict used for every Allen dataset group.
-_run_and_save_cascade_group
-    Run CASCADE on one Allen dataset group and save its results.
-_run_and_save_allen_group
-    Run all inference methods on one Allen dataset group and save results.
-_run_and_save_oasis_group
-    Run OASIS on one Allen dataset group and save its results.
-_run_and_save_omsi_group
-    Run OMSI on one Allen dataset group and save results.
-test_figure
-    Run full benchmark across all Allen dataset groups.
-test_omsi
-    Run OMSI-only benchmark across all Allen dataset groups.
-test_cascade
-    Run CASCADE-only benchmark across all Allen dataset groups.
-test_oasis
-    Run OASIS-only benchmark across all Allen dataset groups.
-_load_and_preprocess_raw
-    Preprocess raw Allen H5 files into dF/F arrays and spike times.
-_build_cascade_lookup
-    Build a label-to-filepath lookup for CASCADE trace NPZ files.
-_build_omsi_records_lookup
-    Build a label-to-filepath lookup for newer OMSI records NPZ files.
-_build_omsi_traces_lookup
-    Build a label-to-filepath lookup for newer OMSI traces NPZ files.
-_peaks_from_prob
-    Find spike times from a probability trace via peak detection.
-_best_window
-    Score and select the best 60-second window for trace visualization.
-_load_raster_trace_data
-    Load per-cell trace data for raster and trace visualization panels.
-_plot_combined_raster_trace
-    Draw raster rows and raw trace for multiple example cells on one axes.
-_plot_violin_metric
-    Plot per-model violin distributions of a given metric for each tau.
-_plot_f1_violin
-    Plot per-model F-beta violin distributions split by tau and zoom level.
-_plot_strict_vs_window_f1
-    Plot strict vs window F-beta distributions side by side for each model.
-_plot_fbeta_violin
-    Plot overall F-beta violin per model.
-_plot_cosmic_violin
-    Plot overall CosMIC score violin per model.
-_recompute_all_metrics_from_traces
-    Recompute precision, recall, F-beta, and CosMIC from saved trace NPZ files.
-_metrics_from_spikes
-    Per-cell accuracy metrics for one method, keyed by record field name.
-_load_all_results
-    Load all benchmark records and recompute their metrics from saved traces.
-plot_figure
-    Load all results, recompute metrics, and render the combined figure.
-_paired_by_cell
-    Collect one metric for two models on the cells both were run on.
-_print_signed_rank_tests
-    Print Wilcoxon signed-rank tests for every violin panel.
-_omsi_snr
-    SNR exactly as OMSI's sampler computes it to decide whether to skip a cell.
-_print_omsi_snr_exclusions
-    Print how many cells OMSI skipped because their SNR was below its floor.
-print_stats
-    Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
-main
-    Parse CLI arguments and dispatch to test, omsi, cascade, plot, or print mode.
-
-
 DMM, March 2026
 """
 
@@ -155,33 +52,13 @@ model_colors = {
 }
 _MODEL_ORDER = ['OMSI', 'MATLAB', 'OASIS', 'CASCADE']
 
-USE_STRICT_ACCURACY = False  # Hungarian one-to-one matching (compute_accuracy_strict).
+USE_STRICT_ACCURACY = False
 BETA = 0.5
 
-#   'threshold': Return every frame where s > height * sigma (default).
-#   'peaks':    Find local maxima above height * sigma with minimum inter-peak distance.
 OASIS_SPIKE_DETECTION = 'peaks'
 
 
 def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
-    """Convert OASIS deconvolved signal to spike times using threshold or peak detection.
-
-    Parameters
-    ----------
-    s : np.ndarray
-        Deconvolved signal from OASIS.
-    sigma : float
-        Noise standard deviation used for thresholding.
-    fs : float
-        Sampling frequency in Hz.
-    height : float, optional
-        Threshold multiplier applied to sigma (default 1.0).
-
-    Returns
-    -------
-    np.ndarray
-        Spike times in seconds.
-    """
     thresh = height * sigma
     if OASIS_SPIKE_DETECTION == 'peaks':
         min_dist = max(1, int(0.05 * fs))
@@ -198,21 +75,10 @@ _GENO_LS_DEFAULT = ':'
 
 _EXCLUDED_DATASETS = {'DS29-GCaMP7f-m-V1', 'DS32-GCaMP8s-m-V1', 'DS28-XCaMPgf-m-V1'}
 
-# OMSI skips inference (returns no spikes) for traces below this SNR; see
-# cont_ca_sampler in src/OMSI/sampler.py.
 _OMSI_SNR_FLOOR = 2.0
 
 
 def _save_records(records, path):
-    """Serialize a list of result dicts to a compressed NPZ file.
-
-    Parameters
-    ----------
-    records : list of dict
-        Result records to save. String and numeric values are handled separately.
-    path : str
-        Output path for the NPZ file (without extension).
-    """
     if not records:
         np.savez(path)
         return
@@ -231,18 +97,6 @@ def _save_records(records, path):
 
 
 def _load_records(path):
-    """Load a list of result dicts from a compressed NPZ file.
-
-    Parameters
-    ----------
-    path : str
-        Path to an NPZ file previously written by _save_records.
-
-    Returns
-    -------
-    list of dict
-        Reconstructed list of result records.
-    """
     d = np.load(path, allow_pickle=True)
     keys = list(d.files)
     if not keys:
@@ -263,20 +117,6 @@ def _load_records(path):
 
 
 def _fbeta(precision, recall):
-    """Compute F-beta score from scalar precision and recall.
-
-    Parameters
-    ----------
-    precision : float or array-like
-        Precision value(s).
-    recall : float or array-like
-        Recall value(s).
-
-    Returns
-    -------
-    float
-        F-beta score, using the global BETA constant.
-    """
     p = np.asarray(precision, dtype=float)
     r = np.asarray(recall, dtype=float)
     b2 = BETA ** 2
@@ -286,53 +126,15 @@ def _fbeta(precision, recall):
 
 
 def _mad(x, axis=None):
-    """ Compute the median absolute deviation, ignoring NaNs.
-
-    Parameters
-    ----------
-    x : array-like
-        Input values.
-    axis : int or None, optional
-        Axis along which to compute; None flattens the input.
-
-    Returns
-    -------
-    float or np.ndarray
-        Median of |x - median(x)| along axis.
-    """
     x = np.asarray(x, dtype=float)
     return np.nanmedian(np.abs(x - np.nanmedian(x, axis=axis, keepdims=True)), axis=axis)
 
 
 def normalize_label(label):
-    """Strip leading run-label prefix from a dataset name.
-
-    Parameters
-    ----------
-    label : str
-        Raw dataset label string.
-
-    Returns
-    -------
-    str
-        Label with any leading 'prefix_' removed.
-    """
     return re.sub(r'^[^_]+_', '', label)
 
 
 def clean_label(label):
-    """Reformat raw CASCADE-style labels into a canonical short label.
-
-    Parameters
-    ----------
-    label : str
-        Raw label string, possibly in CASCADE format.
-
-    Returns
-    -------
-    str
-        Reformatted label or the original string if no match.
-    """
     m = re.search(r'(.*)_\(\'([^\']+)\',\s*(\d+),\s*(\d+)\)frames', label)
     if m:
         return f"{m.group(2)}_{m.group(1)}_{m.group(4)}frames_{m.group(3)}hz"
@@ -340,18 +142,6 @@ def clean_label(label):
 
 
 def get_genotype(label):
-    """Extract genotype string from a dataset name.
-
-    Parameters
-    ----------
-    label : str
-        Dataset label string.
-
-    Returns
-    -------
-    str
-        Matched genotype name, or 'Other' if none found.
-    """
     known_types = ['Cux2', 'Rorb', 'Scnn1a', 'Nr5a1', 'Emx1', 'Slc17a7', 'tetO',
                    'Vip', 'Sst', 'Pvalb']
     for k in known_types:
@@ -361,20 +151,6 @@ def get_genotype(label):
 
 
 def get_zoom_for_label(label, zoom_lookup=None):
-    """Return zoom level string for a dataset label.
-
-    Parameters
-    ----------
-    label : str
-        Dataset label string.
-    zoom_lookup : dict, optional
-        Unused; reserved for future lookup table.
-
-    Returns
-    -------
-    str
-        'High Zoom', 'Low Zoom', or 'Unknown'.
-    """
     if 'lowzoom' in label:
         return 'Low Zoom'
     elif 'highzoom' in label:
@@ -383,19 +159,6 @@ def get_zoom_for_label(label, zoom_lookup=None):
 
 
 def save_aggregated_data(slow_data_groups, fast_data_groups, aggregated_h5_path):
-    """Write slow and fast data groups to an HDF5 archive.
-
-    Parameters
-    ----------
-    slow_data_groups : dict
-        Mapping from (experiment_name, fs_rounded, n_frames) to data dicts
-        for slow-indicator experiments.
-    fast_data_groups : dict
-        Mapping from (experiment_name, fs_rounded, n_frames) to data dicts
-        for fast-indicator experiments.
-    aggregated_h5_path : str
-        Destination path for the output HDF5 file.
-    """
     print("\nSaving aggregated data to {}...".format(aggregated_h5_path))
     with h5py.File(aggregated_h5_path, 'w') as hf:
         for group_key, h5_group_name in [('slow', 'slow_data'), ('fast', 'fast_data')]:
@@ -419,20 +182,6 @@ def save_aggregated_data(slow_data_groups, fast_data_groups, aggregated_h5_path)
 
 
 def load_aggregated_data(aggregated_h5_path):
-    """Read slow and fast data groups from an HDF5 archive.
-
-    Parameters
-    ----------
-    aggregated_h5_path : str
-        Path to an HDF5 file previously written by save_aggregated_data.
-
-    Returns
-    -------
-    slow_data_groups : dict
-        Mapping from (experiment_name, fs_rounded, n_frames) to data dicts.
-    fast_data_groups : dict
-        Mapping from (experiment_name, fs_rounded, n_frames) to data dicts.
-    """
     print("\nLoading aggregated data from {}...".format(aggregated_h5_path))
     slow_data_groups = {}
     fast_data_groups = {}
@@ -463,26 +212,6 @@ def load_aggregated_data(aggregated_h5_path):
 
 
 def compute_accuracy_window(true_spikes, predicted_spikes, tolerance=0.100):
-    """Compute precision, recall, and F1 using a temporal tolerance window.
-
-    Parameters
-    ----------
-    true_spikes : list of array-like
-        Ground-truth spike times in seconds, one array per cell.
-    predicted_spikes : list of array-like
-        Predicted spike times in seconds, one array per cell.
-    tolerance : float, optional
-        Half-window in seconds for matching spikes (default 0.100).
-
-    Returns
-    -------
-    precisions : np.ndarray
-        Per-cell precision values.
-    recalls : np.ndarray
-        Per-cell recall values.
-    f1s : np.ndarray
-        Per-cell F1 scores.
-    """
     precisions, recalls, f1s = [], [], []
     for t_spk, p_spk in zip(true_spikes, predicted_spikes):
         t_spk = np.asarray(t_spk, dtype=np.float64).flatten()
@@ -508,35 +237,13 @@ def compute_accuracy_window(true_spikes, predicted_spikes, tolerance=0.100):
 
 
 def _run_cascade_inference(dff, fs, label, data_dir):
-    """Run CASCADE spike inference via subprocess and return probs and spike times.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    fs : float
-        Sampling frequency in Hz.
-    label : str
-        Dataset label used for naming intermediate files.
-    data_dir : str
-        Directory for intermediate input/output NPZ files.
-
-    Returns
-    -------
-    cascade_probs : np.ndarray
-        Per-frame spike probability traces, shape (n_cells, n_frames).
-    cascade_spikes : list of np.ndarray
-        Per-cell spike times in seconds.
-    cascade_time : float
-        Wall-clock inference time in seconds.
-    """
     script      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'run_cascade_subprocess.py')
     input_path  = os.path.join(data_dir, f'fig3_cascade_{label}_input.npz')
     output_path = os.path.join(data_dir, f'fig3_cascade_{label}_output.npz')
     np.savez(input_path, dff=dff.astype(np.float32), fs=np.float32(fs))
     subprocess.run(
-        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade', 'python', script,
+        [shutil.which('conda') or 'conda', 'run', '-n', 'cascade_gpu', 'python', script,
          '--mode', 'inference', '--input', input_path, '--output', output_path],
         check=True)
     result = np.load(output_path, allow_pickle=True)
@@ -546,20 +253,6 @@ def _run_cascade_inference(dff, fs, label, data_dir):
 
 
 def _omsi_params(fs, tau):
-    """OMSI parameter dict used for every Allen dataset group.
-
-    Parameters
-    ----------
-    fs : float
-        Sampling frequency in Hz.
-    tau : float
-        Calcium decay time constant in seconds.
-
-    Returns
-    -------
-    dict
-        Parameters for OMSI.deconv.
-    """
     tau_rise = 0.05
     g_rise   = float(np.exp(-1.0 / (tau_rise * fs)))
     g_decay  = float(np.exp(-1.0 / (tau * fs)))
@@ -571,28 +264,6 @@ def _omsi_params(fs, tau):
 
 
 def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, label, data_dir):
-    """Run CASCADE on one Allen dataset group and save its results.
-
-    Writes allen_data_results_cascade_<label>.npz (per-cell records) and
-    allen_data_results_cascade_<label>_traces.npz (probabilities and spikes).
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-    true_events : list of np.ndarray
-        Event ground truth, one array per cell.
-    fs : float
-        Sampling frequency in Hz.
-    tau : float
-        Calcium decay time constant in seconds.
-    label : str
-        Dataset label used for output file naming.
-    data_dir : str
-        Directory for output NPZ files.
-    """
     n_cells = dff.shape[0]
     print("  Running CASCADE (subprocess)...")
     try:
@@ -645,42 +316,14 @@ def _run_and_save_cascade_group(dff, true_spikes, true_events, fs, tau, label, d
 
 
 def _run_and_save_oasis_group(dff, true_spikes, true_events, fs, tau, label, data_dir):
-    """Run OASIS on one Allen dataset group and save its results.
-
-    OASIS estimates its own AR(1) decay for each cell; tau is only used to
-    label the records. Writes allen_data_results_oasis_<label>.npz (per-cell
-    records) and allen_data_results_oasis_<label>_traces.npz (deconvolved
-    signal and spikes), so re-running OASIS never touches other methods' files.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-    true_events : list of np.ndarray
-        Event ground truth, one array per cell.
-    fs : float
-        Sampling frequency in Hz.
-    tau : float
-        Dataset calcium decay time constant in seconds (not given to OASIS).
-    label : str
-        Dataset label used for output file naming.
-    data_dir : str
-        Directory for output NPZ files.
-    """
     n_cells = dff.shape[0]
 
     print("  Running OASIS...")
     t0 = time.time()
-    diff   = np.diff(dff, axis=1)
-    sigmas = np.median(np.abs(diff), axis=1) / (0.6745 * np.sqrt(2))
-    sigmas = np.maximum(sigmas, 1e-9)
     oasis_probs = []
     oasis_g     = []
     for i in range(n_cells):
-        # g=(None,) makes OASIS estimate its own decay (tau) from the trace.
-        _, s, _, g, _ = deconvolve(dff[i], g=(None,), sn=sigmas[i], penalty=1)
+        _, s, _, g, _ = deconvolve(np.asarray(dff[i], dtype=np.float64))
         oasis_probs.append(s)
         oasis_g.append(float(np.ravel(g)[0]))
     oasis_probs = np.array(oasis_probs)
@@ -736,25 +379,6 @@ def _run_and_save_oasis_group(dff, true_spikes, true_events, fs, tau, label, dat
 
 def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
                               run_matlab=False):
-    """Run all inference methods on one Allen dataset group and save results.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-    fs : float
-        Sampling frequency in Hz.
-    tau : float
-        Calcium decay time constant in seconds.
-    label : str
-        Dataset label used for output file naming.
-    data_dir : str
-        Directory for output NPZ files.
-    run_matlab : bool, optional
-        Whether to also run the MATLAB CaImAn MCMC method (default False).
-    """
     all_results = []
     n_cells = dff.shape[0]
 
@@ -853,23 +477,6 @@ def _run_and_save_allen_group(dff, true_spikes, fs, tau, label, data_dir,
 
 
 def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
-    """Run OMSI on one Allen dataset group and save results.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        dF/F traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds, one array per cell.
-    fs : float
-        Sampling frequency in Hz.
-    tau : float
-        Calcium decay time constant in seconds.
-    label : str
-        Dataset label used for output file naming.
-    data_dir : str
-        Directory for output NPZ files.
-    """
     n_cells = dff.shape[0]
 
     true_events = [OMSI.helpers.make_event_ground_truth(sp, tau)
@@ -925,17 +532,6 @@ def _run_and_save_omsi_group(dff, true_spikes, fs, tau, label, data_dir):
 
 
 def test_figure(data_dir, allen_data_dir, run_matlab=False):
-    """Run full benchmark across all Allen dataset groups.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for output data and figures.
-    allen_data_dir : str
-        Path to raw Allen H5 files.
-    run_matlab : bool, optional
-        Whether to include the CaImAn MCMC method (default False).
-    """
     os.makedirs(data_dir, exist_ok=True)
     aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
 
@@ -965,15 +561,6 @@ def test_figure(data_dir, allen_data_dir, run_matlab=False):
 
 
 def test_omsi(data_dir, allen_data_dir):
-    """Run OMSI-only benchmark across all Allen dataset groups.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for output data and figures.
-    allen_data_dir : str
-        Path to raw Allen H5 files.
-    """
     os.makedirs(data_dir, exist_ok=True)
     aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
 
@@ -1003,20 +590,6 @@ def test_omsi(data_dir, allen_data_dir):
 
 
 def test_cascade(data_dir, allen_data_dir):
-    """Run CASCADE-only benchmark across all Allen dataset groups.
-
-    Uses the same preprocessed data as test_figure, and
-    writes only the CASCADE result files, so existing OMSI, OASIS and CaImAn
-    results are left untouched.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for output data and figures.
-    allen_data_dir : str
-        Path to raw Allen H5 files (only read if allen_aggregated_data.h5 is
-        not already in data_dir).
-    """
     os.makedirs(data_dir, exist_ok=True)
     aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
 
@@ -1047,20 +620,6 @@ def test_cascade(data_dir, allen_data_dir):
 
 
 def test_oasis(data_dir, allen_data_dir):
-    """Run OASIS-only benchmark across all Allen dataset groups.
-
-    Uses the same preprocessed data as test_figure, and writes only the OASIS
-    result files, so existing OMSI, CASCADE and CaImAn results are left
-    untouched.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for output data and figures.
-    allen_data_dir : str
-        Path to raw Allen H5 files (only read if allen_aggregated_data.h5 is
-        not already in data_dir).
-    """
     os.makedirs(data_dir, exist_ok=True)
     aggregated_h5 = os.path.join(data_dir, 'allen_aggregated_data.h5')
 
@@ -1091,22 +650,6 @@ def test_oasis(data_dir, allen_data_dir):
 
 
 def _load_and_preprocess_raw(data_dir, aggregated_h5):
-    """Preprocess raw Allen H5 files into dF/F arrays and spike times.
-
-    Parameters
-    ----------
-    data_dir : str
-        Root directory containing Allen H5 experiment files.
-    aggregated_h5 : str
-        Output path for the aggregated HDF5 file.
-
-    Returns
-    -------
-    slow_data_groups : dict
-        Preprocessed data groups for slow-indicator experiments.
-    fast_data_groups : dict
-        Preprocessed data groups for fast-indicator experiments.
-    """
     slow_data_groups = {}
     fast_data_groups = {}
 
@@ -1198,18 +741,6 @@ def _load_and_preprocess_raw(data_dir, aggregated_h5):
 
 
 def _build_cascade_lookup(data_dir):
-    """Build a label-to-filepath lookup for CASCADE trace NPZ files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_data_results_cascade_*_traces.npz files.
-
-    Returns
-    -------
-    dict
-        Mapping from label string to (traces_path, cell_id_to_row) tuples.
-    """
     lookup = {}
     for npz_path in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_cascade_*_traces.npz')):
@@ -1234,18 +765,6 @@ def _build_cascade_lookup(data_dir):
 
 
 def _build_omsi_records_lookup(data_dir):
-    """Build a label-to-filepath lookup for newer OMSI records NPZ files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_data_results_omsi_*.npz files.
-
-    Returns
-    -------
-    dict
-        Mapping from label string to OMSI records NPZ file path.
-    """
     lookup = {}
     for fpath in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_omsi_*.npz')):
@@ -1261,18 +780,6 @@ def _build_omsi_records_lookup(data_dir):
 
 
 def _build_omsi_traces_lookup(data_dir):
-    """Build a label-to-filepath lookup for newer OMSI traces NPZ files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_data_results_omsi_*_traces.npz files.
-
-    Returns
-    -------
-    dict
-        Mapping from label string to OMSI traces NPZ file path.
-    """
     lookup = {}
     for fpath in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_omsi_*_traces.npz')):
@@ -1286,22 +793,6 @@ def _build_omsi_traces_lookup(data_dir):
 
 
 def _build_oasis_lookup(data_dir):
-    """Build a label-to-filepath lookup for OASIS result NPZ files.
-
-    OASIS files always take precedence over any OASIS data in older group or
-    OMSI result files.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing allen_data_results_oasis_*.npz files.
-
-    Returns
-    -------
-    dict
-        Mapping from label string to (records_path, traces_path) tuples;
-        either path is None if that file is missing.
-    """
     lookup = {}
     for fpath in _glob.glob(
             os.path.join(data_dir, 'allen_data_results_oasis_*.npz')):
@@ -1315,20 +806,6 @@ def _build_oasis_lookup(data_dir):
 
 
 def _peaks_from_prob(prob, fs):
-    """Find spike times from a probability trace via peak detection.
-
-    Parameters
-    ----------
-    prob : np.ndarray
-        Spike probability trace (1-D).
-    fs : float
-        Sampling frequency in Hz.
-
-    Returns
-    -------
-    np.ndarray
-        Detected spike times in seconds.
-    """
     if prob is None or len(prob) == 0 or prob.max() <= 0:
         return np.array([])
     thresh   = max(0.05, float(np.percentile(prob[prob > 0], 90)))
@@ -1339,30 +816,6 @@ def _peaks_from_prob(prob, fs):
 
 def _best_window(raw_trace, fs, true_spk, det_spikes_list,
                  window=60.0, target_spikes=20, spike_std=8.0):
-    """Score and select the best 60-second window for trace visualization.
-
-    Parameters
-    ----------
-    raw_trace : np.ndarray
-        Raw dF/F trace for one cell.
-    fs : float
-        Sampling frequency in Hz.
-    true_spk : np.ndarray
-        Ground-truth spike times in seconds.
-    det_spikes_list : list of np.ndarray
-        Detected spike time arrays from each model.
-    window : float, optional
-        Window duration in seconds (default 60.0).
-    target_spikes : int, optional
-        Preferred spike count per window for scoring (default 20).
-    spike_std : float, optional
-        Gaussian width for spike-count scoring (default 8.0).
-
-    Returns
-    -------
-    float
-        Start time in seconds of the best-scoring window.
-    """
     block_frames = int(window * fs)
     n_frames     = len(raw_trace)
     results = []
@@ -1404,37 +857,6 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                              omsi_traces_lookup=None,
                              matlab_data_dir=None,
                              target_snrs=(2, 4, 6, 8, 10)):
-    """Load per-cell trace data for raster and trace visualization panels.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing trace NPZ files.
-    label_map : dict
-        Mapping from label to normalized label string.
-    file_path_map : dict
-        Mapping from label to file basename.
-    cascade_lookup : dict
-        CASCADE trace file lookup from _build_cascade_lookup.
-    n_cells : int, optional
-        Number of example cells to select (default 5).
-    window : float, optional
-        Visualization window duration in seconds (default 60.0).
-    min_spikes : int, optional
-        Minimum spikes in window for a cell to be considered (default 15).
-    omsi_traces_lookup : dict, optional
-        OMSI traces file lookup from _build_omsi_traces_lookup.
-    matlab_data_dir : str, optional
-        Directory with CaImAn MCMC trace NPZ files.
-    target_snrs : tuple, optional
-        One cell is chosen per target: the unused cell with the closest SNR.
-
-    Returns
-    -------
-    list of dict
-        Selected cell data dicts with traces, spike times, and metadata,
-        in increasing SNR.
-    """
     oasis_lookup = _build_oasis_lookup(data_dir)
     all_cells = []
     for label, norm_label in label_map.items():
@@ -1517,7 +939,6 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
                     dc = None
 
             def _load_spk(key, probs_arr, idx, src=d):
-                """Load spike times from array key or derive from probability trace."""
                 if key in src:
                     arr = list(src[key])
                     if idx < len(arr):
@@ -1573,7 +994,6 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
         return []
 
     def _win_count(c):
-        """Count ground-truth spikes within the selected visualization window."""
         t0, t1 = c['t_start'], c['t_start'] + window
         return int(np.sum((c['true_spikes'] >= t0) & (c['true_spikes'] < t1)))
 
@@ -1601,17 +1021,6 @@ def _load_raster_trace_data(data_dir, label_map, file_path_map,
 
 
 def _plot_combined_raster_trace(ax, cells, window=60.0):
-    """Draw raster rows and raw trace for multiple example cells on one axes.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    cells : list of dict
-        Cell data dicts from _load_raster_trace_data.
-    window : float, optional
-        Visualization window duration in seconds (default 60.0).
-    """
     n = len(cells)
     if n == 0:
         ax.text(0.5, 0.5, 'No trace data', transform=ax.transAxes,
@@ -1674,23 +1083,6 @@ def _plot_combined_raster_trace(ax, cells, window=60.0):
 
 
 def _plot_violin_metric(ax, alldata, taus, zoom, metric, ylabel):
-    """Plot per-model violin distributions of a given metric for each tau.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    alldata : list of dict
-        All benchmark result records.
-    taus : list of float
-        Tau values to plot (x-axis groups).
-    zoom : str
-        Zoom level filter ('High Zoom' or 'Low Zoom').
-    metric : str
-        Key in each record dict to use as the metric.
-    ylabel : str
-        Y-axis label.
-    """
     positions, violin_data, violin_colors = [], [], []
     x_pos = 0; tau_ticks, tau_labels = [], []
     for tau_val in taus:
@@ -1724,19 +1116,6 @@ def _plot_violin_metric(ax, alldata, taus, zoom, metric, ylabel):
 
 
 def _plot_f1_violin(ax, alldata, taus, f1_key='f1'):
-    """Plot per-model F-beta violin distributions split by tau and zoom level.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    alldata : list of dict
-        All benchmark result records.
-    taus : list of float
-        Tau values to plot.
-    f1_key : str, optional
-        Record key for the F-beta metric (default 'f1').
-    """
     positions, violin_data, violin_colors = [], [], []
     x_pos = 0; group_ticks, group_labels = [], []
     for tau_val in taus:
@@ -1774,15 +1153,6 @@ def _plot_f1_violin(ax, alldata, taus, f1_key='f1'):
 
 
 def _plot_strict_vs_window_f1(ax, alldata):
-    """Plot strict vs window F-beta distributions side by side for each model.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    alldata : list of dict
-        All benchmark result records.
-    """
     positions, violin_data, violin_colors = [], [], []
     tick_positions, tick_labels = [], []
     x_pos = 0
@@ -1814,15 +1184,6 @@ def _plot_strict_vs_window_f1(ax, alldata):
 
 
 def _plot_fbeta_violin(ax, alldata):
-    """Plot overall F-beta violin per model.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    alldata : list of dict
-        All benchmark result records.
-    """
     fb_key = 'fbeta' if USE_STRICT_ACCURACY else 'fbeta_window'
     positions, violin_data, violin_colors, tick_labels = [], [], [], []
     for i, model_name in enumerate(_MODEL_ORDER):
@@ -1848,15 +1209,6 @@ def _plot_fbeta_violin(ax, alldata):
 
 
 def _plot_cosmic_violin(ax, alldata):
-    """Plot overall CosMIC score violin per model.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    alldata : list of dict
-        All benchmark result records.
-    """
     positions, violin_data, violin_colors, tick_labels = [], [], [], []
     for i, model_name in enumerate(_MODEL_ORDER):
         md   = [d for d in alldata if d['model'] == model_name]
@@ -1882,21 +1234,7 @@ def _plot_cosmic_violin(ax, alldata):
 
 def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
                                         matlab_data_dir=None):
-    """Recompute precision, recall, F-beta, and CosMIC from saved trace NPZ files.
-
-    Parameters
-    ----------
-    alldata : list of dict
-        Benchmark result records; updated in-place with recomputed metrics.
-    data_dir : str
-        Directory containing trace NPZ files.
-    omsi_traces_lookup : dict
-        OMSI traces file lookup from _build_omsi_traces_lookup.
-    matlab_data_dir : str, optional
-        Directory containing CaImAn MCMC trace NPZ files.
-    """
     def _from_probs(true_spikes, true_events, probs, fs, sigma):
-        """Detect spikes from probs and compute all accuracy metrics."""
         spikes, _ = OMSI.detect_spikes_from_probs(probs, fs, sigma=sigma)
         prec,   rec,   f1   = OMSI.compute_accuracy_strict(
             true_spikes, spikes, tolerance=0.1)
@@ -1908,7 +1246,6 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
         return prec, rec, f1, prec_w, rec_w, f1_w, prec_e, rec_e, f1_e, cosmic
 
     def _from_spikes(true_spikes, true_events, spikes, fs):
-        """Compute all accuracy metrics from pre-detected spike times."""
         prec,   rec,   f1   = OMSI.compute_accuracy_strict(
             true_spikes, spikes, tolerance=0.1)
         prec_w, rec_w, f1_w = compute_accuracy_window(
@@ -1920,7 +1257,6 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
 
     def _apply(recs, prec, rec, f1, prec_w, rec_w, f1_w,
                prec_e, rec_e, f1_e, cosmic):
-        """Write recomputed metric arrays back into record dicts in-place."""
         for i, r in enumerate(recs):
             if i >= len(cosmic):
                 break
@@ -2117,24 +1453,6 @@ def _recompute_all_metrics_from_traces(alldata, data_dir, omsi_traces_lookup,
 
 
 def _metrics_from_spikes(true_spikes, true_events, spikes, fs):
-    """Per-cell accuracy metrics for one method, keyed by record field name.
-
-    Parameters
-    ----------
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds.
-    true_events : list of np.ndarray
-        Event ground truth.
-    spikes : list of np.ndarray
-        Detected spike times in seconds.
-    fs : float
-        Sampling frequency in Hz.
-
-    Returns
-    -------
-    dict
-        Arrays for precision, recall, f1 (strict, window, event) and cosmic.
-    """
     prec,   rec,   f1   = OMSI.compute_accuracy_strict(true_spikes, spikes, tolerance=0.1)
     prec_w, rec_w, f1_w = compute_accuracy_window(true_spikes, spikes, tolerance=0.1)
     prec_e, rec_e, f1_e = compute_accuracy_window(true_events, spikes, tolerance=0.1)
@@ -2147,26 +1465,6 @@ def _metrics_from_spikes(true_spikes, true_events, spikes, fs):
 
 
 def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
-    """Load all benchmark records and recompute their metrics from saved traces.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing benchmark NPZ result files and trace files.
-    matlab_data_dir : str, optional
-        Directory containing CaImAn MCMC result files.
-
-    Returns
-    -------
-    alldata : list of dict
-        Result records with recomputed metrics, zoom, and F-beta fields.
-    label_map : dict
-        Clean label to normalized label.
-    file_path_map : dict
-        Clean label to original dataset basename.
-    omsi_traces_lookup : dict
-        OMSI traces file lookup from _build_omsi_traces_lookup.
-    """
     alldata       = []
     label_map     = {}
     file_path_map = {}
@@ -2314,15 +1612,6 @@ def _load_all_results(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
 
 
 def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
-    """Load all results, recompute metrics, and render the combined figure.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing benchmark NPZ result files and trace files.
-    matlab_data_dir : str, optional
-        Directory containing CaImAn MCMC result files.
-    """
     alldata, label_map, file_path_map, omsi_traces_lookup = _load_all_results(
         data_dir, matlab_data_dir)
     if not alldata:
@@ -2395,24 +1684,6 @@ def plot_figure(data_dir, matlab_data_dir=_MATLAB_DATA_DIR):
 
 
 def _paired_by_cell(alldata, model_a, model_b, key, **filters):
-    """Collect one metric for two models on the cells both were run on.
-
-    Parameters
-    ----------
-    alldata : list of dict
-        All benchmark result records.
-    model_a, model_b : str
-        Models to pair.
-    key : str
-        Record key of the metric.
-    **filters
-        Record fields that must match (e.g. tau=0.7, zoom='High Zoom').
-
-    Returns
-    -------
-    a, b : np.ndarray
-        Metric values, paired by (label, tau, cell_id).
-    """
     def _collect(model):
         return {(d['label'], d['tau'], d['cell_id']): d.get(key, np.nan)
                 for d in alldata if d['model'] == model
@@ -2424,15 +1695,6 @@ def _paired_by_cell(alldata, model_a, model_b, key, **filters):
 
 
 def _print_signed_rank_tests(alldata):
-    """Print Wilcoxon signed-rank tests for every violin panel.
-
-    Each test pairs OMSI with one other model on the cells both were run on.
-
-    Parameters
-    ----------
-    alldata : list of dict
-        All benchmark result records.
-    """
     prec_key = 'precision'    if USE_STRICT_ACCURACY else 'precision_window'
     rec_key  = 'recall'       if USE_STRICT_ACCURACY else 'recall_window'
     fb_key   = 'fbeta'        if USE_STRICT_ACCURACY else 'fbeta_window'
@@ -2466,20 +1728,6 @@ def _print_signed_rank_tests(alldata):
 
 
 def _omsi_snr(trace):
-    """SNR exactly as OMSI's sampler computes it to decide whether to skip a cell.
-
-    (99th - 8th percentile) / (median |diff| / 0.6745), over non-NaN samples.
-
-    Parameters
-    ----------
-    trace : np.ndarray
-        Trace passed to OMSI.
-
-    Returns
-    -------
-    float
-        SNR of the trace.
-    """
     y = np.asarray(trace, dtype=float)
     y = y[~np.isnan(y)]
     sn_mad = float(np.median(np.abs(np.diff(y)))) / 0.6745 if len(y) > 1 else 1e-4
@@ -2489,17 +1737,6 @@ def _omsi_snr(trace):
 
 
 def _print_omsi_snr_exclusions(data_dir):
-    """Print how many cells OMSI skipped because their SNR was below its floor.
-
-    Uses the traces saved with the results, which are exactly the traces
-    passed to OMSI. Skipped cells are not removed from the figure: they stay
-    in every panel, scored as having no detected spikes.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory containing the saved traces.
-    """
     sources = []
     for fpath in sorted(_glob.glob(os.path.join(data_dir, 'allen_data_results_*_traces.npz'))):
         name = os.path.basename(fpath)
@@ -2548,15 +1785,6 @@ def _print_omsi_snr_exclusions(data_dir):
 
 
 def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
-    """Print per-model median precision, recall, F-beta, and CosMIC statistics to the terminal.
-
-    Parameters
-    ----------
-    data_dir : str, optional
-        Directory containing benchmark NPZ result files.
-    matlab_data_dir : str, optional
-        Directory containing CaImAn MCMC result files.
-    """
     alldata = _load_all_results(data_dir, matlab_data_dir)[0]
 
     if not alldata:
@@ -2604,7 +1832,6 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
             line += '  {:>15}'.format('{:.3f} ± {:.3f}'.format(np.nanmedian(vals), _mad(vals)))
         print(line)
 
-    # Per-condition panels: one violin per (tau, zoom, model).
     prec_key = 'precision'    if USE_STRICT_ACCURACY else 'precision_window'
     rec_key  = 'recall'       if USE_STRICT_ACCURACY else 'recall_window'
     fb_key   = 'fbeta'        if USE_STRICT_ACCURACY else 'fbeta_window'
@@ -2633,9 +1860,6 @@ def print_stats(data_dir=_DEFAULT_DATA_DIR, matlab_data_dir=_MATLAB_DATA_DIR):
                     np.array([d.get(prec_key, np.nan) for d in md], dtype=float))))
                 print(line + '  {:>5}'.format(n_fin))
 
-    # Pooled over methods: every (cell, method) value at a zoom and tau. Per-cell
-    # scores pile up at 1.0, where the median can sit at 1.000 and hide
-    # differences, so the mean is reported alongside it.
     def _sem(v):
         v = v[np.isfinite(v)]
         return float(np.std(v, ddof=1) / np.sqrt(len(v))) if len(v) > 1 else np.nan

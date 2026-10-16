@@ -2,72 +2,6 @@
 """
 figures/hardware_benchmark.py
 
-Portable timing benchmark for OMSI, OASIS, CASCADE, and CaImAn MCMC.
-
-Runs the same seeded synthetic population on any machine so wall-clock times
-are comparable across hardware. Three conditions span small, large, and long
-workloads. Each machine writes one JSON; report mode pools every JSON in the
-directory into a specs table and a timing table, and plot mode draws a single
-grouped bar chart of time per method per machine.
-
-The axis of interest is hardware, not workload, so the conditions are kept few
-and short: roughly 10 to 15 min for OMSI, OASIS, and CASCADE on a 16-core
-workstation, and well under an hour on a 4-core laptop. CaImAn MCMC is about
-two orders of magnitude slower, so it runs on the lightest condition only, with
-a cell cap (--matlab-max-cells, 0 for all), adding about 25 min where MATLAB is
-installed; it is skipped automatically where it is not. Generation time is
-measured but excluded from the reported inference times.
-
-Workload is fixed on purpose -- only runs made without --quick are comparable.
-
-To run the benchmark:
-    $ python hardware_benchmark.py --mode run --data-dir /path/to/results
-
-Smoke test, not comparable to full runs:
-    $ python hardware_benchmark.py --mode run --quick
-
-To compare machines:
-    $ python hardware_benchmark.py --mode report --data-dir /path/to/results
-    $ python hardware_benchmark.py --mode plot --data-dir /path/to/results
-
-Functions
----------
-_machine_info
-    Collect CPU, memory, GPU, and library versions for the report header.
-_gpu_info
-    Query GPU model, memory, and compute capability via nvidia-smi.
-_conda_launcher
-    Build the command prefix that runs conda, or None when not found.
-_matlab_release
-    Read the MATLAB release tag from the discovered executable path.
-_ensure_ray_dir
-    Set the Ray scratch directory without triggering the first-run dialog.
-_generate
-    Build a seeded synthetic population, chunked over cells to cap memory.
-_oasis_spikes_from_s
-    Detect spikes from an OASIS deconvolved signal by peak finding.
-_run_oasis
-    Time OASIS deconvolution over all cells.
-_run_cascade
-    Time CASCADE inference in its own conda environment.
-_run_matlab
-    Time CaImAn MCMC in MATLAB over a capped number of cells.
-_run_omsi
-    Time OMSI inference and record per-cell CPU time.
-_conditions
-    Build the list of workload conditions.
-run_benchmark
-    Run every condition and save one JSON for this machine.
-_load_runs
-    Read every machine JSON in a directory.
-report
-    Print the specs table and the timing table across machines.
-plot_figure
-    Draw one grouped bar chart of time per method per machine.
-main
-    Parse CLI arguments and dispatch.
-
-
 DMM, September 2026
 """
 
@@ -107,64 +41,36 @@ METHOD_COLORS = {
     'CASCADE_CPU': '#B39DDB',
 }
 
-# Order methods appear in tables and bars.
 METHOD_ORDER = ['OMSI', 'CaImAn MCMC', 'OASIS', 'CASCADE_CPU', 'CASCADE_GPU']
 
 _DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'hardware'
 )
 
-# Fixed acquisition parameters. Changing any of these breaks comparability
-# with runs recorded on other machines.
 FS   = 30.0
 TAU  = 1.2
 SNR  = 5.0
 SEED = 1234
 
-# Three conditions spanning small, large, and long. The point of this
-# benchmark is breadth across machines, not across workloads, so each run
-# stays short enough that people will actually run it.
 CELL_SWEEP     = [50, 200]
 CELL_DURATION  = 300.0
 DUR_SWEEP      = [1200.0]
 DUR_N_CELLS    = 100
 
-# Smoke-test workload, far too small to compare across machines. Mirrors the
-# three-condition shape, with durations kept off the cell-sweep value so no
-# condition appears in both sweeps.
 QUICK_CELL_SWEEP    = [20, 50]
 QUICK_CELL_DURATION = 120.0
 QUICK_DUR_SWEEP     = [300.0]
 QUICK_DUR_N_CELLS   = 20
 
-# Cells generated per chunk. Caps peak memory during the 10x upsampled
-# convolution inside generate_synthetic_data.
 GEN_CHUNK = 100
 
-# CaImAn MCMC runs roughly two orders of magnitude slower than the rest, so it
-# gets one reference condition rather than all six, capped to a few cells.
-# Throughput per cell-second keeps it comparable with the methods that saw
-# every cell. At 25 cells and 300 s this is about 25 min on a modern CPU.
 MATLAB_MAX_CELLS = 25
 MATLAB_SWEEPS    = 500
 
-# Conda environment holding CASCADE and its TensorFlow build.
 CASCADE_ENV = os.environ.get('CASCADE_ENV', 'cascade')
 
 
 def _gpu_info():
-    """ Query GPU model, memory, and compute capability via nvidia-smi.
-
-    Uses nvidia-smi rather than pynvml or torch so no extra dependency is
-    needed. SM count is not exposed by nvidia-smi, so CUDA core count is not
-    recorded.
-
-    Returns
-    -------
-    dict
-        Keys name, memory_mb, compute_cap, clock_max_mhz. All None when no
-        NVIDIA GPU is visible.
-    """
 
     empty = {'name': None, 'memory_mb': None, 'compute_cap': None,
              'clock_max_mhz': None}
@@ -191,7 +97,6 @@ def _gpu_info():
         return empty
 
     def _num(text):
-        """Parse a numeric nvidia-smi field, returning None when not a number."""
         try:
             return float(text)
         except ValueError:
@@ -206,25 +111,9 @@ def _gpu_info():
 
 
 def _conda_launcher():
-    """ Build the command prefix that runs conda, or None when not found.
 
-    Bare 'conda' fails on Windows: CreateProcess does not consult PATHEXT, so
-    subprocess cannot find conda.exe or conda.bat by name and raises
-    WinError 2. Resolve to a real path first, and route .bat or .cmd through
-    cmd.exe, which is the only way Windows will execute them.
-
-    Returns
-    -------
-    list of str or None
-        Argument prefix to prepend to conda arguments, or None if no conda
-        launcher could be located.
-    """
-
-    # CONDA_EXE is set by conda itself in any activated shell, so it is the
-    # most reliable source when present.
     candidates = [os.environ.get('CONDA_EXE', '').strip()]
 
-    # shutil.which does apply PATHEXT on Windows, unlike CreateProcess.
     candidates.append(shutil.which('conda'))
 
     home = os.path.expanduser('~')
@@ -253,16 +142,6 @@ def _conda_launcher():
 
 
 def _matlab_release():
-    """ Read the MATLAB release tag from the discovered executable path.
-
-    Cheaper than launching MATLAB to call version(), and enough to tell
-    releases apart in the report.
-
-    Returns
-    -------
-    tuple
-        (release tag or None, executable path or None).
-    """
 
     try:
         from run_pnev_MCMC import find_matlab
@@ -278,13 +157,6 @@ def _matlab_release():
 
 
 def _machine_info():
-    """ Collect CPU, memory, GPU, and library versions for the report header.
-
-    Returns
-    -------
-    dict
-        Machine description. Fields that cannot be determined are None.
-    """
 
     gpu = _gpu_info()
     matlab_release, matlab_exe = _matlab_release()
@@ -325,7 +197,6 @@ def _machine_info():
     except Exception:
         pass
 
-    # Linux reports a useful model name that platform.processor() leaves blank.
     try:
         with open('/proc/cpuinfo', 'r') as fh:
             for line in fh:
@@ -339,21 +210,6 @@ def _machine_info():
 
 
 def _ensure_ray_dir(ray_dir=None):
-    """ Set the Ray scratch directory without triggering the first-run dialog.
-
-    OMSI.deconv calls get_path, which opens a GUI picker the first time it
-    runs on a machine. Writing the key up front keeps the benchmark headless.
-
-    Parameters
-    ----------
-    ray_dir : str, optional
-        Directory to use. Defaults to a subdirectory of the system temp dir.
-
-    Returns
-    -------
-    str
-        Directory now recorded in internals.yaml.
-    """
 
     from OMSI import _config
 
@@ -371,25 +227,6 @@ def _ensure_ray_dir(ray_dir=None):
 
 
 def _generate(n_cells, duration, seed=SEED):
-    """ Build a seeded synthetic population, chunked over cells to cap memory.
-
-    Parameters
-    ----------
-    n_cells : int
-        Number of cells.
-    duration : float
-        Recording duration in seconds.
-    seed : int, optional
-        Base RNG seed. Chunk index is added to it so output is deterministic
-        regardless of chunk size.
-
-    Returns
-    -------
-    dff : np.ndarray
-        Noisy traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times in seconds.
-    """
 
     chunks_dff, chunks_spk = [], []
     done = 0
@@ -410,27 +247,6 @@ def _generate(n_cells, duration, seed=SEED):
 
 
 def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
-    """ Detect spikes from an OASIS deconvolved signal by peak finding.
-
-    Mirrors the peak-detection branch used in figure2.py so times are
-    measured on the same amount of work.
-
-    Parameters
-    ----------
-    s : np.ndarray
-        Deconvolved spike signal.
-    sigma : float
-        Noise standard deviation for the trace.
-    fs : float
-        Sampling rate in Hz.
-    height : float, optional
-        Peak height in units of sigma.
-
-    Returns
-    -------
-    np.ndarray
-        Spike times in seconds.
-    """
 
     from scipy.signal import find_peaks
 
@@ -439,22 +255,6 @@ def _oasis_spikes_from_s(s, sigma, fs, height=1.0):
 
 
 def _run_oasis(dff, fs, tau):
-    """ Time OASIS deconvolution over all cells.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        Traces, shape (n_cells, n_frames).
-    fs : float
-        Sampling rate in Hz.
-    tau : float
-        Decay time constant in seconds.
-
-    Returns
-    -------
-    dict or None
-        Timing record, or None when OASIS is not installed.
-    """
 
     try:
         from oasis.functions import deconvolve
@@ -480,26 +280,6 @@ def _run_oasis(dff, fs, tau):
 
 
 def _run_cascade(dff, fs, data_dir, prefix, device):
-    """ Time CASCADE inference in its own conda environment.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        Traces, shape (n_cells, n_frames).
-    fs : float
-        Sampling rate in Hz.
-    data_dir : str
-        Directory for the temporary input and output NPZ files.
-    prefix : str
-        Filename prefix for those files.
-    device : str
-        Either 'cpu' or 'gpu'.
-
-    Returns
-    -------
-    dict or None
-        Timing record, or None when the cascade environment is missing.
-    """
 
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'run_cascade_subprocess.py')
@@ -522,9 +302,6 @@ def _run_cascade(dff, fs, data_dir, prefix, device):
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
-        # conda run returns the subprocess exit code, so this is usually a
-        # missing env or an import failure inside it. Show the tail so the
-        # cause is visible rather than hidden behind "unavailable".
         tail = (exc.stderr or exc.stdout or '').strip().splitlines()
         print('    CASCADE ({}) failed (exit {}).'.format(
             device.upper(), exc.returncode))
@@ -545,7 +322,6 @@ def _run_cascade(dff, fs, data_dir, prefix, device):
         print('    CASCADE ({}) output unreadable: {}.'.format(device.upper(), exc))
         return None
 
-    # Clean up: these files are large and the benchmark does not reuse them.
     for path in (input_path, output_path):
         try:
             os.remove(path)
@@ -559,26 +335,6 @@ def _run_cascade(dff, fs, data_dir, prefix, device):
 
 
 def _run_matlab(dff, fs, tau, data_dir, max_cells=MATLAB_MAX_CELLS):
-    """ Time CaImAn MCMC in MATLAB over a capped number of cells.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        Traces, shape (n_cells, n_frames).
-    fs : float
-        Sampling rate in Hz.
-    tau : float
-        Decay time constant in seconds.
-    data_dir : str
-        Directory for the .mat handoff files.
-    max_cells : int, optional
-        Cells to run. 0 or None runs every cell.
-
-    Returns
-    -------
-    dict or None
-        Timing record, or None when MATLAB or the toolbox is unavailable.
-    """
 
     from run_pnev_MCMC import run_matlab_pnevMCMC
 
@@ -598,8 +354,6 @@ def _run_matlab(dff, fs, tau, data_dir, max_cells=MATLAB_MAX_CELLS):
 
     n_spikes = int(sum(len(s) for s in spikes))
 
-    # An empty result means MATLAB or cont_ca_sampler was missing, in which
-    # case the elapsed time measures the failure, not the inference.
     if n_spikes == 0:
         print('    CaImAn MCMC returned no spikes -- treating as unavailable.')
         return None
@@ -612,22 +366,6 @@ def _run_matlab(dff, fs, tau, data_dir, max_cells=MATLAB_MAX_CELLS):
 
 
 def _run_omsi(dff, true_spikes, fs):
-    """ Time OMSI inference and record per-cell CPU time.
-
-    Parameters
-    ----------
-    dff : np.ndarray
-        Traces, shape (n_cells, n_frames).
-    true_spikes : list of np.ndarray
-        Ground-truth spike times, used only as a correctness canary.
-    fs : float
-        Sampling rate in Hz.
-
-    Returns
-    -------
-    dict or None
-        Timing record, or None when the run fails.
-    """
 
     import OMSI
 
@@ -661,19 +399,6 @@ def _run_omsi(dff, true_spikes, fs):
 
 
 def _conditions(quick=False):
-    """ Build the list of workload conditions.
-
-    Parameters
-    ----------
-    quick : bool, optional
-        If True, return the small smoke-test workload.
-
-    Returns
-    -------
-    list of dict
-        Each entry has sweep, n_cells, duration, and matlab_ref -- the one
-        condition CaImAn MCMC runs on.
-    """
 
     if quick:
         cell_sweep, cell_dur = QUICK_CELL_SWEEP, QUICK_CELL_DURATION
@@ -689,8 +414,6 @@ def _conditions(quick=False):
                'matlab_ref': False}
               for d in dur_sweep]
 
-    # Lightest condition is the MATLAB reference: enough work to time
-    # meaningfully, little enough to finish this decade.
     ref = min(conds, key=lambda c: c['n_cells'] * c['duration'])
     ref['matlab_ref'] = True
 
@@ -699,21 +422,6 @@ def _conditions(quick=False):
 
 def run_benchmark(data_dir=_DEFAULT_DATA_DIR, quick=False, skip=(), ray_dir=None,
                   matlab_max_cells=MATLAB_MAX_CELLS):
-    """ Run every condition and save one JSON for this machine.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory for the output JSON and temporary CASCADE files.
-    quick : bool, optional
-        Run the smoke-test workload instead of the comparable one.
-    skip : iterable of str, optional
-        Method names to skip: omsi, oasis, cascade_cpu, cascade_gpu, matlab.
-    ray_dir : str, optional
-        Ray scratch directory passed through to _ensure_ray_dir.
-    matlab_max_cells : int, optional
-        Cells per condition given to CaImAn MCMC. 0 runs every cell.
-    """
 
     os.makedirs(data_dir, exist_ok=True)
     skip = set(s.lower() for s in skip)
@@ -775,8 +483,6 @@ def run_benchmark(data_dir=_DEFAULT_DATA_DIR, quick=False, skip=(), ray_dir=None
             row = dict(base)
             row['method'] = name
             row.update(rec)
-            # Cells actually processed, so throughput stays comparable when a
-            # method ran on a subset.
             row['cells_measured'] = int(rec.get('n_cells_run', n_cells))
             records.append(row)
 
@@ -810,18 +516,6 @@ def run_benchmark(data_dir=_DEFAULT_DATA_DIR, quick=False, skip=(), ray_dir=None
 
 
 def _load_runs(data_dir):
-    """ Read every machine JSON in a directory.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding hardware_*.json files.
-
-    Returns
-    -------
-    list of dict
-        Parsed runs, sorted by hostname.
-    """
 
     runs = []
     for path in sorted(glob.glob(os.path.join(data_dir, 'hardware_*.json'))):
@@ -836,31 +530,12 @@ def _load_runs(data_dir):
 
 
 def _throughput(record):
-    """ Cell-seconds of recording processed per wall second.
-
-    Parameters
-    ----------
-    record : dict
-        One benchmark record.
-
-    Returns
-    -------
-    float
-        Throughput, using the cells actually processed by that method.
-    """
 
     cells = record.get('cells_measured', record['n_cells'])
     return cells * record['duration'] / max(record['wall_s'], 1e-9)
 
 
 def report(data_dir=_DEFAULT_DATA_DIR):
-    """ Print the specs table and the timing table across machines.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding hardware_*.json files.
-    """
 
     runs = _load_runs(data_dir)
     if not runs:
@@ -885,7 +560,6 @@ def report(data_dir=_DEFAULT_DATA_DIR):
         if run['config'].get('quick'):
             print('  {:14s} QUICK workload -- not comparable with full runs.'.format(''))
 
-    # One column per machine, one row per method and condition.
     hosts = [r['machine']['hostname'] for r in runs]
     print('\nWALL-CLOCK SECONDS' + (' (n = cells run, when a subset)' if any(
         rec.get('cells_measured', rec['n_cells']) != rec['n_cells']
@@ -947,17 +621,6 @@ def report(data_dir=_DEFAULT_DATA_DIR):
 
 
 def plot_figure(data_dir=_DEFAULT_DATA_DIR):
-    """ Draw one grouped bar chart of time per method per machine.
-
-    Uses the shared condition covering the most methods, so CaImAn MCMC (which
-    runs on one reference condition only) still appears. Ties go to the
-    heaviest workload.
-
-    Parameters
-    ----------
-    data_dir : str
-        Directory holding hardware_*.json files.
-    """
 
     runs = _load_runs(data_dir)
     if not runs:
@@ -973,7 +636,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         return
 
     def _n_methods(cond):
-        """Number of distinct methods recorded for a condition, any machine."""
         return len({r['method'] for run in runs for r in run['records']
                     if (r['n_cells'], r['duration']) == cond})
 
@@ -1004,8 +666,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
         bars = ax.bar(offs, vals, width=width * 0.92,
                       color=METHOD_COLORS.get(method, '#888888'), label=method)
 
-        # Mark bars measured on a subset of cells, which are not directly
-        # comparable in absolute time.
         for bar, note in zip(bars, notes):
             if note and np.isfinite(bar.get_height()):
                 ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(),
@@ -1018,8 +678,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
     ax.set_title('{} cells, {:.0f} s at {:.0f} Hz'.format(n_cells, duration, FS),
                  fontsize=7, pad=16)
 
-    # Keep the fastest method off the axis floor, where a log scale would
-    # otherwise render it as no bar at all.
     finite = [r['wall_s'] for run in runs for r in run['records']
               if (r['n_cells'], r['duration']) == (n_cells, duration)
               and np.isfinite(r['wall_s']) and r['wall_s'] > 0]
@@ -1044,7 +702,6 @@ def plot_figure(data_dir=_DEFAULT_DATA_DIR):
 
 
 def main():
-    """ Parse CLI arguments and dispatch. """
 
     parser = argparse.ArgumentParser(
         description='Cross-machine timing benchmark for OMSI, OASIS, and CASCADE.'

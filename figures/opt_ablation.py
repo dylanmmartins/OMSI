@@ -2,47 +2,6 @@
 """
 figures/opt_ablation.py
 
-Ablation of OMSI's optimizations (i)-(x): each is removed one at a time on a
-single shared population of simulated cells, and its contribution to speed
-and accuracy is reported in one table, alongside CaImAn MCMC as a reference.
-
-The population is 100 cells simulated exactly as figure 1's cells are (same
-generator, SNR range, amplitude variability, drift, and tau variability).
-Every condition runs in its own subprocess so environment settings (e.g.
-disabling Numba) and Ray state cannot leak between conditions; each finished
-condition is saved to its own file and skipped on re-runs.
-
-Only optimizations that can be removed through exposed parameters, or from
-outside OMSI (Ray CPU count, Numba's own disable switch), are ablated. The
-rest are listed in the table with the reason they were not ablated.
-
-Functions
----------
-_make_population
-    Simulate (or load) the shared population of cells.
-_warm_up
-    Run OMSI once on a short trace so Numba compilation is not timed.
-_limit_ray_cpus
-    Make OMSI's ray.init use a fixed number of CPUs.
-_run_condition
-    Run one ablation condition and save its per-cell outputs.
-_scores
-    Per-cell F-beta and CosMIC for a set of predicted spike trains.
-_load_results
-    Load saved conditions and score them against ground truth.
-_summarize
-    Build the ablation table from saved condition results.
-_print_table
-    Print the table and save it as markdown and CSV.
-_plot_figure
-    Plot per-cell cost and accuracy changes for each condition.
-
-To run all conditions, then make the table and figure (use an otherwise idle
-machine; timings are the point):
-    $ python opt_ablation.py --mode run
-To rebuild the table and figure from saved results:
-    $ python opt_ablation.py --mode table
-
 DMM, September 2026
 """
 
@@ -64,31 +23,27 @@ mpl.rcParams['ps.fonttype']  = 42
 mpl.rcParams['svg.fonttype'] = 'none'
 mpl.rcParams['font.size']    = 7
 
-# Figure 1 colors: OMSI blue, CaImAn orange.
-_OMSI_COLOR   = '#4C72B0'
-_CAIMAN_COLOR = '#DD8452'
+_OMSI_COLOR = '#4C72B0'
 
-# Short row labels for the figure (the table uses the full labels).
 _SHORT_LABELS = {
     'i':      '(i) no local support window',
     'ii':     '(ii) add/remove moves T/100',
     'iii':    '(iii) FOOPSI initialization',
     'iv':     '(iv) fixed 750 sweeps',
+    'v':      '(v) O(T*K) reconstruction',
+    'vi':     '(vi) no kernel-energy cache',
     'vii':    '(vii) no SNR screen',
     'x_par':  '(x) no parallelism',
     'x_jit':  '(x) no Numba',
-    'caiman': 'CaImAn MCMC',
 }
+
+CODE_LEVEL = ['v', 'vi']
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'opt_ablation')
 _POP_SEED = 20260926
 
-# Figure 1's OMSI parameters; each ablation changes exactly one thing.
 _BASE_PARAMS = {'p': 2, 'Nsamples': 200, 'B': 75, 'marg': 0, 'upd_gam': 1}
 
-# key: (label, parameter overrides, extra settings)
-#   extra: 'ray_cpus' -> limit Ray to this many CPUs; 'env' -> environment
-#   variables for the subprocess; 'matlab' -> run CaImAn MCMC instead of OMSI.
 CONDITIONS = {
     'full':  ('OMSI (all optimizations)', {}, {}),
     'i':     ('(i) no local support window (full-length kernel, prec=0)',
@@ -99,6 +54,10 @@ CONDITIONS = {
               {'init_method': 'foopsi'}, {}),
     'iv':    ('(iv) fixed 250 burn-in + 500 samples instead of adaptive stopping',
               {'auto_stop': False, 'B': 250, 'Nsamples': 500}, {}),
+    'v':     ('(v) per-spike O(T*K) calcium reconstruction instead of O(T) accumulators',
+              {'ablate_accumulator': True}, {}),
+    'vi':    ('(vi) kernel energy recomputed on every proposal instead of cached',
+              {'ablate_energy_cache': True}, {}),
     'vii':   ('(vii) no SNR screen',
               {'skip_snr': True}, {}),
     'x_par': ('(x) no parallelism (Ray limited to 1 CPU)',
@@ -110,9 +69,6 @@ CONDITIONS = {
 }
 
 NOT_ABLATED = [
-    ('(v) O(T) calcium reconstruction via accumulators',
-     'no naive O(T*K) implementation exists to switch to; needs source changes'),
-    ('(vi) cached kernel energy', 'built into the compiled proposal code; needs source changes'),
     ('(viii) AR(1) kernel and lambda re-estimation for fast indicators',
      'only triggers for fast indicators at high frame rates; inactive at tau=1.2 s, 30 Hz'),
     ('(ix) fixed time constants for tau < 0.6 s', 'inactive at tau=1.2 s'),
@@ -121,21 +77,6 @@ NOT_ABLATED = [
 
 
 def _make_population(data_dir, n_cells):
-    """ Simulate (or load) the shared population of cells.
-
-    Parameters
-    ----------
-    data_dir : str
-        Output directory; the population is cached as population.npz.
-    n_cells : int
-        Number of cells.
-
-    Returns
-    -------
-    dict
-        noisy (n_cells, n_frames), true_spikes (object array), fs, tau,
-        sim_snr, sim_tau.
-    """
     path = os.path.join(data_dir, 'population.npz')
     if os.path.exists(path):
         with np.load(path, allow_pickle=True) as d:
@@ -149,11 +90,12 @@ def _make_population(data_dir, n_cells):
     from simulation_helpers import generate_synthetic_data
 
     np.random.seed(_POP_SEED)
-    sim_snr = np.exp(np.random.uniform(np.log(f1.SNR_RANGE[0]), np.log(f1.SNR_RANGE[1]), n_cells))
+    sim_snr = f1.draw_sim_snr(n_cells)
     noisy, true_spikes, _, _, _, _, prm = generate_synthetic_data(
-        n_cells=n_cells, fs=f1.FS, duration=f1.DURATION, tau=f1.TAU, snr=sim_snr,
+        n_cells=n_cells, fs=f1.FS, duration=f1.DURATION, tau=f1.TAU, measured_snr=sim_snr,
         amp_cv=f1.AMP_CV, tau_cv=f1.TAU_CV, drift_sd=f1.DRIFT_SD,
         drift_timescale=f1.DRIFT_TIMESCALE, return_params=True)
+    sim_snr = prm['measured_snr']
     ts = np.empty(n_cells, dtype=object)
     for i, s in enumerate(true_spikes):
         ts[i] = np.asarray(s, dtype=float)
@@ -167,7 +109,6 @@ def _make_population(data_dir, n_cells):
 
 
 def _warm_up(fs):
-    """ Run OMSI once on a short trace so Numba compilation is not timed. """
     import OMSI
     from simulation_helpers import generate_synthetic_data
     state = np.random.get_state()
@@ -177,7 +118,6 @@ def _warm_up(fs):
 
 
 def _limit_ray_cpus(n_cpus):
-    """ Make OMSI's ray.init use a fixed number of CPUs (no change to OMSI's source). """
     import ray
     orig_init = ray.init
 
@@ -189,17 +129,6 @@ def _limit_ray_cpus(n_cpus):
 
 
 def _run_condition(key, data_dir, n_cells):
-    """ Run one ablation condition and save its per-cell outputs.
-
-    Parameters
-    ----------
-    key : str
-        Key into CONDITIONS.
-    data_dir : str
-        Directory with population.npz; results go to cond_<key>.npz.
-    n_cells : int
-        Number of cells in the population.
-    """
     label, overrides, extra = CONDITIONS[key]
     pop = _make_population(data_dir, n_cells)
     noisy, true_spikes = pop['noisy'], list(pop['true_spikes'])
@@ -216,7 +145,7 @@ def _run_condition(key, data_dir, n_cells):
         wall = time.time() - t0
         if np.all(np.asarray(sweeps) == 0):
             raise RuntimeError('MATLAB returned no result; nothing saved.')
-        n_sweeps = np.full(n_cells, 500)   # posterior samples kept (after 250 burn-in sweeps)
+        n_sweeps = np.full(n_cells, 500)
     else:
         import OMSI
         if extra.get('ray_cpus'):
@@ -231,7 +160,6 @@ def _run_condition(key, data_dir, n_cells):
         wall = time.time() - t0
         spikes = list(res['optim_spikes'])
         cell_times = np.asarray(res['optim_times_per_cell'], dtype=float)
-        # Posterior samples kept after burn-in; OMSI does not report its burn-in length.
         n_sweeps = np.asarray(res['optim_nsamples'])
 
     sp = np.empty(n_cells, dtype=object)
@@ -245,7 +173,6 @@ def _run_condition(key, data_dir, n_cells):
 
 
 def _scores(true_spikes, spikes, fs):
-    """ Per-cell F-beta (window matching, as in figure 1) and CosMIC. """
     import OMSI.helpers as helpers
     import figure1 as f1
     prec, rec, _ = helpers.compute_accuracy_window(true_spikes, spikes)
@@ -253,14 +180,6 @@ def _scores(true_spikes, spikes, fs):
 
 
 def _load_results(data_dir):
-    """ Load saved conditions and score them against ground truth.
-
-    Returns
-    -------
-    dict
-        Condition key -> saved arrays plus per-cell 'fb' and 'cos'.
-        Conditions without saved results are absent.
-    """
     with np.load(os.path.join(data_dir, 'population.npz'), allow_pickle=True) as d:
         true_spikes, fs = list(d['true_spikes']), float(d['fs'])
 
@@ -279,13 +198,6 @@ def _load_results(data_dir):
 
 
 def _summarize(data_dir):
-    """ Build the ablation table from saved condition results.
-
-    Returns
-    -------
-    list of dict
-        One row per condition (ablated or not).
-    """
     from stats_helpers import signed_rank, fmt_test
 
     results = _load_results(data_dir)
@@ -317,7 +229,6 @@ def _summarize(data_dir):
 
 
 def _print_table(rows, data_dir):
-    """ Print the table and save it as markdown and CSV. """
     cols = [('condition', 'Condition', '{}'), ('wall_s', 'Wall (s)', '{:.1f}'),
             ('wall_vs_full', 'Wall / full', '{:.2f}x'),
             ('cpu_s_per_cell', 'Median s/cell', '{:.2f}'),
@@ -349,84 +260,80 @@ def _print_table(rows, data_dir):
 
 
 def _plot_figure(data_dir):
-    """ Plot per-cell cost and accuracy changes for each condition.
-
-    A: per-cell time ratio (ablated / full OMSI) as a box, with the ratio of
-    total wall-clock times as a diamond; the two diverge for parallelism,
-    which leaves each cell's time unchanged but lengthens the whole run.
-    B, C: per-cell change in F-beta and CosMIC (ablated - full), with
-    Wilcoxon signed-rank significance. CaImAn is shown below a divider as a
-    reference, not an ablation.
-    """
+    from matplotlib.markers import MarkerStyle
     from stats_helpers import signed_rank, _stars
 
     results = _load_results(data_dir)
     ref = results['full']
-    keys = [k for k in CONDITIONS if k != 'full' and k in results]
+    keys = [k for k in CONDITIONS if k not in ('full', 'caiman') and k in results]
     if not keys:
         print('No ablation conditions saved yet; no figure made.')
         return
     y = np.arange(len(keys))[::-1].astype(float)
-    if 'caiman' in keys:
-        y[keys.index('caiman')] -= 0.6            # gap before the reference row
-    colors = [_CAIMAN_COLOR if k == 'caiman' else _OMSI_COLOR for k in keys]
+    no_violin = {'x_par'}
+    diamond = MarkerStyle('D', joinstyle='miter')
 
-    fig, axs = plt.subplots(1, 3, figsize=(7.0, 0.32 * len(keys) + 1.1), dpi=300,
+    fig, axs = plt.subplots(1, 3, figsize=(7.0, 0.3 * len(keys) + 1.0), dpi=300,
                             sharey=True, gridspec_kw={'width_ratios': [1.3, 1, 1]})
 
-    def _boxes(ax, data, yy):
-        for d, yi, c in zip(data, yy, colors):
-            d = np.asarray(d, float)
-            d = d[np.isfinite(d)]
-            if len(d) == 0:
-                continue
-            bp = ax.boxplot(d, positions=[yi], vert=False, widths=0.55, patch_artist=True,
-                            showfliers=False, whis=(5, 95))
-            for part in ('boxes',):
-                for b in bp[part]:
-                    b.set_facecolor(c); b.set_alpha(0.35); b.set_edgecolor(c)
-            for part in ('whiskers', 'caps', 'medians'):
-                for ln in bp[part]:
-                    ln.set_color(c); ln.set_linewidth(0.8)
+    def _violins(ax, data):
+        rows = [(np.asarray(d, float), yi) for d, yi, k in zip(data, y, keys)
+                if k not in no_violin]
+        rows = [(d[np.isfinite(d)], yi) for d, yi in rows]
+        rows = [(d, yi) for d, yi in rows if len(d) > 1]
+        if not rows:
+            return
+        parts = ax.violinplot([d for d, _ in rows], positions=[yi for _, yi in rows],
+                              vert=False, showmedians=True, widths=0.7)
+        for pc in parts['bodies']:
+            pc.set_facecolor(_OMSI_COLOR)
+            pc.set_edgecolor('none')
+            pc.set_alpha(0.75)
+        for name in ('cbars', 'cmins', 'cmaxes', 'cmedians'):
+            parts[name].set_color('k')
+            parts[name].set_linewidth(0.8)
 
-    # A: cost
     ax = axs[0]
-    ratios = [np.asarray(results[k]['cell_times'], float) /
-              np.asarray(ref['cell_times'], float) for k in keys]
-    _boxes(ax, ratios, y)
-    wall = [float(results[k]['wall']) / float(ref['wall']) for k in keys]
-    ax.scatter(wall, y, marker='D', s=12, color='k', zorder=3, label='total wall time')
-    ax.axvline(1.0, color='0.6', lw=0.6, ls='--')
-    ax.set_xscale('log')
-    ax.set_xlabel('time relative to full OMSI')
-    ax.set_title('A  cost of removing it', loc='left', fontsize=7)
-    ax.legend(loc='lower right', frameon=False, fontsize=6, handletextpad=0.2)
+    ratios = [np.log10(np.asarray(results[k]['cell_times'], float) /
+                       np.asarray(ref['cell_times'], float)) for k in keys]
+    _violins(ax, ratios)
+    wall = [np.log10(float(results[k]['wall']) / float(ref['wall'])) for k in keys]
+    ax.scatter(wall, y, marker=diamond, s=16, color='k', linewidths=0, zorder=3,
+               label='total wall time')
+    ax.axvline(0.0, color='0.6', lw=0.6, ls='--')
+    vals = np.concatenate([r[np.isfinite(r)] for r in ratios] + [np.array(wall)])
+    lo, hi = np.floor(vals.min() * 2) / 2, np.ceil(vals.max() * 2) / 2
+    ticks = [t for t in (0.1, 1, 10, 100, 1000) if lo - 0.1 <= np.log10(t) <= hi + 0.1]
+    minor = [np.log10(m * t) for t in (0.1, 1, 10, 100) for m in range(2, 10)
+             if lo - 0.1 <= np.log10(m * t) <= hi + 0.1]
+    ax.set_xticks(np.log10(ticks))
+    ax.set_xticklabels(['{:g}x'.format(t) for t in ticks])
+    ax.set_xticks(minor, minor=True)
+    ax.set_xlim(lo - 0.1, hi + 0.1)
+    ax.set_xlabel('fold slowdown vs full OMSI')
+    ax.legend(loc='upper right', frameon=False, fontsize=6, handletextpad=0.2)
 
-    # B, C: accuracy
-    for ax, key, title in [(axs[1], 'fb', r'B  $\Delta F_\beta$'),
-                           (axs[2], 'cos', r'C  $\Delta$CosMIC')]:
+    for ax, key, label in [(axs[1], 'fb', r'$\Delta F_\beta$ vs full OMSI'),
+                           (axs[2], 'cos', r'$\Delta$CosMIC vs full OMSI')]:
         diffs = [np.asarray(results[k][key], float) - np.asarray(ref[key], float) for k in keys]
-        _boxes(ax, diffs, y)
+        _violins(ax, diffs)
         ax.axvline(0.0, color='0.6', lw=0.6, ls='--')
-        lim = np.nanpercentile(np.abs(np.concatenate(diffs)), 97)
-        lim = max(lim, 0.02) * 1.25
+        shown = [d for d, k in zip(diffs, keys) if k not in no_violin]
+        lim = max(np.nanmax(np.abs(np.concatenate(shown))), 0.02) * 1.1
         ax.set_xlim(-lim, lim)
-        for d, yi, k in zip(diffs, y, keys):
+        for yi, k in zip(y, keys):
+            if k in no_violin:
+                continue
             stars = _stars(signed_rank(results[k][key], ref[key])['p'])
             if stars and stars != 'n.s.':
-                ax.text(lim * 0.97, yi, stars, ha='right', va='center', fontsize=6)
-        ax.set_xlabel('change vs full OMSI')
-        ax.set_title(title, loc='left', fontsize=7)
+                ax.text(lim * 0.98, yi, stars, ha='right', va='center', fontsize=6)
+        ax.set_xlabel(label)
 
     axs[0].set_yticks(y)
     axs[0].set_yticklabels([_SHORT_LABELS.get(k, k) for k in keys])
-    if 'caiman' in keys:
-        for ax in axs:
-            ax.axhline(y[keys.index('caiman')] + 0.8, color='0.8', lw=0.5)
     fig.tight_layout()
     for ext in ('png', 'svg'):
-        out = os.path.join(data_dir, 'opt_ablation.{}'.format(ext))
-        fig.savefig(out, bbox_inches='tight')
+        fig.savefig(os.path.join(data_dir, 'opt_ablation.{}'.format(ext)), bbox_inches='tight')
     plt.close(fig)
     print('Saved figure to {}.'.format(os.path.join(data_dir, 'opt_ablation.png')))
 
@@ -443,7 +350,11 @@ def main():
                         help='Conditions to run (default: all)')
     parser.add_argument('--no-matlab', action='store_true', help='Skip the CaImAn reference row')
     parser.add_argument('--force', action='store_true', help='Re-run conditions already saved')
-    parser.add_argument('--condition', help=argparse.SUPPRESS)   # used by worker mode
+    parser.add_argument('--code-level-only', action='store_true',
+                        help='Run only the code-level ablations (v) and (vi) (plus the full-OMSI '
+                             'baseline if it is not saved yet) and save their data; no table '
+                             'or figure')
+    parser.add_argument('--condition', help=argparse.SUPPRESS)
     args = parser.parse_args()
     os.makedirs(args.data_dir, exist_ok=True)
 
@@ -453,7 +364,12 @@ def main():
 
     if args.mode == 'run':
         _make_population(args.data_dir, args.n_cells)
-        keys = args.conditions or list(CONDITIONS)
+        if args.code_level_only:
+            keys = list(CODE_LEVEL)
+            if not os.path.exists(os.path.join(args.data_dir, 'cond_full.npz')):
+                keys = ['full'] + keys
+        else:
+            keys = args.conditions or list(CONDITIONS)
         if args.no_matlab:
             keys = [k for k in keys if k != 'caiman']
         for key in keys:
@@ -468,6 +384,9 @@ def main():
                    '--n-cells', str(args.n_cells)]
             if subprocess.run(cmd, env=env).returncode != 0:
                 print('  ERROR: condition {} failed; continuing with the others.'.format(key))
+        if args.code_level_only:
+            print('Saved code-level ablation data to {} (no table or figure).'.format(args.data_dir))
+            return
 
     _print_table(_summarize(args.data_dir), args.data_dir)
     _plot_figure(args.data_dir)

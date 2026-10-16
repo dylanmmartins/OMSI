@@ -4,14 +4,6 @@ figures/simulation_helpers.py
 
 Helper functions for simulating populations of neurons.
 
-Functions
----------
-estimate_real_properties
-    Extract SNR, kurtosis, and firing rate statistics from real Suite2p data.
-generate_synthetic_data
-    Generate synthetic calcium traces and ground-truth spike trains.
-
-
 DMM, March 2026
 """
 
@@ -29,22 +21,6 @@ np.random.seed(3)
 
 
 def estimate_real_properties(suite2p_dir):
-    """ Extract SNR, kurtosis, and firing rate statistics from Suite2p data.
-
-    Parameters
-    ----------
-    suite2p_dir : str
-        Path to the Suite2p output directory.
-
-    Returns
-    -------
-    snrs : np.ndarray
-        Signal-to-noise ratios for each cell.
-    kurtosis : np.ndarray
-        Kurtosis values for each cell.
-    rates : np.ndarray
-        Estimated firing rates in Hz for each cell.
-    """
     F = np.load(os.path.join(suite2p_dir, 'F.npy'))
     Fneu = np.load(os.path.join(suite2p_dir, 'Fneu.npy'))
     iscell = np.load(os.path.join(suite2p_dir, 'iscell.npy'))
@@ -80,6 +56,15 @@ def estimate_real_properties(suite2p_dir):
 
 
 
+def _measured_snr(y):
+    y = np.asarray(y, dtype=np.float64)
+    y = y[np.isfinite(y)]
+    if len(y) < 2:
+        return 0.0
+    mad = np.median(np.abs(np.diff(y))) / 0.6745
+    return (np.percentile(y, 99) - np.percentile(y, 8)) / (mad + 1e-9)
+
+
 def generate_synthetic_data(
         n_cells=400,
         fs=30.0,
@@ -93,11 +78,11 @@ def generate_synthetic_data(
         tau_cv=0.0,
         drift_sd=0.0,
         drift_timescale=60.0,
+        measured_snr=None,
         return_params=False,
         bursty_frac=0.15,
         max_rate=4.0
     ):
-
     n_frames = int(fs * duration)
     t = np.arange(n_frames) / fs
 
@@ -162,7 +147,6 @@ def generate_synthetic_data(
         true_spike_times.append(np.where(spikes_high[i])[0] / fs_high)
 
     if amp_cv > 0:
-        # Lognormal with mean 1 and the requested CV; spike train entries become amplitudes.
         s2 = np.log(1.0 + amp_cv ** 2)
         amps = np.random.lognormal(mean=-s2 / 2.0, sigma=np.sqrt(s2), size=spikes_high.shape)
         spikes_high = spikes_high * amps
@@ -188,6 +172,7 @@ def generate_synthetic_data(
     target_kurtosis = np.clip(target_kurtosis, min_k, max_k)
 
     actual_snrs = []
+    unit_noise = np.zeros_like(noisy_traces) if measured_snr is not None else None
 
     for i in range(n_cells):
         trace = clean_traces[i]
@@ -203,6 +188,12 @@ def generate_synthetic_data(
             sigma = 1.0
             noisy_traces[i] = np.random.normal(0, sigma, size=len(trace))
             actual_snrs.append(0.0)
+            continue
+
+        if measured_snr is not None:
+            unit_noise[i] = np.random.normal(0, 1, size=len(trace))
+            noisy_traces[i] = trace
+            actual_snrs.append(np.nan)
             continue
 
         if snr is not None:
@@ -232,8 +223,6 @@ def generate_synthetic_data(
 
     drift_real = np.zeros(n_cells)
     if drift_sd > 0:
-        # Slow baseline drift: smoothed white noise scaled to drift_sd single-spike
-        # peaks. Added after the noise level was set from the spike-only trace.
         for i in range(n_cells):
             d = gaussian_filter1d(np.random.normal(size=n_frames), drift_timescale * fs,
                                   mode='reflect')
@@ -242,9 +231,34 @@ def generate_synthetic_data(
             noisy_traces[i] += d
             drift_real[i] = d.std()
 
+    if measured_snr is not None:
+        targets = np.array(np.broadcast_to(np.asarray(measured_snr, dtype=float), (n_cells,)))
+        ceiling = np.array([
+            _measured_snr(noisy_traces[i] + max(float(np.ptp(clean_traces[i])), 1e-9) * 1e-5 * unit_noise[i])
+            for i in range(n_cells)])
+        for i in np.argsort(-targets):
+            if targets[i] <= 0.99 * ceiling[i]:
+                continue
+            ok = np.where((ceiling >= targets[i] / 0.99) & (targets <= 0.99 * ceiling[i]))[0]
+            if len(ok):
+                j = ok[np.argmin(np.abs(np.log(targets[ok] / targets[i])))]
+                targets[i], targets[j] = targets[j], targets[i]
+        for i in range(n_cells):
+            base = noisy_traces[i].copy()
+            scale = max(float(np.ptp(clean_traces[i])), 1e-9)
+            lo, hi = np.log(scale * 1e-5), np.log(scale * 1e3)
+            for _ in range(50):
+                mid = 0.5 * (lo + hi)
+                if _measured_snr(base + np.exp(mid) * unit_noise[i]) > targets[i]:
+                    lo = mid
+                else:
+                    hi = mid
+            noisy_traces[i] = base + np.exp(0.5 * (lo + hi)) * unit_noise[i]
+
     gen_kurtosis = OMSI.compute_kurtosis(noisy_traces)
 
     if return_params:
         return (noisy_traces, true_spike_times, clean_traces, t, firing_rates, gen_kurtosis,
-                {'tau': cell_tau, 'drift_sd': drift_real})
+                {'tau': cell_tau, 'drift_sd': drift_real,
+                 'measured_snr': np.array([_measured_snr(y) for y in noisy_traces])})
     return noisy_traces, true_spike_times, clean_traces, t, firing_rates, gen_kurtosis
